@@ -1,0 +1,82 @@
+# -*- coding: utf-8 -*-
+"""
+전역 설정값 관리
+AGENT.MD 지침 5번: 모든 설정값은 전역으로 정의하고, 메인 함수 최상단에 배치
+"""
+
+# 데이터베이스 설정
+DATABASE_PATH = "../data/apps.db"
+
+# 앱스토어 국가 코드 목록
+# Google Play와 App Store에서 지원하는 주요 국가
+COUNTRIES = [
+    # 아시아
+    {"code": "kr", "name": "대한민국"},
+    {"code": "jp", "name": "일본"},
+    {"code": "cn", "name": "중국"},
+    {"code": "tw", "name": "대만"},
+    {"code": "hk", "name": "홍콩"},
+    {"code": "sg", "name": "싱가포르"},
+    {"code": "in", "name": "인도"},
+    {"code": "id", "name": "인도네시아"},
+    {"code": "th", "name": "태국"},
+    {"code": "vn", "name": "베트남"},
+    {"code": "ph", "name": "필리핀"},
+    {"code": "my", "name": "말레이시아"},
+
+    # 북미
+    {"code": "us", "name": "미국"},
+    {"code": "ca", "name": "캐나다"},
+    {"code": "mx", "name": "멕시코"},
+
+    # 유럽
+    {"code": "gb", "name": "영국"},
+    {"code": "de", "name": "독일"},
+    {"code": "fr", "name": "프랑스"},
+    {"code": "it", "name": "이탈리아"},
+    {"code": "es", "name": "스페인"},
+    {"code": "nl", "name": "네덜란드"},
+    {"code": "se", "name": "스웨덴"},
+    {"code": "no", "name": "노르웨이"},
+    {"code": "dk", "name": "덴마크"},
+    {"code": "fi", "name": "핀란드"},
+    {"code": "pl", "name": "폴란드"},
+    {"code": "ru", "name": "러시아"},
+
+    # 오세아니아
+    {"code": "au", "name": "호주"},
+    {"code": "nz", "name": "뉴질랜드"},
+
+    # 남미
+    {"code": "br", "name": "브라질"},
+    {"code": "ar", "name": "아르헨티나"},
+    {"code": "cl", "name": "칠레"},
+
+    # 중동/아프리카
+    {"code": "ae", "name": "아랍에미리트"},
+    {"code": "sa", "name": "사우디아라비아"},
+    {"code": "za", "name": "남아프리카공화국"},
+    {"code": "eg", "name": "이집트"},
+]
+
+# 크롤링 설정
+FETCH_LIMIT_PER_COUNTRY = 100  # 국가별 가져올 최대 앱 개수
+COLLECTION_CATEGORIES = [
+    "NEW_FREE",      # 신규 무료 앱
+    "NEW_PAID",      # 신규 유료 앱
+]
+
+# 주목할만한 앱 선별 기준 (점수 기반)
+SCORE_WEIGHTS = {
+    "rating": 0.3,           # 평점 (30%)
+    "rating_count": 0.2,     # 리뷰 수 (20%)
+    "installs": 0.2,         # 설치 수 (20%)
+    "freshness": 0.2,        # 최신성 (20%)
+    "growth_rate": 0.1,      # 성장률 (10%)
+}
+
+MINIMUM_RATING = 4.0         # 최소 평점
+MINIMUM_RATING_COUNT = 10    # 최소 리뷰 수
+
+# 로그 형식
+LOG_FORMAT = "[{timestamp}] {step}: {message} (소요시간: {duration}초)"
