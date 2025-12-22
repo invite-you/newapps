@@ -84,11 +84,11 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
                             'version': app_details.get('version'),
                             'url': app_details.get('url'),
                         })
-                    except Exception as e:
+                    except (ValueError, KeyError, TypeError) as e:
                         print(f"앱 상세 정보 수집 실패: {result.get('appId', 'unknown')} - {str(e)}")
                         continue
 
-            except Exception as e:
+            except (ValueError, KeyError, TypeError) as e:
                 print(f"검색 실패 [{query}]: {str(e)}")
                 continue
 

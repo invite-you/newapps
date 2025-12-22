@@ -61,54 +61,36 @@ app.get('/api/apps', (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const offset = (page - 1) * APPS_PER_PAGE;
 
-    let query = 'SELECT * FROM apps WHERE 1=1';
-    const params = [];
-
-    // 국가 필터
-    if (country !== 'all') {
-        query += ' AND country_code = ?';
-        params.push(country);
-    }
-
-    // 플랫폼 필터
-    if (platform !== 'all') {
-        query += ' AND platform = ?';
-        params.push(platform);
-    }
-
-    // 주목 앱 필터
-    if (featured) {
-        query += ' AND is_featured = 1';
-    }
-
-    // 정렬: 점수 높은 순, 최신순
-    query += ' ORDER BY score DESC, created_at DESC';
-
-    // 페이지네이션
-    query += ' LIMIT ? OFFSET ?';
-    params.push(APPS_PER_PAGE, offset);
-
-    // 전체 개수 조회
-    let countQuery = 'SELECT COUNT(*) as total FROM apps WHERE 1=1';
-    const countParams = [...params.slice(0, -2)]; // LIMIT, OFFSET 제외
+    // WHERE 조건 구성
+    let whereClause = 'WHERE 1=1';
+    const filterParams = [];
 
     if (country !== 'all') {
-        countQuery += ' AND country_code = ?';
-    }
-    if (platform !== 'all') {
-        countQuery += ' AND platform = ?';
-    }
-    if (featured) {
-        countQuery += ' AND is_featured = 1';
+        whereClause += ' AND country_code = ?';
+        filterParams.push(country);
     }
 
-    db.get(countQuery, countParams, (err, countRow) => {
+    if (platform !== 'all') {
+        whereClause += ' AND platform = ?';
+        filterParams.push(platform);
+    }
+
+    if (featured) {
+        whereClause += ' AND is_featured = 1';
+    }
+
+    // 쿼리 구성
+    const countQuery = `SELECT COUNT(*) as total FROM apps ${whereClause}`;
+    const dataQuery = `SELECT * FROM apps ${whereClause} ORDER BY score DESC, created_at DESC LIMIT ? OFFSET ?`;
+    const dataParams = [...filterParams, APPS_PER_PAGE, offset];
+
+    db.get(countQuery, filterParams, (err, countRow) => {
         if (err) {
             res.status(500).json({ error: err.message });
             return;
         }
 
-        db.all(query, params, (err, rows) => {
+        db.all(dataQuery, dataParams, (err, rows) => {
             if (err) {
                 res.status(500).json({ error: err.message });
                 return;
@@ -150,33 +132,47 @@ app.get('/api/apps/:id', (req, res) => {
  * API: 통계 정보 조회
  * GET /api/stats
  */
-app.get('/api/stats', (req, res) => {
-    const queries = {
-        total: 'SELECT COUNT(*) as count FROM apps',
-        featured: 'SELECT COUNT(*) as count FROM apps WHERE is_featured = 1',
-        byPlatform: 'SELECT platform, COUNT(*) as count FROM apps GROUP BY platform',
-        byCountry: 'SELECT country_code, COUNT(*) as count FROM apps GROUP BY country_code ORDER BY count DESC LIMIT 10'
-    };
+app.get('/api/stats', async (req, res) => {
+    try {
+        const queries = {
+            total: 'SELECT COUNT(*) as count FROM apps',
+            featured: 'SELECT COUNT(*) as count FROM apps WHERE is_featured = 1',
+            byPlatform: 'SELECT platform, COUNT(*) as count FROM apps GROUP BY platform',
+            byCountry: 'SELECT country_code, COUNT(*) as count FROM apps GROUP BY country_code ORDER BY count DESC LIMIT 10'
+        };
 
-    const stats = {};
-
-    db.get(queries.total, [], (err, row) => {
-        stats.total = row ? row.count : 0;
-
-        db.get(queries.featured, [], (err, row) => {
-            stats.featured = row ? row.count : 0;
-
-            db.all(queries.byPlatform, [], (err, rows) => {
-                stats.byPlatform = rows || [];
-
-                db.all(queries.byCountry, [], (err, rows) => {
-                    stats.byCountry = rows || [];
-
-                    res.json(stats);
-                });
+        // Promise 래퍼 함수
+        const dbGet = (query) => new Promise((resolve, reject) => {
+            db.get(query, [], (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
             });
         });
-    });
+
+        const dbAll = (query) => new Promise((resolve, reject) => {
+            db.all(query, [], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        // 병렬 실행
+        const [totalRow, featuredRow, byPlatformRows, byCountryRows] = await Promise.all([
+            dbGet(queries.total),
+            dbGet(queries.featured),
+            dbAll(queries.byPlatform),
+            dbAll(queries.byCountry)
+        ]);
+
+        res.json({
+            total: totalRow ? totalRow.count : 0,
+            featured: featuredRow ? featuredRow.count : 0,
+            byPlatform: byPlatformRows || [],
+            byCountry: byCountryRows || []
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // 서버 시작

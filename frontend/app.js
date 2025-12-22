@@ -73,6 +73,9 @@ document.addEventListener('DOMContentLoaded', () => {
 async function loadStats() {
     try {
         const response = await fetch(`${API_BASE_URL}/stats`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
         const stats = await response.json();
 
         document.getElementById('totalApps').textContent = stats.total.toLocaleString();
@@ -80,6 +83,10 @@ async function loadStats() {
         document.getElementById('countryCount').textContent = stats.byCountry.length;
     } catch (error) {
         console.error('통계 로드 실패:', error);
+        // 사용자에게 에러 표시
+        document.getElementById('totalApps').textContent = '오류';
+        document.getElementById('featuredApps').textContent = '오류';
+        document.getElementById('countryCount').textContent = '오류';
     }
 }
 
@@ -89,6 +96,9 @@ async function loadStats() {
 async function loadCountries() {
     try {
         const response = await fetch(`${API_BASE_URL}/countries`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
         const data = await response.json();
 
         const countryFilter = document.getElementById('countryFilter');
@@ -101,6 +111,7 @@ async function loadCountries() {
         });
     } catch (error) {
         console.error('국가 목록 로드 실패:', error);
+        alert('국가 목록을 불러오는데 실패했습니다. 페이지를 새로고침해주세요.');
     }
 }
 
@@ -126,7 +137,13 @@ async function loadApps(page = 1) {
         });
 
         const response = await fetch(`${API_BASE_URL}/apps?${params}`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
         const data = await response.json();
+
+        // currentPage 업데이트
+        currentPage = page;
 
         loading.style.display = 'none';
 
@@ -148,6 +165,7 @@ async function loadApps(page = 1) {
         console.error('앱 목록 로드 실패:', error);
         loading.style.display = 'none';
         noResults.style.display = 'block';
+        noResults.textContent = '앱 목록을 불러오는데 실패했습니다. 다시 시도해주세요.';
     }
 }
 

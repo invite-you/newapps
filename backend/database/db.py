@@ -26,8 +26,9 @@ def log_step(step, message, start_time=None):
 def get_connection():
     """데이터베이스 연결 반환"""
     db_dir = os.path.dirname(DATABASE_PATH)
-    if not os.path.exists(db_dir):
-        os.makedirs(db_dir)
+    # 디렉토리가 비어있지 않고 존재하지 않으면 생성
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
 
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row  # 딕셔너리 형태로 결과 반환

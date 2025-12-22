@@ -3,9 +3,10 @@
 전역 설정값 관리
 AGENT.MD 지침 5번: 모든 설정값은 전역으로 정의하고, 메인 함수 최상단에 배치
 """
+import os
 
-# 데이터베이스 설정
-DATABASE_PATH = "../data/apps.db"
+# 데이터베이스 설정 (절대경로 사용)
+DATABASE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "apps.db")
 
 # 앱스토어 국가 코드 목록
 # Google Play와 App Store에서 지원하는 주요 국가
@@ -77,6 +78,7 @@ SCORE_WEIGHTS = {
 
 MINIMUM_RATING = 4.0         # 최소 평점
 MINIMUM_RATING_COUNT = 10    # 최소 리뷰 수
+MINIMUM_SCORE = 60           # 최소 종합 점수 (주목 앱 선별)
 
 # 로그 형식
 LOG_FORMAT = "[{timestamp}] {step}: {message} (소요시간: {duration}초)"
@@ -84,8 +86,6 @@ LOG_FORMAT = "[{timestamp}] {step}: {message} (소요시간: {duration}초)"
 # 프록시 설정 (환경변수 또는 직접 설정)
 # 예: "http://proxy.example.com:8080" 또는 None
 # 환경변수 HTTP_PROXY, HTTPS_PROXY가 설정되어 있으면 우선 사용
-import os
-
 HTTP_PROXY = os.environ.get('HTTP_PROXY', None)
 HTTPS_PROXY = os.environ.get('HTTPS_PROXY', None)
 

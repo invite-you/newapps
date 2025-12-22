@@ -5,12 +5,16 @@ Apple App Store 신규 앱 스크래퍼
 import sys
 import os
 from datetime import datetime
-from app_store_scraper import AppStore
 import requests
+from app_store_scraper import AppStore
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import COUNTRIES, FETCH_LIMIT_PER_COUNTRY, LOG_FORMAT, get_proxies
 from database.db import get_connection, log_step
+
+# 현재 연도 자동 계산
+CURRENT_YEAR = datetime.now().year
+SEARCH_TERMS = ["new", str(CURRENT_YEAR), str(CURRENT_YEAR - 1)]
 
 
 def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
@@ -32,16 +36,14 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
     try:
         # iTunes Search API를 사용하여 신규 앱 검색
         # term을 다양하게 하여 최신 앱 수집
-        search_terms = ["new", "2024", "2025"]
-
-        for term in search_terms:
+        for term in SEARCH_TERMS:
             try:
                 url = f"https://itunes.apple.com/search"
                 params = {
                     'term': term,
                     'country': country_code.upper(),
                     'entity': 'software',
-                    'limit': limit // len(search_terms),
+                    'limit': limit // len(SEARCH_TERMS),
                     'sort': 'recent'
                 }
 
@@ -79,7 +81,7 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
                         'url': result.get('trackViewUrl'),
                     })
 
-            except Exception as e:
+            except (requests.RequestException, ValueError, KeyError) as e:
                 print(f"검색 실패 [{term}]: {str(e)}")
                 continue
 

@@ -5,10 +5,16 @@
 """
 import sys
 import os
-from datetime import datetime, timedelta
+import math
+from datetime import datetime
+
+try:
+    from dateutil import parser as date_parser
+except ImportError:
+    date_parser = None
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import SCORE_WEIGHTS, MINIMUM_RATING, MINIMUM_RATING_COUNT, LOG_FORMAT
+from config import SCORE_WEIGHTS, MINIMUM_RATING, MINIMUM_RATING_COUNT, MINIMUM_SCORE, LOG_FORMAT
 from database.db import get_connection, log_step
 
 
@@ -37,7 +43,6 @@ def calculate_app_score(app):
     rating_count = app['rating_count'] or 0
     if rating_count > 0:
         # 로그 스케일 적용 (10,000개 리뷰 = 만점)
-        import math
         review_score = min(math.log10(rating_count + 1) / 4.0, 1.0)
         score += review_score * 20 * SCORE_WEIGHTS['rating_count'] / 0.2
 
@@ -48,20 +53,21 @@ def calculate_app_score(app):
             # "10,000+" 형식을 숫자로 변환
             installs_num = int(installs.replace('+', '').replace(',', ''))
             # 로그 스케일 적용 (1,000,000 설치 = 만점)
-            import math
             install_score = min(math.log10(installs_num + 1) / 6.0, 1.0)
             score += install_score * 20 * SCORE_WEIGHTS['installs'] / 0.2
-        except:
-            pass
+        except (ValueError, TypeError) as e:
+            print(f"설치 수 파싱 실패: {installs} - {str(e)}")
 
     # 4. 최신성 점수 (0-20점)
     # 최근 30일 이내 = 만점, 그 이후로는 감소
     try:
         updated_date = app['updated_date'] or app['release_date']
-        if updated_date:
+        if updated_date and date_parser:
             # 날짜 파싱 (다양한 형식 처리)
-            from dateutil import parser
-            update_dt = parser.parse(updated_date)
+            update_dt = date_parser.parse(updated_date)
+            # 타임존 처리 (naive datetime으로 통일)
+            if update_dt.tzinfo is not None:
+                update_dt = update_dt.replace(tzinfo=None)
             days_ago = (datetime.now() - update_dt).days
 
             if days_ago <= 30:
@@ -74,28 +80,29 @@ def calculate_app_score(app):
                 freshness_score = 0.1
 
             score += freshness_score * 20 * SCORE_WEIGHTS['freshness'] / 0.2
-    except:
-        pass
+    except (ValueError, TypeError, AttributeError) as e:
+        print(f"날짜 파싱 실패: {updated_date} - {str(e)}")
 
     # 5. 성장률 점수 (0-10점)
     # 리뷰 수 대비 앱의 나이로 계산
     try:
         if rating_count and rating_count > 0:
             release_date = app['release_date']
-            if release_date:
-                from dateutil import parser
-                release_dt = parser.parse(release_date)
+            if release_date and date_parser:
+                release_dt = date_parser.parse(release_date)
+                # 타임존 처리 (naive datetime으로 통일)
+                if release_dt.tzinfo is not None:
+                    release_dt = release_dt.replace(tzinfo=None)
                 days_since_release = (datetime.now() - release_dt).days
 
                 if days_since_release > 0:
                     # 하루 평균 리뷰 수
                     reviews_per_day = rating_count / days_since_release
                     # 하루 10개 이상 리뷰 = 만점
-                    import math
                     growth_score = min(math.log10(reviews_per_day * 10 + 1) / 2.0, 1.0)
                     score += growth_score * 10 * SCORE_WEIGHTS['growth_rate'] / 0.1
-    except:
-        pass
+    except (ValueError, TypeError, AttributeError, ZeroDivisionError) as e:
+        print(f"성장률 계산 실패: {str(e)}")
 
     return round(score, 2)
 
@@ -123,7 +130,7 @@ def analyze_and_update_scores():
         is_featured = 0
         if (app['rating'] and app['rating'] >= MINIMUM_RATING and
             app['rating_count'] and app['rating_count'] >= MINIMUM_RATING_COUNT and
-            score >= 60):  # 60점 이상
+            score >= MINIMUM_SCORE):
             is_featured = 1
             featured_count += 1
 
@@ -144,11 +151,10 @@ def analyze_and_update_scores():
 
 
 if __name__ == "__main__":
-    # python-dateutil 패키지 필요
-    try:
-        from dateutil import parser
-    except ImportError:
-        print("python-dateutil 패키지를 설치해주세요: pip install python-dateutil")
-        sys.exit(1)
+    # python-dateutil 패키지 확인
+    if date_parser is None:
+        print("경고: python-dateutil 패키지가 설치되지 않았습니다.")
+        print("날짜 기반 점수 계산이 제한됩니다.")
+        print("설치 명령: pip install python-dateutil")
 
     analyze_and_update_scores()
