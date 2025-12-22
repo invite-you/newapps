@@ -80,3 +80,21 @@ MINIMUM_RATING_COUNT = 10    # 최소 리뷰 수
 
 # 로그 형식
 LOG_FORMAT = "[{timestamp}] {step}: {message} (소요시간: {duration}초)"
+
+# 프록시 설정 (환경변수 또는 직접 설정)
+# 예: "http://proxy.example.com:8080" 또는 None
+# 환경변수 HTTP_PROXY, HTTPS_PROXY가 설정되어 있으면 우선 사용
+import os
+
+HTTP_PROXY = os.environ.get('HTTP_PROXY', None)
+HTTPS_PROXY = os.environ.get('HTTPS_PROXY', None)
+
+# 프록시 딕셔너리 생성 (requests 라이브러리 형식)
+def get_proxies():
+    """프록시 설정 반환 (설정되지 않으면 None)"""
+    proxies = {}
+    if HTTP_PROXY:
+        proxies['http'] = HTTP_PROXY
+    if HTTPS_PROXY:
+        proxies['https'] = HTTPS_PROXY
+    return proxies if proxies else None

@@ -8,8 +8,22 @@ from datetime import datetime
 from google_play_scraper import search, app
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import COUNTRIES, FETCH_LIMIT_PER_COUNTRY, LOG_FORMAT
+from config import COUNTRIES, FETCH_LIMIT_PER_COUNTRY, LOG_FORMAT, get_proxies
 from database.db import get_connection, log_step
+
+# 프록시 설정이 있으면 google-play-scraper가 사용하는 requests 세션에 적용
+proxies = get_proxies()
+if proxies:
+    import requests
+    original_request = requests.Session.request
+
+    def patched_request(self, method, url, **kwargs):
+        """프록시를 자동으로 추가하는 패치된 request 메서드"""
+        if 'proxies' not in kwargs:
+            kwargs['proxies'] = proxies
+        return original_request(self, method, url, **kwargs)
+
+    requests.Session.request = patched_request
 
 
 def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):

@@ -121,6 +121,8 @@ npm start
 
 ## 🔧 설정 변경
 
+### 기본 설정
+
 `backend/config.py` 파일에서 다양한 설정을 변경할 수 있습니다:
 
 ```python
@@ -140,6 +142,51 @@ SCORE_WEIGHTS = {
 MINIMUM_RATING = 4.0
 MINIMUM_RATING_COUNT = 10
 ```
+
+### 프록시 설정
+
+프록시 서버를 통해 통신이 필요한 경우 환경변수로 설정할 수 있습니다:
+
+**Linux/Mac:**
+```bash
+# HTTP 프록시
+export HTTP_PROXY="http://proxy.example.com:8080"
+
+# HTTPS 프록시
+export HTTPS_PROXY="https://proxy.example.com:8080"
+
+# 인증이 필요한 프록시
+export HTTP_PROXY="http://username:password@proxy.example.com:8080"
+
+# 데이터 수집 실행
+python backend/main.py
+```
+
+**Windows (PowerShell):**
+```powershell
+# 환경변수 설정
+$env:HTTP_PROXY="http://proxy.example.com:8080"
+$env:HTTPS_PROXY="https://proxy.example.com:8080"
+
+# 데이터 수집 실행
+python backend/main.py
+```
+
+**Windows (CMD):**
+```cmd
+set HTTP_PROXY=http://proxy.example.com:8080
+set HTTPS_PROXY=https://proxy.example.com:8080
+python backend/main.py
+```
+
+**프록시 미설정 시:**
+- 환경변수가 설정되지 않으면 자동으로 일반 통신 사용
+- 프록시 없이 직접 인터넷 연결로 동작
+
+**적용 범위:**
+- Google Play Store 데이터 수집
+- App Store 데이터 수집
+- 모든 HTTP/HTTPS 요청
 
 ## 📡 API 엔드포인트
 

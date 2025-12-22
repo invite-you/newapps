@@ -9,7 +9,7 @@ from app_store_scraper import AppStore
 import requests
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import COUNTRIES, FETCH_LIMIT_PER_COUNTRY, LOG_FORMAT
+from config import COUNTRIES, FETCH_LIMIT_PER_COUNTRY, LOG_FORMAT, get_proxies
 from database.db import get_connection, log_step
 
 
@@ -45,7 +45,9 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
                     'sort': 'recent'
                 }
 
-                response = requests.get(url, params=params, timeout=10)
+                # 프록시 설정 적용 (설정되지 않으면 None이므로 일반 통신)
+                proxies = get_proxies()
+                response = requests.get(url, params=params, timeout=10, proxies=proxies)
                 if response.status_code != 200:
                     print(f"API 요청 실패 [{country_code}]: {response.status_code}")
                     continue

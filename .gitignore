@@ -31,3 +31,6 @@ Thumbs.db
 
 # 로그
 *.log
+
+# 환경변수
+.env
