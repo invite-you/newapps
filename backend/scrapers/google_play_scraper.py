@@ -1,106 +1,213 @@
 # -*- coding: utf-8 -*-
 """
-Google Play Store 신규 앱 스크래퍼
+Google Play Store 스크래퍼
+- 다양한 검색어로 최대한 많은 앱 수집
+- app() 함수로 모든 상세 정보 수집
+- 최근 업데이트 앱 우선 수집
 """
 import sys
 import os
+import json
+import time
 from datetime import datetime
-from google_play_scraper import search, app
+from google_play_scraper import search, app, Sort
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import COUNTRIES, FETCH_LIMIT_PER_COUNTRY, LOG_FORMAT, get_proxies
+from config import (
+    COUNTRIES, FETCH_LIMIT_PER_COUNTRY, GOOGLE_PLAY_SEARCH_QUERIES,
+    LOG_FORMAT, REQUEST_DELAY, SSL_VERIFY, get_proxies
+)
 from database.db import get_connection, log_step
 
-# 프록시 설정이 있으면 google-play-scraper가 사용하는 requests 세션에 적용
+# 프록시 설정이 있으면 requests 세션에 적용
 proxies = get_proxies()
 if proxies:
     import requests
     original_request = requests.Session.request
 
     def patched_request(self, method, url, **kwargs):
-        """프록시를 자동으로 추가하는 패치된 request 메서드"""
+        """프록시 및 SSL 설정을 자동으로 추가하는 패치된 request 메서드"""
         if 'proxies' not in kwargs:
             kwargs['proxies'] = proxies
+        if 'verify' not in kwargs:
+            kwargs['verify'] = SSL_VERIFY
         return original_request(self, method, url, **kwargs)
 
     requests.Session.request = patched_request
 
 
-def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
+def search_apps(query, country_code, lang='en', n_hits=30):
     """
-    특정 국가의 Google Play Store에서 신규 앱 수집
+    검색어로 앱 검색
 
     Args:
-        country_code: 국가 코드 (예: 'kr', 'us')
-        limit: 수집할 최대 앱 개수
+        query: 검색어
+        country_code: 국가 코드
+        lang: 언어 코드
+        n_hits: 결과 개수 (최대 30)
 
     Returns:
-        수집된 앱 개수
+        앱 ID 목록
     """
-    start_time = datetime.now()
-    log_step(f"Google Play 수집 [{country_code}]", "시작", start_time)
-
-    apps_data = []
-
     try:
-        # 신규 앱 검색 (최근 출시된 앱들)
-        # google-play-scraper는 collection API가 제한적이므로
-        # 카테고리별로 검색하여 최신 앱 수집
-        search_queries = ["new apps", "최신 앱", "new release"]
-
-        for query in search_queries:
-            try:
-                results = search(
-                    query,
-                    lang="en",
-                    country=country_code,
-                    n_hits=limit // len(search_queries)
-                )
-
-                for result in results[:limit // len(search_queries)]:
-                    try:
-                        # 상세 정보 가져오기
-                        app_details = app(
-                            result['appId'],
-                            lang='en',
-                            country=country_code
-                        )
-
-                        apps_data.append({
-                            'app_id': app_details.get('appId'),
-                            'platform': 'google_play',
-                            'country_code': country_code,
-                            'title': app_details.get('title'),
-                            'developer': app_details.get('developer'),
-                            'icon_url': app_details.get('icon'),
-                            'rating': app_details.get('score'),
-                            'rating_count': app_details.get('ratings'),
-                            'installs': app_details.get('installs'),
-                            'price': str(app_details.get('price', 0)) if app_details.get('price') else 'Free',
-                            'category': app_details.get('genre'),
-                            'description': app_details.get('description', '')[:500],  # 처음 500자만
-                            'release_date': app_details.get('released'),
-                            'updated_date': app_details.get('updated'),
-                            'version': app_details.get('version'),
-                            'url': app_details.get('url'),
-                        })
-                    except (ValueError, KeyError, TypeError) as e:
-                        print(f"앱 상세 정보 수집 실패: {result.get('appId', 'unknown')} - {str(e)}")
-                        continue
-
-            except (ValueError, KeyError, TypeError) as e:
-                print(f"검색 실패 [{query}]: {str(e)}")
-                continue
-
-        # 데이터베이스에 저장
-        saved_count = save_apps_to_db(apps_data)
-
-        log_step(f"Google Play 수집 [{country_code}]", f"완료 ({saved_count}개 앱 저장)", start_time)
-        return saved_count
-
+        results = search(
+            query,
+            lang=lang,
+            country=country_code,
+            n_hits=min(n_hits, 30)  # 최대 30개
+        )
+        return [r.get('appId') for r in results if r.get('appId')]
     except Exception as e:
-        log_step(f"Google Play 수집 [{country_code}]", f"오류 발생: {str(e)}", start_time)
-        return 0
+        print(f"    검색 오류 [{query}]: {str(e)[:50]}")
+        return []
+
+
+def get_app_details(app_id, country_code, lang='en'):
+    """
+    앱 상세 정보 가져오기
+
+    Args:
+        app_id: 앱 ID (패키지명)
+        country_code: 국가 코드
+        lang: 언어 코드
+
+    Returns:
+        앱 상세 정보 딕셔너리 또는 None
+    """
+    try:
+        return app(app_id, lang=lang, country=country_code)
+    except Exception as e:
+        print(f"    상세정보 오류 [{app_id}]: {str(e)[:50]}")
+        return None
+
+
+def parse_google_play_data(app_data, country_code):
+    """
+    Google Play Scraper 응답을 DB 저장 형식으로 변환
+
+    Args:
+        app_data: google-play-scraper app() 응답
+        country_code: 국가 코드
+
+    Returns:
+        DB 저장용 딕셔너리
+    """
+    if not app_data:
+        return None
+
+    # 카테고리 정보
+    categories = app_data.get('categories', [])
+    category_names = [c.get('name') for c in categories if c.get('name')]
+    category_ids = [c.get('id') for c in categories if c.get('id')]
+
+    # 히스토그램 (별점별 리뷰 수)
+    histogram = app_data.get('histogram')
+
+    # 업데이트 날짜 파싱 (timestamp 또는 문자열)
+    updated = app_data.get('updated')
+    updated_date = None
+    if updated:
+        if isinstance(updated, (int, float)):
+            # Unix timestamp인 경우
+            try:
+                updated_date = datetime.fromtimestamp(updated).isoformat()
+            except (ValueError, OSError):
+                updated_date = None
+        else:
+            updated_date = str(updated)
+
+    # 출시일 파싱
+    released = app_data.get('released')
+    release_date = str(released) if released else None
+
+    return {
+        'app_id': app_data.get('appId'),
+        'bundle_id': app_data.get('appId'),  # Android는 패키지명이 bundle_id
+        'platform': 'google_play',
+        'country_code': country_code,
+
+        # 기본 정보
+        'title': app_data.get('title'),
+        'developer': app_data.get('developer'),
+        'developer_id': str(app_data.get('developerId', '')),
+        'developer_email': app_data.get('developerEmail'),
+        'developer_website': app_data.get('developerWebsite'),
+        'developer_address': app_data.get('developerAddress'),
+        'seller_name': app_data.get('developer'),
+
+        # 아이콘 및 이미지
+        'icon_url': app_data.get('icon'),
+        'icon_url_small': app_data.get('icon'),
+        'icon_url_large': app_data.get('icon'),
+        'header_image': app_data.get('headerImage'),
+        'screenshots': json.dumps(app_data.get('screenshots', [])),
+
+        # 평점
+        'rating': app_data.get('score'),
+        'rating_count': app_data.get('ratings'),
+        'rating_count_current_version': None,
+        'rating_current_version': None,
+        'reviews_count': app_data.get('reviews'),
+        'histogram': json.dumps(histogram) if histogram else None,
+
+        # 설치 및 가격
+        'installs': app_data.get('installs'),
+        'installs_min': app_data.get('minInstalls'),
+        'installs_exact': app_data.get('realInstalls'),
+        'price': app_data.get('price'),
+        'price_formatted': str(app_data.get('price', 0)) if app_data.get('price') else 'Free',
+        'currency': app_data.get('currency'),
+        'free': 1 if app_data.get('free', True) else 0,
+
+        # 카테고리
+        'category': app_data.get('genre'),
+        'category_id': app_data.get('genreId'),
+        'genres': json.dumps(category_names) if category_names else None,
+        'genre_ids': json.dumps(category_ids) if category_ids else None,
+
+        # 설명
+        'description': app_data.get('description'),
+        'description_html': app_data.get('descriptionHTML'),
+        'summary': app_data.get('summary'),
+        'release_notes': app_data.get('recentChanges'),
+
+        # 날짜
+        'release_date': release_date,
+        'updated_date': updated_date,
+        'current_version_release_date': updated_date,
+
+        # 버전 및 기술 정보
+        'version': app_data.get('version'),
+        'minimum_os_version': app_data.get('androidVersion'),
+        'file_size': None,
+        'file_size_formatted': app_data.get('size'),
+        'supported_devices': None,
+        'languages': None,
+
+        # 콘텐츠 등급
+        'content_rating': app_data.get('contentRating'),
+        'content_rating_description': app_data.get('contentRatingDescription'),
+        'advisories': None,
+
+        # 앱 내 구매 및 광고
+        'has_iap': 1 if app_data.get('offersIAP') else 0,
+        'iap_price_range': app_data.get('inAppProductPrice'),
+        'contains_ads': 1 if app_data.get('containsAds') else 0,
+        'ad_supported': 1 if app_data.get('adSupported') else 0,
+
+        # URL
+        'url': app_data.get('url'),
+        'store_url': app_data.get('url'),
+        'privacy_policy_url': app_data.get('privacyPolicy'),
+
+        # 차트 정보 (검색에서는 없음)
+        'chart_position': None,
+        'chart_type': None,
+
+        # 기타
+        'features': None,
+        'permissions': None,
+    }
 
 
 def save_apps_to_db(apps_data):
@@ -112,56 +219,154 @@ def save_apps_to_db(apps_data):
     cursor = conn.cursor()
     saved_count = 0
 
+    columns = [
+        'app_id', 'bundle_id', 'platform', 'country_code',
+        'title', 'developer', 'developer_id', 'developer_email',
+        'developer_website', 'developer_address', 'seller_name',
+        'icon_url', 'icon_url_small', 'icon_url_large', 'header_image', 'screenshots',
+        'rating', 'rating_count', 'rating_count_current_version',
+        'rating_current_version', 'reviews_count', 'histogram',
+        'installs', 'installs_min', 'installs_exact', 'price', 'price_formatted',
+        'currency', 'free',
+        'category', 'category_id', 'genres', 'genre_ids',
+        'description', 'description_html', 'summary', 'release_notes',
+        'release_date', 'updated_date', 'current_version_release_date',
+        'version', 'minimum_os_version', 'file_size', 'file_size_formatted',
+        'supported_devices', 'languages',
+        'content_rating', 'content_rating_description', 'advisories',
+        'has_iap', 'iap_price_range', 'contains_ads', 'ad_supported',
+        'url', 'store_url', 'privacy_policy_url',
+        'chart_position', 'chart_type',
+        'features', 'permissions',
+    ]
+
+    placeholders = ', '.join(['?' for _ in columns])
+    columns_str = ', '.join(columns)
+
     for app_data in apps_data:
+        if not app_data:
+            continue
         try:
-            cursor.execute("""
-                INSERT OR REPLACE INTO apps (
-                    app_id, platform, country_code, title, developer,
-                    icon_url, rating, rating_count, installs, price,
-                    category, description, release_date, updated_date,
-                    version, url, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (
-                app_data['app_id'],
-                app_data['platform'],
-                app_data['country_code'],
-                app_data['title'],
-                app_data['developer'],
-                app_data['icon_url'],
-                app_data['rating'],
-                app_data['rating_count'],
-                app_data['installs'],
-                app_data['price'],
-                app_data['category'],
-                app_data['description'],
-                app_data['release_date'],
-                app_data['updated_date'],
-                app_data['version'],
-                app_data['url'],
-            ))
+            values = tuple(app_data.get(col) for col in columns)
+            cursor.execute(f"""
+                INSERT OR REPLACE INTO apps ({columns_str}, updated_at)
+                VALUES ({placeholders}, CURRENT_TIMESTAMP)
+            """, values)
             saved_count += 1
         except Exception as e:
-            print(f"데이터 저장 실패: {app_data.get('app_id')} - {str(e)}")
+            print(f"  저장 실패 [{app_data.get('app_id')}]: {str(e)}")
 
     conn.commit()
     conn.close()
+    return saved_count
+
+
+def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
+    """
+    특정 국가의 Google Play Store에서 앱 수집
+    여러 검색어로 최대한 많은 앱을 수집
+
+    Args:
+        country_code: 국가 코드 (예: 'kr', 'us')
+        limit: 수집할 최대 앱 개수
+
+    Returns:
+        수집된 앱 개수
+    """
+    start_time = datetime.now()
+    log_step(f"Google Play 수집 [{country_code.upper()}]", "시작", start_time)
+
+    # 언어 설정 (국가별)
+    lang_map = {
+        'kr': 'ko', 'jp': 'ja', 'cn': 'zh', 'tw': 'zh',
+        'de': 'de', 'fr': 'fr', 'es': 'es', 'it': 'it',
+        'br': 'pt', 'ru': 'ru', 'th': 'th', 'vn': 'vi',
+        'id': 'id', 'in': 'hi', 'ar': 'ar', 'sa': 'ar',
+    }
+    lang = lang_map.get(country_code, 'en')
+
+    all_app_ids = set()
+
+    # 1. 여러 검색어로 앱 ID 수집
+    print(f"  검색어 {len(GOOGLE_PLAY_SEARCH_QUERIES)}개로 앱 검색 중...")
+    for query in GOOGLE_PLAY_SEARCH_QUERIES:
+        app_ids = search_apps(query, country_code, lang=lang)
+        before_count = len(all_app_ids)
+        all_app_ids.update(app_ids)
+        new_count = len(all_app_ids) - before_count
+        if new_count > 0:
+            print(f"    [{query}]: +{new_count}개 (총 {len(all_app_ids)}개)")
+        time.sleep(REQUEST_DELAY)
+
+        # 목표 개수 도달 시 중단
+        if len(all_app_ids) >= limit:
+            break
+
+    if not all_app_ids:
+        log_step(f"Google Play 수집 [{country_code.upper()}]", "앱 없음", start_time)
+        return 0
+
+    print(f"  총 {len(all_app_ids)}개 고유 앱 ID 수집됨")
+
+    # 2. 각 앱의 상세 정보 수집
+    print(f"  상세 정보 수집 중...")
+    apps_data = []
+    collected = 0
+    failed = 0
+
+    for app_id in list(all_app_ids)[:limit]:
+        details = get_app_details(app_id, country_code, lang=lang)
+        if details:
+            parsed = parse_google_play_data(details, country_code)
+            if parsed:
+                apps_data.append(parsed)
+                collected += 1
+        else:
+            failed += 1
+
+        # 진행상황 출력 (50개마다)
+        if (collected + failed) % 50 == 0:
+            print(f"    진행: {collected}개 수집, {failed}개 실패")
+
+        time.sleep(REQUEST_DELAY)
+
+    print(f"  -> {len(apps_data)}개 앱 상세 정보 수집됨")
+
+    # 최근 업데이트 순으로 정렬
+    apps_data.sort(
+        key=lambda x: x.get('updated_date') or x.get('release_date') or '',
+        reverse=True
+    )
+
+    # 3. 데이터베이스에 저장
+    saved_count = save_apps_to_db(apps_data)
+    log_step(f"Google Play 수집 [{country_code.upper()}]", f"완료 ({saved_count}개 저장)", start_time)
 
     return saved_count
 
 
 def scrape_all_countries():
-    """모든 국가의 Google Play Store에서 신규 앱 수집"""
+    """모든 국가의 Google Play Store에서 앱 수집"""
     total_start = datetime.now()
     log_step("Google Play 전체 수집", "시작", total_start)
 
     total_apps = 0
     for country in COUNTRIES:
-        count = scrape_new_apps_by_country(country['code'])
-        total_apps += count
+        try:
+            count = scrape_new_apps_by_country(country['code'])
+            total_apps += count
+            time.sleep(REQUEST_DELAY * 2)  # 국가 간 딜레이
+        except Exception as e:
+            print(f"  오류 발생 [{country['code']}]: {str(e)}")
+            continue
 
     log_step("Google Play 전체 수집", f"완료 (총 {total_apps}개 앱)", total_start)
     return total_apps
 
 
 if __name__ == "__main__":
-    scrape_all_countries()
+    # 단일 국가 테스트
+    print("=" * 60)
+    print("Google Play 스크래퍼 테스트")
+    print("=" * 60)
+    scrape_new_apps_by_country('kr', limit=30)

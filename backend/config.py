@@ -4,6 +4,14 @@
 AGENT.MD 지침 5번: 모든 설정값은 전역으로 정의하고, 메인 함수 최상단에 배치
 """
 import os
+import ssl
+import urllib3
+
+# SSL 경고 무시 (일부 환경에서 SSL 핸드셰이크 문제 해결)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# SSL 검증 비활성화 플래그 (테스트 환경에서만 사용 권장)
+SSL_VERIFY = False
 
 # 데이터베이스 설정 (절대경로 사용)
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "apps.db")
@@ -60,11 +68,64 @@ COUNTRIES = [
     {"code": "eg", "name": "이집트"},
 ]
 
-# 크롤링 설정
-FETCH_LIMIT_PER_COUNTRY = 100  # 국가별 가져올 최대 앱 개수
-COLLECTION_CATEGORIES = [
-    "NEW_FREE",      # 신규 무료 앱
-    "NEW_PAID",      # 신규 유료 앱
+# 크롤링 설정 - 최대화
+# Apple RSS API: 최대 200개 (top-free, top-paid 각각)
+# iTunes Lookup API: 한 번에 최대 200개 ID 조회 가능
+# Google Play search: 기본 최대 30개, 여러 검색어로 확장
+FETCH_LIMIT_PER_COUNTRY = 200  # 국가별 가져올 최대 앱 개수
+
+# Apple RSS API Feed 유형
+APPLE_RSS_FEEDS = [
+    "top-free",      # 무료 앱 순위
+    "top-paid",      # 유료 앱 순위
+]
+
+# Google Play 검색어 (다양한 검색어로 최대한 많은 앱 수집)
+GOOGLE_PLAY_SEARCH_QUERIES = [
+    "new apps 2024",
+    "new apps 2025",
+    "최신 앱",
+    "new release",
+    "trending apps",
+    "popular apps",
+    "best apps",
+    "top apps",
+    "free apps",
+    "유틸리티",
+    "생산성",
+    "게임",
+    "social",
+    "entertainment",
+    "lifestyle",
+    "education",
+    "health",
+    "finance",
+    "shopping",
+    "travel",
+]
+
+# Google Play 카테고리 (앱 상세 정보 조회 시 사용)
+GOOGLE_PLAY_CATEGORIES = [
+    "GAME",
+    "PRODUCTIVITY",
+    "SOCIAL",
+    "ENTERTAINMENT",
+    "LIFESTYLE",
+    "EDUCATION",
+    "HEALTH_AND_FITNESS",
+    "FINANCE",
+    "SHOPPING",
+    "TRAVEL_AND_LOCAL",
+    "TOOLS",
+    "COMMUNICATION",
+    "PHOTOGRAPHY",
+    "MUSIC_AND_AUDIO",
+    "VIDEO_PLAYERS",
+    "NEWS_AND_MAGAZINES",
+    "FOOD_AND_DRINK",
+    "WEATHER",
+    "BUSINESS",
+    "SPORTS",
 ]
 
 # 주목할만한 앱 선별 기준 (점수 기반)
@@ -83,11 +144,18 @@ MINIMUM_SCORE = 60           # 최소 종합 점수 (주목 앱 선별)
 # 로그 형식
 LOG_FORMAT = "[{timestamp}] {step}: {message} (소요시간: {duration}초)"
 
+# 요청 타임아웃 설정 (초)
+REQUEST_TIMEOUT = 30
+
+# API 요청 간 딜레이 (초) - 레이트 리밋 방지
+REQUEST_DELAY = 0.5
+
 # 프록시 설정 (환경변수 또는 직접 설정)
 # 예: "http://proxy.example.com:8080" 또는 None
 # 환경변수 HTTP_PROXY, HTTPS_PROXY가 설정되어 있으면 우선 사용
 HTTP_PROXY = os.environ.get('HTTP_PROXY', None)
 HTTPS_PROXY = os.environ.get('HTTPS_PROXY', None)
+
 
 # 프록시 딕셔너리 생성 (requests 라이브러리 형식)
 def get_proxies():
@@ -98,3 +166,15 @@ def get_proxies():
     if HTTPS_PROXY:
         proxies['https'] = HTTPS_PROXY
     return proxies if proxies else None
+
+
+def get_request_kwargs():
+    """requests 라이브러리용 공통 설정 반환"""
+    kwargs = {
+        'timeout': REQUEST_TIMEOUT,
+        'verify': SSL_VERIFY,
+    }
+    proxies = get_proxies()
+    if proxies:
+        kwargs['proxies'] = proxies
+    return kwargs
