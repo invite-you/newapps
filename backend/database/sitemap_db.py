@@ -50,6 +50,7 @@ def init_sitemap_database():
     cursor = conn.cursor()
 
     # 앱 발견 기록 테이블 (최초 발견, 마지막 확인 시간)
+    # 신규 앱 여부는 first_seen_at 날짜로 판별
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_discovery (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +60,6 @@ def init_sitemap_database():
             last_seen_at TIMESTAMP NOT NULL,  -- 마지막 확인 시간
             sitemap_source TEXT,              -- sitemap 파일 출처
             country_code TEXT,                -- 국가 코드 (App Store)
-            is_new_app INTEGER DEFAULT 0,     -- new-app sitemap에서 발견된 앱
             UNIQUE(app_id, platform)
         )
     """)
@@ -97,7 +97,6 @@ def init_sitemap_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_platform ON app_discovery(platform)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_first_seen ON app_discovery(first_seen_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_last_seen ON app_discovery(last_seen_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_is_new ON app_discovery(is_new_app)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_app ON app_history(app_id, platform)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_date ON app_history(recorded_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshot_date ON sitemap_snapshots(snapshot_date DESC)")
@@ -128,8 +127,7 @@ def save_discovered_apps(
     app_ids: List[str],
     platform: str,
     sitemap_source: str = None,
-    country_code: str = None,
-    is_new_app: bool = False
+    country_code: str = None
 ) -> Tuple[int, int]:
     """
     발견된 앱 ID들을 저장
@@ -152,9 +150,9 @@ def save_discovered_apps(
             # INSERT OR IGNORE로 신규 삽입 시도
             cursor.execute("""
                 INSERT OR IGNORE INTO app_discovery
-                (app_id, platform, first_seen_at, last_seen_at, sitemap_source, country_code, is_new_app)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (app_id, platform, now, now, sitemap_source, country_code, 1 if is_new_app else 0))
+                (app_id, platform, first_seen_at, last_seen_at, sitemap_source, country_code)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (app_id, platform, now, now, sitemap_source, country_code))
 
             if cursor.rowcount > 0:
                 new_count += 1
@@ -228,7 +226,7 @@ def get_new_apps_since(platform: str, since_date: str) -> List[Dict]:
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT app_id, first_seen_at, last_seen_at, sitemap_source, country_code, is_new_app
+        SELECT app_id, first_seen_at, last_seen_at, sitemap_source, country_code
         FROM app_discovery
         WHERE platform = ? AND first_seen_at >= ?
         ORDER BY first_seen_at DESC
@@ -246,7 +244,7 @@ def get_recently_discovered_apps(platform: str, days: int = 7) -> List[Dict]:
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT app_id, first_seen_at, last_seen_at, sitemap_source, country_code, is_new_app
+        SELECT app_id, first_seen_at, last_seen_at, sitemap_source, country_code
         FROM app_discovery
         WHERE platform = ? AND first_seen_at >= datetime('now', ?)
         ORDER BY first_seen_at DESC
@@ -267,12 +265,11 @@ def get_discovery_stats() -> Dict:
 
     # 플랫폼별 전체 앱 수
     cursor.execute("""
-        SELECT platform, COUNT(*) as total,
-               SUM(CASE WHEN is_new_app = 1 THEN 1 ELSE 0 END) as new_apps
+        SELECT platform, COUNT(*) as total
         FROM app_discovery
         GROUP BY platform
     """)
-    stats['by_platform'] = {row['platform']: {'total': row['total'], 'new_apps': row['new_apps']}
+    stats['by_platform'] = {row['platform']: {'total': row['total']}
                            for row in cursor.fetchall()}
 
     # 최근 7일 신규 발견 앱 수

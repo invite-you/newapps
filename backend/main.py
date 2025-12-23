@@ -20,13 +20,13 @@ from scrapers.sitemap_details_fetcher import fetch_all_new_app_details
 from analyzer import app_analyzer
 
 
-def run_sitemap_collection(google_sample: int = 100, appstore_sample: int = 50):
+def run_sitemap_collection(google_limit: int = None, appstore_limit: int = None):
     """
     Sitemap 기반 앱 수집 실행
 
     Args:
-        google_sample: Google Play sitemap 샘플 수
-        appstore_sample: App Store sitemap 타입별 샘플 수
+        google_limit: Google Play sitemap 처리 수 제한 (None이면 전체)
+        appstore_limit: App Store sitemap 타입별 처리 수 제한 (None이면 전체)
     """
     start_time = datetime.now()
     log_step("Sitemap 수집 모드", "시작", start_time)
@@ -36,13 +36,14 @@ def run_sitemap_collection(google_sample: int = 100, appstore_sample: int = 50):
 
     # 1. Sitemap에서 앱 ID 수집
     log_step("1단계", "Sitemap에서 앱 ID 수집", datetime.now())
-    sitemap_results = collect_all_sitemaps(google_sample, appstore_sample)
+    sitemap_results = collect_all_sitemaps(google_limit, appstore_limit)
 
     # 2. 수집 통계 출력
     stats = get_discovery_stats()
     print("\n발견된 앱 통계:")
     for platform, data in stats.get('by_platform', {}).items():
-        print(f"  {platform}: 전체 {data['total']:,}개, 신규앱 {data['new_apps']:,}개")
+        today_count = stats.get('today', {}).get(platform, 0)
+        print(f"  {platform}: 전체 {data['total']:,}개, 오늘 신규 {today_count:,}개")
 
     log_step("Sitemap 수집 모드", "완료", start_time)
 
@@ -105,8 +106,8 @@ def main():
   # Sitemap 기반 전체 수집 (권장)
   python main.py --mode sitemap
 
-  # 빠른 테스트 (적은 샘플)
-  python main.py --mode sitemap --google-sitemap 10 --appstore-sitemap 5
+  # 빠른 테스트 (적은 sitemap 수)
+  python main.py --mode sitemap --google-sitemap-limit 10 --appstore-sitemap-limit 5
 
   # 기존 검색 기반 수집
   python main.py --mode search
@@ -124,10 +125,10 @@ def main():
                         help='수집 모드 (기본: sitemap)')
 
     # Sitemap 옵션
-    parser.add_argument('--google-sitemap', type=int, default=100,
-                        help='Google Play sitemap 샘플 수 (기본: 100)')
-    parser.add_argument('--appstore-sitemap', type=int, default=50,
-                        help='App Store sitemap 타입별 샘플 수 (기본: 50)')
+    parser.add_argument('--google-sitemap-limit', type=int, default=None,
+                        help='Google Play sitemap 처리 수 제한 (기본: 전체)')
+    parser.add_argument('--appstore-sitemap-limit', type=int, default=None,
+                        help='App Store sitemap 타입별 처리 수 제한 (기본: 전체)')
     parser.add_argument('--sitemap-only', action='store_true',
                         help='Sitemap 수집만 실행 (상세정보 수집 안 함)')
 
@@ -164,7 +165,7 @@ def main():
 
         # Sitemap 모드
         elif args.mode == 'sitemap':
-            run_sitemap_collection(args.google_sitemap, args.appstore_sitemap)
+            run_sitemap_collection(args.google_sitemap_limit, args.appstore_sitemap_limit)
 
             if not args.sitemap_only:
                 run_details_collection(args.google_limit, args.appstore_limit)
@@ -181,7 +182,7 @@ def main():
 
         # 둘 다
         elif args.mode == 'both':
-            run_sitemap_collection(args.google_sitemap, args.appstore_sitemap)
+            run_sitemap_collection(args.google_sitemap_limit, args.appstore_sitemap_limit)
 
             if not args.sitemap_only:
                 run_details_collection(args.google_limit, args.appstore_limit)

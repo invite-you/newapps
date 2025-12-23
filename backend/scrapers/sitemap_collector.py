@@ -45,12 +45,7 @@ class GooglePlaySitemapCollector:
     ROBOTS_URL = "https://play.google.com/robots.txt"
     APP_URL_PATTERN = re.compile(r'/store/apps/details\?id=([a-zA-Z0-9._]+)')
 
-    def __init__(self, max_sitemaps: int = 100):
-        """
-        Args:
-            max_sitemaps: 처리할 최대 sitemap 파일 수 (테스트 목적)
-        """
-        self.max_sitemaps = max_sitemaps
+    def __init__(self):
         self.request_kwargs = get_request_kwargs()
 
     def get_sitemap_index_urls(self) -> List[str]:
@@ -116,12 +111,12 @@ class GooglePlaySitemapCollector:
 
         return app_ids
 
-    def collect_all_app_ids(self, sample_size: int = None) -> Tuple[Set[str], int]:
+    def collect_all_app_ids(self, limit: int = None) -> Tuple[Set[str], int]:
         """
         모든 sitemap에서 앱 ID 수집
 
         Args:
-            sample_size: 샘플링할 sitemap 수 (None이면 max_sitemaps 사용)
+            limit: 처리할 sitemap 수 제한 (None이면 전체 처리, 테스트 목적)
 
         Returns:
             (app_ids, sitemap_count): 수집된 앱 ID 집합, 처리한 sitemap 수
@@ -141,9 +136,9 @@ class GooglePlaySitemapCollector:
             sitemap_urls = self.parse_sitemap_index(index_url)
             log_step("Google Play", f"개별 sitemap 발견: {len(sitemap_urls)}개", datetime.now())
 
-            # 샘플링 (전체 처리는 오래 걸림)
-            limit = sample_size or self.max_sitemaps
-            sitemap_urls = sitemap_urls[:limit]
+            # 테스트 목적으로 제한 적용
+            if limit is not None:
+                sitemap_urls = sitemap_urls[:limit]
 
             # 병렬 처리
             with ThreadPoolExecutor(max_workers=10) as executor:
@@ -156,7 +151,7 @@ class GooglePlaySitemapCollector:
                         all_app_ids.update(app_ids)
                         sitemap_count += 1
 
-                        if sitemap_count % 10 == 0:
+                        if sitemap_count % 100 == 0:
                             log_step("Google Play", f"진행: {sitemap_count}개 sitemap, {len(all_app_ids)}개 앱 ID", datetime.now())
 
                     except Exception as e:
@@ -172,15 +167,10 @@ class AppStoreSitemapCollector:
     ROBOTS_URL = "https://apps.apple.com/robots.txt"
     APP_ID_PATTERN = re.compile(r'/id(\d+)')
 
-    # 관심 sitemap 타입
+    # 관심 sitemap 타입 (new-app도 동일하게 처리)
     SITEMAP_TYPES = ['app', 'new-app']
 
-    def __init__(self, max_sitemaps_per_type: int = 50):
-        """
-        Args:
-            max_sitemaps_per_type: 타입별 최대 처리 sitemap 수
-        """
-        self.max_sitemaps_per_type = max_sitemaps_per_type
+    def __init__(self):
         self.request_kwargs = get_request_kwargs()
 
     def get_sitemap_index_urls(self) -> Dict[str, List[str]]:
@@ -261,9 +251,12 @@ class AppStoreSitemapCollector:
 
         return app_ids, country_code
 
-    def collect_all_app_ids(self, sample_size: int = None) -> Dict[str, Tuple[Set[str], int]]:
+    def collect_all_app_ids(self, limit: int = None) -> Dict[str, Tuple[Set[str], int]]:
         """
         모든 sitemap에서 앱 ID 수집 (타입별)
+
+        Args:
+            limit: 타입별 처리할 sitemap 수 제한 (None이면 전체 처리)
 
         Returns:
             {sitemap_type: (app_ids, sitemap_count)}
@@ -285,8 +278,9 @@ class AppStoreSitemapCollector:
             for index_url in index_urls:
                 sitemap_urls = self.parse_sitemap_index(index_url)
 
-                limit = sample_size or self.max_sitemaps_per_type
-                sitemap_urls = sitemap_urls[:limit]
+                # 테스트 목적으로 제한 적용
+                if limit is not None:
+                    sitemap_urls = sitemap_urls[:limit]
 
                 with ThreadPoolExecutor(max_workers=10) as executor:
                     futures = {executor.submit(self.fetch_and_parse_sitemap, url): url
@@ -298,7 +292,7 @@ class AppStoreSitemapCollector:
                             all_app_ids.update(app_ids)
                             sitemap_count += 1
 
-                            if sitemap_count % 10 == 0:
+                            if sitemap_count % 50 == 0:
                                 log_step("App Store", f"{sitemap_type} 진행: {sitemap_count}개, {len(all_app_ids)}개 앱", datetime.now())
 
                         except Exception as e:
@@ -311,12 +305,12 @@ class AppStoreSitemapCollector:
         return result
 
 
-def collect_and_save_google_play_apps(sample_size: int = 50) -> Dict:
+def collect_and_save_google_play_apps(limit: int = None) -> Dict:
     """
     Google Play sitemap에서 앱 수집 및 저장
 
     Args:
-        sample_size: 처리할 sitemap 수 (테스트용)
+        limit: 처리할 sitemap 수 제한 (None이면 전체 처리)
 
     Returns:
         수집 결과 통계
@@ -332,8 +326,8 @@ def collect_and_save_google_play_apps(sample_size: int = 50) -> Dict:
     log_step("Google Play", f"기존 앱 ID: {len(known_ids)}개", datetime.now())
 
     # 새로 수집
-    collector = GooglePlaySitemapCollector(max_sitemaps=sample_size)
-    all_app_ids, sitemap_count = collector.collect_all_app_ids(sample_size)
+    collector = GooglePlaySitemapCollector()
+    all_app_ids, sitemap_count = collector.collect_all_app_ids(limit)
 
     # 신규 앱만 필터링
     new_app_ids = all_app_ids - known_ids
@@ -368,12 +362,12 @@ def collect_and_save_google_play_apps(sample_size: int = 50) -> Dict:
     }
 
 
-def collect_and_save_app_store_apps(sample_size: int = 30) -> Dict:
+def collect_and_save_app_store_apps(limit: int = None) -> Dict:
     """
     App Store sitemap에서 앱 수집 및 저장
 
     Args:
-        sample_size: 타입별 처리할 sitemap 수
+        limit: 타입별 처리할 sitemap 수 제한 (None이면 전체 처리)
 
     Returns:
         수집 결과 통계
@@ -389,8 +383,8 @@ def collect_and_save_app_store_apps(sample_size: int = 30) -> Dict:
     log_step("App Store", f"기존 앱 ID: {len(known_ids)}개", datetime.now())
 
     # 새로 수집
-    collector = AppStoreSitemapCollector(max_sitemaps_per_type=sample_size)
-    results = collector.collect_all_app_ids(sample_size)
+    collector = AppStoreSitemapCollector()
+    results = collector.collect_all_app_ids(limit)
 
     stats = {
         'platform': 'app_store',
@@ -401,17 +395,16 @@ def collect_and_save_app_store_apps(sample_size: int = 30) -> Dict:
     }
 
     for sitemap_type, (app_ids, sitemap_count) in results.items():
-        is_new_app = (sitemap_type == 'new-app')
         new_app_ids = app_ids - known_ids
 
         log_step("App Store", f"{sitemap_type}: {len(new_app_ids)}개 신규 (전체: {len(app_ids)}개)", datetime.now())
 
         if app_ids:
+            # 모든 sitemap 타입을 동일하게 처리 (is_new_app 플래그 제거)
             new_count, updated_count = save_discovered_apps(
                 list(app_ids),
                 'app_store',
-                sitemap_source=sitemap_type,
-                is_new_app=is_new_app
+                sitemap_source=sitemap_type
             )
 
             save_sitemap_snapshot(
@@ -438,13 +431,13 @@ def collect_and_save_app_store_apps(sample_size: int = 30) -> Dict:
     return stats
 
 
-def collect_all_sitemaps(google_sample: int = 50, appstore_sample: int = 30) -> Dict:
+def collect_all_sitemaps(google_limit: int = None, appstore_limit: int = None) -> Dict:
     """
     모든 sitemap에서 앱 수집
 
     Args:
-        google_sample: Google Play sitemap 샘플 수
-        appstore_sample: App Store sitemap 샘플 수 (타입별)
+        google_limit: Google Play sitemap 처리 수 제한 (None이면 전체)
+        appstore_limit: App Store sitemap 타입별 처리 수 제한 (None이면 전체)
 
     Returns:
         전체 수집 결과
@@ -453,8 +446,8 @@ def collect_all_sitemaps(google_sample: int = 50, appstore_sample: int = 30) -> 
     log_step("전체 Sitemap 수집", "시작", start_time)
 
     results = {
-        'google_play': collect_and_save_google_play_apps(google_sample),
-        'app_store': collect_and_save_app_store_apps(appstore_sample),
+        'google_play': collect_and_save_google_play_apps(google_limit),
+        'app_store': collect_and_save_app_store_apps(appstore_limit),
         'total_duration_seconds': 0
     }
 
@@ -483,10 +476,10 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='Sitemap 기반 앱 ID 수집')
-    parser.add_argument('--google-sample', type=int, default=20,
-                        help='Google Play sitemap 샘플 수 (기본: 20)')
-    parser.add_argument('--appstore-sample', type=int, default=10,
-                        help='App Store sitemap 타입별 샘플 수 (기본: 10)')
+    parser.add_argument('--google-limit', type=int, default=None,
+                        help='Google Play sitemap 처리 수 제한 (기본: 전체)')
+    parser.add_argument('--appstore-limit', type=int, default=None,
+                        help='App Store sitemap 타입별 처리 수 제한 (기본: 전체)')
     parser.add_argument('--google-only', action='store_true',
                         help='Google Play만 수집')
     parser.add_argument('--appstore-only', action='store_true',
@@ -495,10 +488,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.google_only:
-        result = collect_and_save_google_play_apps(args.google_sample)
+        result = collect_and_save_google_play_apps(args.google_limit)
         print(f"\n결과: {result}")
     elif args.appstore_only:
-        result = collect_and_save_app_store_apps(args.appstore_sample)
+        result = collect_and_save_app_store_apps(args.appstore_limit)
         print(f"\n결과: {result}")
     else:
-        results = collect_all_sitemaps(args.google_sample, args.appstore_sample)
+        results = collect_all_sitemaps(args.google_limit, args.appstore_limit)

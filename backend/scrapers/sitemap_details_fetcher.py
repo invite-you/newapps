@@ -3,14 +3,15 @@
 Sitemap에서 발견된 앱의 상세 정보 수집기
 - sitemap_tracking DB에서 새로 발견된 앱 ID 조회
 - 각 플랫폼의 API를 통해 상세 정보 수집
-- apps DB에 저장
+- apps DB에 저장 (빈 값은 기존 값 유지)
+- 수집 타임스탬프 기록
 """
 import sys
 import os
 import json
 import time
 from datetime import datetime
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -98,6 +99,51 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[str]:
     return list(unfetched)[:limit]
 
 
+def get_existing_app_data(platform: str, app_id: str) -> Optional[Dict]:
+    """기존 앱 데이터 조회 (부분 업데이트용)"""
+    conn = get_apps_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT * FROM apps WHERE platform = ? AND app_id = ?
+    """, (platform, app_id))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return dict(row)
+    return None
+
+
+def merge_app_data(existing: Optional[Dict], new_data: Dict) -> Dict:
+    """
+    기존 데이터와 새 데이터 병합
+    - 새 데이터가 None이거나 빈 값이면 기존 값 유지
+    - 새 데이터가 유효하면 새 값으로 업데이트
+    """
+    if not existing:
+        return new_data
+
+    merged = existing.copy()
+
+    for key, new_value in new_data.items():
+        # 새 값이 유효한 경우에만 업데이트
+        if new_value is not None and new_value != '' and new_value != []:
+            # JSON 문자열인 경우 빈 배열/객체 체크
+            if isinstance(new_value, str):
+                try:
+                    parsed = json.loads(new_value)
+                    if parsed == [] or parsed == {} or parsed == '':
+                        continue  # 빈 값이면 기존 값 유지
+                except (json.JSONDecodeError, TypeError):
+                    pass  # JSON이 아니면 그대로 사용
+
+            merged[key] = new_value
+
+    return merged
+
+
 def fetch_google_play_details(app_id: str, country_code: str = 'us', lang: str = 'en') -> Optional[Dict]:
     """Google Play 앱 상세 정보 가져오기"""
     if not GOOGLE_PLAY_AVAILABLE:
@@ -115,6 +161,9 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
     """Google Play Scraper 응답을 DB 저장 형식으로 변환"""
     if not app_data:
         return None
+
+    # 수집 타임스탬프 추가
+    collected_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     categories = app_data.get('categories', [])
     category_names = [c.get('name') for c in categories if c.get('name')]
@@ -143,7 +192,7 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'country_code': country_code,
         'title': app_data.get('title'),
         'developer': app_data.get('developer'),
-        'developer_id': str(app_data.get('developerId', '')),
+        'developer_id': str(app_data.get('developerId', '')) if app_data.get('developerId') else None,
         'developer_email': app_data.get('developerEmail'),
         'developer_website': app_data.get('developerWebsite'),
         'developer_address': app_data.get('developerAddress'),
@@ -152,7 +201,7 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'icon_url_small': app_data.get('icon'),
         'icon_url_large': app_data.get('icon'),
         'header_image': app_data.get('headerImage'),
-        'screenshots': json.dumps(app_data.get('screenshots', [])),
+        'screenshots': json.dumps(app_data.get('screenshots', [])) if app_data.get('screenshots') else None,
         'rating': app_data.get('score'),
         'rating_count': app_data.get('ratings'),
         'rating_count_current_version': None,
@@ -163,7 +212,7 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'installs_min': app_data.get('minInstalls'),
         'installs_exact': app_data.get('realInstalls'),
         'price': app_data.get('price'),
-        'price_formatted': str(app_data.get('price', 0)) if app_data.get('price') else 'Free',
+        'price_formatted': str(app_data.get('price', 0)) if app_data.get('price') is not None else None,
         'currency': app_data.get('currency'),
         'free': 1 if app_data.get('free', True) else 0,
         'category': app_data.get('genre'),
@@ -197,6 +246,8 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'chart_type': None,
         'features': None,
         'permissions': None,
+        # 수집 타임스탬프
+        '_collected_at': collected_at,
     }
 
 
@@ -241,6 +292,9 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
     if not app_data or app_data.get('wrapperType') != 'software':
         return None
 
+    # 수집 타임스탬프 추가
+    collected_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     # 스크린샷 URL들
     screenshots = app_data.get('screenshotUrls', [])
     ipad_screenshots = app_data.get('ipadScreenshotUrls', [])
@@ -259,6 +313,8 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
     release_date = app_data.get('releaseDate')
     current_version_release_date = app_data.get('currentVersionReleaseDate')
 
+    all_screenshots = screenshots + ipad_screenshots
+
     return {
         'app_id': str(app_data.get('trackId')),
         'bundle_id': app_data.get('bundleId'),
@@ -266,7 +322,7 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'country_code': country_code,
         'title': app_data.get('trackName'),
         'developer': app_data.get('artistName'),
-        'developer_id': str(app_data.get('artistId', '')),
+        'developer_id': str(app_data.get('artistId', '')) if app_data.get('artistId') else None,
         'developer_email': None,
         'developer_website': app_data.get('sellerUrl'),
         'developer_address': None,
@@ -275,7 +331,7 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'icon_url_small': app_data.get('artworkUrl60'),
         'icon_url_large': app_data.get('artworkUrl512'),
         'header_image': None,
-        'screenshots': json.dumps(screenshots + ipad_screenshots),
+        'screenshots': json.dumps(all_screenshots) if all_screenshots else None,
         'rating': app_data.get('averageUserRating'),
         'rating_count': app_data.get('userRatingCount'),
         'rating_count_current_version': app_data.get('userRatingCountForCurrentVersion'),
@@ -290,9 +346,9 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'currency': app_data.get('currency'),
         'free': 1 if app_data.get('price', 0) == 0 else 0,
         'category': app_data.get('primaryGenreName'),
-        'category_id': str(app_data.get('primaryGenreId', '')),
-        'genres': json.dumps(genres),
-        'genre_ids': json.dumps(genre_ids),
+        'category_id': str(app_data.get('primaryGenreId', '')) if app_data.get('primaryGenreId') else None,
+        'genres': json.dumps(genres) if genres else None,
+        'genre_ids': json.dumps(genre_ids) if genre_ids else None,
         'description': app_data.get('description'),
         'description_html': None,
         'summary': None,
@@ -304,11 +360,11 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'minimum_os_version': app_data.get('minimumOsVersion'),
         'file_size': app_data.get('fileSizeBytes'),
         'file_size_formatted': None,
-        'supported_devices': json.dumps(supported_devices),
-        'languages': json.dumps(languages),
+        'supported_devices': json.dumps(supported_devices) if supported_devices else None,
+        'languages': json.dumps(languages) if languages else None,
         'content_rating': app_data.get('contentAdvisoryRating'),
         'content_rating_description': app_data.get('trackContentRating'),
-        'advisories': json.dumps(app_data.get('advisories', [])),
+        'advisories': json.dumps(app_data.get('advisories', [])) if app_data.get('advisories') else None,
         'has_iap': 1 if app_data.get('isVppDeviceBasedLicensingEnabled') else 0,
         'iap_price_range': None,
         'contains_ads': 0,
@@ -318,13 +374,24 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'privacy_policy_url': None,
         'chart_position': None,
         'chart_type': None,
-        'features': json.dumps(app_data.get('features', [])),
+        'features': json.dumps(app_data.get('features', [])) if app_data.get('features') else None,
         'permissions': None,
+        # 수집 타임스탬프
+        '_collected_at': collected_at,
     }
 
 
-def save_apps_to_db(apps_data: List[Dict]) -> int:
-    """앱 데이터를 데이터베이스에 저장"""
+def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> int:
+    """
+    앱 데이터를 데이터베이스에 저장
+
+    Args:
+        apps_data: 앱 데이터 목록
+        merge_existing: True면 기존 데이터와 병합 (빈 값 유지)
+
+    Returns:
+        저장된 앱 수
+    """
     if not apps_data:
         return 0
 
@@ -359,7 +426,20 @@ def save_apps_to_db(apps_data: List[Dict]) -> int:
     for app_data in apps_data:
         if not app_data:
             continue
+
         try:
+            # 기존 데이터와 병합 (빈 값 보존)
+            if merge_existing:
+                existing = get_existing_app_data(
+                    app_data.get('platform'),
+                    app_data.get('app_id')
+                )
+                if existing:
+                    app_data = merge_app_data(existing, app_data)
+
+            # _collected_at 제거 (DB 컬럼에 없음, updated_at으로 대체)
+            app_data.pop('_collected_at', None)
+
             values = tuple(app_data.get(col) for col in columns)
             cursor.execute(f"""
                 INSERT OR REPLACE INTO apps ({columns_str}, updated_at)
@@ -386,7 +466,7 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
         수집 결과 통계
     """
     start_time = datetime.now()
-    log_step("Google Play 상세정보", "수집 시작", start_time)
+    log_step("Google Play 상세정보", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", start_time)
 
     # 아직 상세 정보가 없는 앱 ID 조회
     unfetched_ids = get_unfetched_app_ids('google_play', limit)
@@ -412,15 +492,16 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
 
         time.sleep(REQUEST_DELAY)
 
-    # 저장
-    saved = save_apps_to_db(apps_data)
+    # 저장 (기존 데이터와 병합)
+    saved = save_apps_to_db(apps_data, merge_existing=True)
 
     log_step("Google Play 상세정보", f"완료: {saved}개 저장, {failed}개 실패", start_time)
 
     return {
         'fetched': len(apps_data),
         'saved': saved,
-        'failed': failed
+        'failed': failed,
+        'collected_at': start_time.strftime('%Y-%m-%d %H:%M:%S')
     }
 
 
@@ -436,7 +517,7 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
         수집 결과 통계
     """
     start_time = datetime.now()
-    log_step("App Store 상세정보", "수집 시작", start_time)
+    log_step("App Store 상세정보", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", start_time)
 
     # 아직 상세 정보가 없는 앱 ID 조회
     unfetched_ids = get_unfetched_app_ids('app_store', limit)
@@ -458,8 +539,8 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
         log_step("App Store", f"배치 {i//batch_size + 1}: {len(results)}개 수집", datetime.now())
         time.sleep(REQUEST_DELAY)
 
-    # 저장
-    saved = save_apps_to_db(apps_data)
+    # 저장 (기존 데이터와 병합)
+    saved = save_apps_to_db(apps_data, merge_existing=True)
     failed = len(unfetched_ids) - len(apps_data)
 
     log_step("App Store 상세정보", f"완료: {saved}개 저장, {failed}개 실패", start_time)
@@ -467,7 +548,8 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
     return {
         'fetched': len(apps_data),
         'saved': saved,
-        'failed': failed
+        'failed': failed,
+        'collected_at': start_time.strftime('%Y-%m-%d %H:%M:%S')
     }
 
 
@@ -483,16 +565,17 @@ def fetch_all_new_app_details(google_limit: int = 100, appstore_limit: int = 500
         전체 수집 결과
     """
     start_time = datetime.now()
-    log_step("전체 상세정보 수집", "시작", start_time)
+    log_step("전체 상세정보 수집", f"시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", start_time)
 
     results = {
         'google_play': fetch_google_play_new_apps(google_limit),
-        'app_store': fetch_app_store_new_apps(appstore_limit)
+        'app_store': fetch_app_store_new_apps(appstore_limit),
+        'collected_at': start_time.strftime('%Y-%m-%d %H:%M:%S')
     }
 
     # 요약
     print("\n" + "=" * 60)
-    print("상세 정보 수집 결과")
+    print(f"상세 정보 수집 결과 (수집 시각: {results['collected_at']})")
     print("=" * 60)
     print(f"Google Play: {results['google_play']['saved']}개 저장, "
           f"{results['google_play']['failed']}개 실패")
