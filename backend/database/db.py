@@ -36,16 +36,22 @@ def get_connection():
     return conn
 
 
-def init_database():
-    """데이터베이스 초기화 - 확장된 스키마"""
+def init_database(force_reset: bool = False):
+    """
+    데이터베이스 초기화 - 확장된 스키마
+
+    Args:
+        force_reset: True면 테이블 삭제 후 재생성 (기존 데이터 삭제됨)
+    """
     start_time = datetime.now()
     log_step("데이터베이스 초기화", "시작", start_time)
 
     conn = get_connection()
     cursor = conn.cursor()
 
-    # 기존 테이블 삭제 (스키마 변경 시)
-    cursor.execute("DROP TABLE IF EXISTS apps")
+    # 기존 테이블 삭제 (스키마 변경 시에만 사용)
+    if force_reset:
+        cursor.execute("DROP TABLE IF EXISTS apps")
 
     # 확장된 앱 정보 테이블 - App Store/Google Play 모든 필드 포함
     cursor.execute("""
