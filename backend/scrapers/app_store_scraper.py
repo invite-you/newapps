@@ -152,6 +152,18 @@ def parse_app_store_data(app_data, country_code, chart_info=None):
         chart_position = chart_info[app_id].get('position')
         chart_type = chart_info[app_id].get('chart_type')
 
+    # 앱 내 구매 정보
+    has_iap = None
+    if 'inAppPurchases' in app_data:
+        has_iap = 1 if app_data.get('inAppPurchases') else 0
+    elif 'hasInAppPurchases' in app_data:
+        has_iap = 1 if app_data.get('hasInAppPurchases') else 0
+
+    # Game Center 활성화 정보
+    game_center_enabled = None
+    if 'isGameCenterEnabled' in app_data:
+        game_center_enabled = 1 if app_data.get('isGameCenterEnabled') else 0
+
     return {
         'app_id': app_id,
         'bundle_id': app_data.get('bundleId'),
@@ -222,10 +234,11 @@ def parse_app_store_data(app_data, country_code, chart_info=None):
         'advisories': json.dumps(app_data.get('advisories', [])),
 
         # 앱 내 구매
-        'has_iap': 1 if app_data.get('isGameCenterEnabled') else 0,
+        'has_iap': has_iap,
         'iap_price_range': None,
         'contains_ads': None,
         'ad_supported': None,
+        'game_center_enabled': game_center_enabled,
 
         # URL
         'url': app_data.get('trackViewUrl'),
@@ -267,7 +280,7 @@ def save_apps_to_db(apps_data):
         'version', 'minimum_os_version', 'file_size', 'file_size_formatted',
         'supported_devices', 'languages',
         'content_rating', 'content_rating_description', 'advisories',
-        'has_iap', 'iap_price_range', 'contains_ads', 'ad_supported',
+        'has_iap', 'iap_price_range', 'contains_ads', 'ad_supported', 'game_center_enabled',
         'url', 'store_url', 'privacy_policy_url',
         'chart_position', 'chart_type',
         'features', 'permissions',

@@ -131,6 +131,7 @@ def init_database(force_reset: bool = False):
             iap_price_range TEXT,
             contains_ads INTEGER,
             ad_supported INTEGER,
+            game_center_enabled INTEGER,
 
             -- URL 정보
             url TEXT,
@@ -203,7 +204,7 @@ def get_app_columns():
         'version', 'minimum_os_version', 'file_size', 'file_size_formatted',
         'supported_devices', 'languages',
         'content_rating', 'content_rating_description', 'advisories',
-        'has_iap', 'iap_price_range', 'contains_ads', 'ad_supported',
+        'has_iap', 'iap_price_range', 'contains_ads', 'ad_supported', 'game_center_enabled',
         'url', 'store_url', 'privacy_policy_url',
         'chart_position', 'chart_type',
         'features', 'permissions',
