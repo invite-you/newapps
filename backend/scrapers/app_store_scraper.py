@@ -275,13 +275,18 @@ def save_apps_to_db(apps_data):
 
     placeholders = ', '.join(['?' for _ in columns])
     columns_str = ', '.join(columns)
+    update_columns = [col for col in columns if col not in ('app_id', 'platform', 'country_code')]
+    update_assignments = ', '.join([f"{col} = excluded.{col}" for col in update_columns])
 
     for app_data in apps_data:
         try:
             values = tuple(app_data.get(col) for col in columns)
             cursor.execute(f"""
-                INSERT OR REPLACE INTO apps ({columns_str}, updated_at)
+                INSERT INTO apps ({columns_str}, updated_at)
                 VALUES ({placeholders}, CURRENT_TIMESTAMP)
+                ON CONFLICT(app_id, platform, country_code) DO UPDATE SET
+                    {update_assignments},
+                    updated_at = CURRENT_TIMESTAMP
             """, values)
             saved_count += 1
         except Exception as e:
