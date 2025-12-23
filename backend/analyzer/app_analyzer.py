@@ -137,7 +137,7 @@ def analyze_and_update_scores():
         # 데이터베이스 업데이트
         cursor.execute("""
             UPDATE apps
-            SET score = ?, is_featured = ?
+            SET score = ?, is_featured = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         """, (score, is_featured, app['id']))
 
