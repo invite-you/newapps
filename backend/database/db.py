@@ -157,6 +157,15 @@ def init_database(force_reset: bool = False):
             UNIQUE(app_id, platform, country_code)
         )
     """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_apps_updated_at
+        AFTER UPDATE ON apps
+        FOR EACH ROW
+        WHEN NEW.updated_at = OLD.updated_at
+        BEGIN
+            UPDATE apps SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+        END;
+    """)
 
     # 인덱스 생성 (성능 최적화)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_platform ON apps(platform)")
