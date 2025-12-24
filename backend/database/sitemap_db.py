@@ -19,8 +19,16 @@ from config import (
 )
 from database.db import log_step
 
+# 영구 제외 에러 사유 (재시도 불필요)
+PERMANENT_FAILURE_REASONS = frozenset(["not_found_404", "app_removed"])
+
 # Sitemap 데이터베이스 경로 (database 폴더에 정리)
 SITEMAP_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "database", "sitemap_tracking.db")
+
+
+def _dict_factory(cursor, row):
+    """sqlite3 결과를 딕셔너리로 변환하는 팩토리"""
+    return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
 
 
 def get_connection():
@@ -31,7 +39,7 @@ def get_connection():
 
     # timeout=30으로 lock 대기 시간 설정
     conn = sqlite3.connect(SITEMAP_DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
+    conn.row_factory = _dict_factory  # dict로 반환하여 .get() 사용 가능
 
     # WAL 모드 활성화 - 동시 읽기/쓰기 성능 향상
     conn.execute("PRAGMA journal_mode=WAL")
@@ -44,8 +52,6 @@ def get_connection():
 def init_sitemap_database():
     """Sitemap 트래킹 데이터베이스 초기화"""
     timing_tracker.start_task("Sitemap DB 초기화")
-    log_step("Sitemap DB 초기화", f"Sitemap 트래킹 DB 초기화 시작", "Sitemap DB 초기화")
-    log_step("Sitemap DB 초기화", f"  DB 경로: {SITEMAP_DB_PATH}", "Sitemap DB 초기화")
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -142,9 +148,6 @@ def init_sitemap_database():
 
     conn.commit()
     conn.close()
-
-    log_step("Sitemap DB 초기화", "  테이블 및 인덱스 생성/확인 완료", "Sitemap DB 초기화")
-    log_step("Sitemap DB 초기화", "Sitemap 트래킹 DB 초기화 완료", "Sitemap DB 초기화")
 
 
 def get_known_app_ids(platform: str) -> Set[str]:
@@ -333,11 +336,7 @@ def upsert_failed_app_detail(app_id: str, platform: str, country_code: Optional[
 
     retry_count = row['retry_count'] if row else 0
     if retry_count >= FAILED_RETRY_WARNING_THRESHOLD:
-        log_step(
-            "실패 경고",
-            f"[경고] 재시도 임계치 초과 (app_id={app_id}, platform={platform}, country={country_code}, 누적={retry_count}회, 사유={reason})",
-            "실패 경고"
-        )
+        log_step("경고", f"재시도 {retry_count}회 초과: {app_id} ({reason})", "경고")
     return retry_count
 
 
@@ -375,7 +374,7 @@ def _get_failed_details(platform: str, candidate_apps: List[Tuple[str, Optional[
     for row in rows:
         key = (row['app_id'], row['country_code'])
         if key not in result:
-            result[key] = dict(row)
+            result[key] = row  # row_factory가 이미 dict 반환
 
     return result
 
@@ -395,6 +394,7 @@ def _parse_failed_at(value: Optional[str]) -> Optional[datetime]:
 def prioritize_for_retry(platform: str, candidate_apps: List[Tuple[str, Optional[str]]], limit: int) -> List[Tuple[str, Optional[str]]]:
     """
     실패 기록을 고려하여 재시도 우선순위를 정리
+    - 영구 제외 앱 (404 등) 필터링
     - 실패 횟수가 적은 순서
     - 오래전에 실패한 항목 우선
     - 최근 실패 후 쿨다운 시간 내 항목은 제외
@@ -403,23 +403,36 @@ def prioritize_for_retry(platform: str, candidate_apps: List[Tuple[str, Optional
     now = datetime.now()
     allowed: List[Tuple[int, datetime, str, Optional[str]]] = []
     skipped_recent = 0
+    skipped_permanent = 0
 
     for app_id, country_code in candidate_apps:
         failed_info = failed_map.get((app_id, country_code)) or failed_map.get((app_id, None))
-        retry_count = failed_info.get('retry_count', 0) if failed_info else 0
-        failed_at = _parse_failed_at(failed_info.get('failed_at')) if failed_info else None
+        if not failed_info:
+            # 실패 기록 없음 - 최우선 처리
+            allowed.append((0, datetime.min, app_id, country_code))
+            continue
 
-        if failed_at:
-            if now - failed_at < timedelta(minutes=FAILED_RETRY_COOLDOWN_MINUTES):
-                skipped_recent += 1
-                continue
+        reason = failed_info.get('reason', '')
+        # 영구 제외 대상 (404 등)
+        if reason in PERMANENT_FAILURE_REASONS:
+            skipped_permanent += 1
+            continue
+
+        retry_count = failed_info.get('retry_count', 0)
+        failed_at = _parse_failed_at(failed_info.get('failed_at'))
+
+        if failed_at and now - failed_at < timedelta(minutes=FAILED_RETRY_COOLDOWN_MINUTES):
+            skipped_recent += 1
+            continue
+
         allowed.append((retry_count, failed_at or datetime.min, app_id, country_code))
 
     allowed.sort(key=lambda item: (item[0], item[1]))
-    if skipped_recent:
+
+    if skipped_permanent or skipped_recent:
         log_step(
             "재시도 필터",
-            f"최근 실패 쿨다운으로 {skipped_recent}개 제외 (platform={platform}, 후보={len(candidate_apps)}개, 쿨다운={FAILED_RETRY_COOLDOWN_MINUTES}분)",
+            f"[{platform}] 영구제외={skipped_permanent}, 쿨다운={skipped_recent}, 대상={len(allowed)}/{len(candidate_apps)}",
             "재시도 필터"
         )
     return [(app_id, country_code) for _, _, app_id, country_code in allowed][:limit]
