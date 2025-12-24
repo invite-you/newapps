@@ -67,8 +67,11 @@ def fetch_chart_apps(country_code, feed_type, limit=200):
 
         return app_ids, chart_info
 
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        print(f"  RSS API 오류 [{feed_type}]: {str(e)}")
+    except requests.RequestException as e:
+        log_step("App Store RSS", f"[오류] RSS API 요청 실패 (feed={feed_type}, country={country_code}): {str(e)}", "App Store RSS")
+        return [], {}
+    except json.JSONDecodeError as e:
+        log_step("App Store RSS", f"[오류] RSS API 응답 JSON 파싱 실패 (feed={feed_type}, country={country_code}): {str(e)}", "App Store RSS")
         return [], {}
 
 
@@ -98,7 +101,7 @@ def fetch_app_details(app_ids, country_code):
             response = requests.get(LOOKUP_API_BASE, params=params, **get_request_kwargs())
 
             if response.status_code != 200:
-                print(f"  Lookup API 오류: HTTP {response.status_code}")
+                log_step("App Store Lookup", f"[오류] Lookup API HTTP {response.status_code} (country={country_code}, batch={i//batch_size + 1})", "App Store Lookup")
                 continue
 
             data = response.json()
@@ -113,8 +116,11 @@ def fetch_app_details(app_ids, country_code):
             if i + batch_size < len(app_ids):
                 time.sleep(REQUEST_DELAY)
 
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            print(f"  Lookup API 오류: {str(e)}")
+        except requests.RequestException as e:
+            log_step("App Store Lookup", f"[오류] Lookup API 요청 실패 (country={country_code}, batch={i//batch_size + 1}): {str(e)}", "App Store Lookup")
+            continue
+        except json.JSONDecodeError as e:
+            log_step("App Store Lookup", f"[오류] Lookup API 응답 JSON 파싱 실패 (country={country_code}, batch={i//batch_size + 1}): {str(e)}", "App Store Lookup")
             continue
 
     return all_details
@@ -303,7 +309,7 @@ def save_apps_to_db(apps_data):
             """, values)
             saved_count += 1
         except Exception as e:
-            print(f"  저장 실패 [{app_data.get('app_id')}]: {str(e)}")
+            log_step("App Store DB", f"[오류] 앱 저장 실패 (app_id={app_data.get('app_id')}): {str(e)}", "App Store DB")
 
     conn.commit()
     conn.close()
@@ -322,17 +328,19 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
     Returns:
         수집된 앱 개수
     """
+    task_name = f"App Store 수집 [{country_code.upper()}]"
     start_time = datetime.now()
-    log_step(f"App Store 수집 [{country_code.upper()}]", "시작", start_time)
+    log_step(task_name, f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", task_name)
 
     all_app_ids = []
     all_chart_info = {}
 
     # 1. RSS API로 각 피드에서 앱 ID 수집
+    log_step(task_name, f"[1단계] RSS API에서 피드별 앱 목록 수집 시작 (피드 수: {len(APPLE_RSS_FEEDS)}개)", task_name)
     for feed_type in APPLE_RSS_FEEDS:
-        print(f"  피드 수집: {feed_type}")
+        log_step(task_name, f"  피드 '{feed_type}' 수집 중...", task_name)
         app_ids, chart_info = fetch_chart_apps(country_code, feed_type, limit)
-        print(f"    -> {len(app_ids)}개 앱 발견")
+        log_step(task_name, f"  피드 '{feed_type}' 결과: {len(app_ids)}개 앱 발견", task_name)
 
         for app_id in app_ids:
             if app_id not in all_chart_info:
@@ -342,17 +350,22 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
         time.sleep(REQUEST_DELAY)
 
     if not all_app_ids:
-        log_step(f"App Store 수집 [{country_code.upper()}]", "앱 없음", start_time)
+        log_step(task_name, "수집 결과: 앱 없음 (RSS API에서 데이터를 가져오지 못함)", task_name)
         return 0
 
-    print(f"  총 {len(all_app_ids)}개 고유 앱 ID 수집됨")
+    log_step(task_name, f"[1단계 완료] 총 {len(all_app_ids)}개 고유 앱 ID 수집됨", task_name)
 
     # 2. Lookup API로 상세 정보 수집
-    print("  상세 정보 수집 중...")
+    log_step(task_name, f"[2단계] iTunes Lookup API로 상세 정보 수집 시작 (앱 수: {len(all_app_ids)}개)", task_name)
     app_details = fetch_app_details(all_app_ids, country_code)
-    print(f"  -> {len(app_details)}개 앱 상세 정보 수집됨")
+    log_step(task_name, f"[2단계 완료] {len(app_details)}개 앱 상세 정보 수집 성공", task_name)
+
+    if len(app_details) < len(all_app_ids):
+        failed_count = len(all_app_ids) - len(app_details)
+        log_step(task_name, f"  경고: {failed_count}개 앱 상세 정보 수집 실패", task_name)
 
     # 3. 데이터 파싱 및 저장
+    log_step(task_name, f"[3단계] 데이터 파싱 및 DB 저장 시작", task_name)
     apps_data = []
     for app_id, details in app_details.items():
         parsed = parse_app_store_data(details, country_code, all_chart_info)
@@ -365,27 +378,48 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
     )
 
     saved_count = save_apps_to_db(apps_data)
-    log_step(f"App Store 수집 [{country_code.upper()}]", f"완료 ({saved_count}개 저장)", start_time)
+    elapsed_seconds = (datetime.now() - start_time).total_seconds()
+    log_step(
+        task_name,
+        f"[완료] 저장: {saved_count}개, 소요시간: {elapsed_seconds:.1f}초",
+        task_name
+    )
 
     return saved_count
 
 
 def scrape_all_countries():
     """모든 국가의 App Store에서 앱 수집"""
+    task_name = "App Store 전체 수집"
     total_start = datetime.now()
-    log_step("App Store 전체 수집", "시작", total_start)
+    log_step(task_name, f"전체 수집 시작 (국가 수: {len(COUNTRIES)}개, 타임스탬프: {total_start.strftime('%Y-%m-%d %H:%M:%S')})", task_name)
 
     total_apps = 0
-    for country in COUNTRIES:
+    success_countries = 0
+    failed_countries = []
+
+    for i, country in enumerate(COUNTRIES, 1):
         try:
+            log_step(task_name, f"[{i}/{len(COUNTRIES)}] {country['name']} ({country['code']}) 수집 시작", task_name)
             count = scrape_new_apps_by_country(country['code'])
             total_apps += count
+            success_countries += 1
+            log_step(task_name, f"[{i}/{len(COUNTRIES)}] {country['name']} 완료: {count}개 앱 저장", task_name)
             time.sleep(REQUEST_DELAY * 2)  # 국가 간 딜레이
         except Exception as e:
-            print(f"  오류 발생 [{country['code']}]: {str(e)}")
+            failed_countries.append(country['code'])
+            log_step(task_name, f"[오류] {country['name']} ({country['code']}) 수집 실패: {str(e)}", task_name)
             continue
 
-    log_step("App Store 전체 수집", f"완료 (총 {total_apps}개 앱)", total_start)
+    elapsed_seconds = (datetime.now() - total_start).total_seconds()
+    log_step(
+        task_name,
+        f"[완료] 총 {total_apps}개 앱 저장 | 성공: {success_countries}개국 | 실패: {len(failed_countries)}개국 | 소요시간: {elapsed_seconds:.1f}초",
+        task_name
+    )
+    if failed_countries:
+        log_step(task_name, f"  실패 국가 목록: {', '.join(failed_countries)}", task_name)
+
     return total_apps
 
 

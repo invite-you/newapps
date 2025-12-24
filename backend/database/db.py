@@ -60,14 +60,17 @@ def init_database(force_reset: bool = False):
         force_reset: True면 테이블 삭제 후 재생성 (기존 데이터 삭제됨)
     """
     timing_tracker.start_task("데이터베이스 초기화")
-    log_step("데이터베이스 초기화", "시작", "데이터베이스 초기화")
+    log_step("데이터베이스 초기화", f"Apps DB 초기화 시작 (force_reset={force_reset})", "데이터베이스 초기화")
+    log_step("데이터베이스 초기화", f"  DB 경로: {DATABASE_PATH}", "데이터베이스 초기화")
 
     conn = get_connection()
     cursor = conn.cursor()
 
     # 기존 테이블 삭제 (스키마 변경 시에만 사용)
     if force_reset:
+        log_step("데이터베이스 초기화", "  [경고] 기존 테이블 삭제 중 (force_reset=True)...", "데이터베이스 초기화")
         cursor.execute("DROP TABLE IF EXISTS apps")
+        log_step("데이터베이스 초기화", "  [경고] 기존 테이블 삭제 완료", "데이터베이스 초기화")
 
     # 확장된 앱 정보 테이블 - App Store/Google Play 모든 필드 포함
     cursor.execute("""
@@ -200,7 +203,8 @@ def init_database(force_reset: bool = False):
     conn.commit()
     conn.close()
 
-    log_step("데이터베이스 초기화", "완료", "데이터베이스 초기화")
+    log_step("데이터베이스 초기화", "  테이블 및 인덱스 생성/확인 완료", "데이터베이스 초기화")
+    log_step("데이터베이스 초기화", "Apps DB 초기화 완료", "데이터베이스 초기화")
 
 
 def get_app_columns():

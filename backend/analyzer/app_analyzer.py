@@ -33,6 +33,7 @@ def calculate_app_score(app):
         0-100 사이의 점수
     """
     score = 0.0
+    app_id = app.get('app_id', 'unknown')
 
     # 1. 평점 점수 (0-30점)
     rating = app['rating'] or 0
@@ -56,7 +57,7 @@ def calculate_app_score(app):
             install_score = min(math.log10(installs_num + 1) / 6.0, 1.0)
             score += install_score * 20 * SCORE_WEIGHTS['installs'] / 0.2
         except (ValueError, TypeError) as e:
-            print(f"설치 수 파싱 실패: {installs} - {str(e)}")
+            log_step("앱 점수 계산", f"[경고] 설치 수 파싱 실패 (app_id={app_id}, installs={installs}): {str(e)}", "앱 점수 계산")
 
     # 4. 최신성 점수 (0-20점)
     # 최근 30일 이내 = 만점, 그 이후로는 감소
@@ -81,7 +82,7 @@ def calculate_app_score(app):
 
             score += freshness_score * 20 * SCORE_WEIGHTS['freshness'] / 0.2
     except (ValueError, TypeError, AttributeError) as e:
-        print(f"날짜 파싱 실패: {updated_date} - {str(e)}")
+        log_step("앱 점수 계산", f"[경고] 날짜 파싱 실패 (app_id={app_id}, updated_date={updated_date}): {str(e)}", "앱 점수 계산")
 
     # 5. 성장률 점수 (0-10점)
     # 리뷰 수 대비 앱의 나이로 계산
@@ -102,7 +103,7 @@ def calculate_app_score(app):
                     growth_score = min(math.log10(reviews_per_day * 10 + 1) / 2.0, 1.0)
                     score += growth_score * 10 * SCORE_WEIGHTS['growth_rate'] / 0.1
     except (ValueError, TypeError, AttributeError, ZeroDivisionError) as e:
-        print(f"성장률 계산 실패: {str(e)}")
+        log_step("앱 점수 계산", f"[경고] 성장률 계산 실패 (app_id={app_id}): {str(e)}", "앱 점수 계산")
 
     return round(score, 2)
 
@@ -110,22 +111,44 @@ def calculate_app_score(app):
 def analyze_and_update_scores():
     """모든 앱의 점수를 계산하고 업데이트"""
     task_name = "앱 점수 계산"
+    start_time = datetime.now()
     timing_tracker.start_task(task_name)
-    log_step(task_name, "시작", task_name)
+    log_step(task_name, f"========== 앱 점수 계산 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')}) ==========", task_name)
 
     conn = get_connection()
     cursor = conn.cursor()
 
     # 모든 앱 조회
+    log_step(task_name, "[1단계] DB에서 모든 앱 조회 중...", task_name)
     cursor.execute("SELECT * FROM apps")
     apps = cursor.fetchall()
+    log_step(task_name, f"[1단계 완료] 총 {len(apps):,}개 앱 조회됨", task_name)
 
+    if not apps:
+        log_step(task_name, "[결과] 분석할 앱이 없습니다", task_name)
+        conn.close()
+        return 0, 0
+
+    log_step(task_name, "[2단계] 앱 점수 계산 및 DB 업데이트 중...", task_name)
     updated_count = 0
     featured_count = 0
+    score_distribution = {'0-20': 0, '20-40': 0, '40-60': 0, '60-80': 0, '80-100': 0}
 
-    for app in apps:
+    for i, app in enumerate(apps):
         # 점수 계산
         score = calculate_app_score(app)
+
+        # 점수 분포 통계
+        if score < 20:
+            score_distribution['0-20'] += 1
+        elif score < 40:
+            score_distribution['20-40'] += 1
+        elif score < 60:
+            score_distribution['40-60'] += 1
+        elif score < 80:
+            score_distribution['60-80'] += 1
+        else:
+            score_distribution['80-100'] += 1
 
         # 주목할만한 앱 판단
         is_featured = 0
@@ -144,10 +167,34 @@ def analyze_and_update_scores():
 
         updated_count += 1
 
+        # 진행 상황 출력 (500개마다)
+        if (i + 1) % 500 == 0:
+            log_step(task_name, f"  진행: {i + 1:,}/{len(apps):,}개 처리됨 ({(i+1)*100//len(apps)}%)", task_name)
+
     conn.commit()
     conn.close()
 
-    log_step(task_name, f"완료 ({updated_count}개 업데이트, {featured_count}개 주목 앱)", task_name)
+    elapsed_seconds = (datetime.now() - start_time).total_seconds()
+
+    # 결과 요약
+    log_step(task_name, "[2단계 완료] 점수 계산 완료", task_name)
+    log_step(task_name, "", task_name)
+    log_step(task_name, "=" * 50, task_name)
+    log_step(task_name, "       앱 점수 분석 결과 요약", task_name)
+    log_step(task_name, "=" * 50, task_name)
+    log_step(task_name, f"  총 앱 수: {updated_count:,}개", task_name)
+    log_step(task_name, f"  주목 앱 수: {featured_count:,}개 (평점 ≥{MINIMUM_RATING}, 리뷰 ≥{MINIMUM_RATING_COUNT}, 점수 ≥{MINIMUM_SCORE})", task_name)
+    log_step(task_name, "", task_name)
+    log_step(task_name, "  점수 분포:", task_name)
+    for range_name, count in score_distribution.items():
+        percentage = count * 100 // updated_count if updated_count > 0 else 0
+        bar = "█" * (percentage // 5)
+        log_step(task_name, f"    {range_name}점: {count:,}개 ({percentage}%) {bar}", task_name)
+    log_step(task_name, "", task_name)
+    log_step(task_name, f"  소요 시간: {elapsed_seconds:.1f}초", task_name)
+    log_step(task_name, "=" * 50, task_name)
+    log_step(task_name, f"========== 앱 점수 계산 완료 ==========", task_name)
+
     return updated_count, featured_count
 
 

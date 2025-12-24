@@ -44,7 +44,8 @@ def get_connection():
 def init_sitemap_database():
     """Sitemap 트래킹 데이터베이스 초기화"""
     timing_tracker.start_task("Sitemap DB 초기화")
-    log_step("Sitemap DB 초기화", "시작", "Sitemap DB 초기화")
+    log_step("Sitemap DB 초기화", f"Sitemap 트래킹 DB 초기화 시작", "Sitemap DB 초기화")
+    log_step("Sitemap DB 초기화", f"  DB 경로: {SITEMAP_DB_PATH}", "Sitemap DB 초기화")
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -142,7 +143,8 @@ def init_sitemap_database():
     conn.commit()
     conn.close()
 
-    log_step("Sitemap DB 초기화", "완료", "Sitemap DB 초기화")
+    log_step("Sitemap DB 초기화", "  테이블 및 인덱스 생성/확인 완료", "Sitemap DB 초기화")
+    log_step("Sitemap DB 초기화", "Sitemap 트래킹 DB 초기화 완료", "Sitemap DB 초기화")
 
 
 def get_known_app_ids(platform: str) -> Set[str]:
@@ -254,7 +256,7 @@ def save_discovered_apps(
         conn.commit()
 
     except sqlite3.Error as e:
-        print(f"  [오류] 배치 저장 실패: {e}")
+        log_step("Sitemap DB", f"[오류] 배치 저장 실패: {type(e).__name__}: {str(e)}", "Sitemap DB")
         conn.rollback()
     finally:
         conn.close()
@@ -333,7 +335,8 @@ def upsert_failed_app_detail(app_id: str, platform: str, country_code: Optional[
     if retry_count >= FAILED_RETRY_WARNING_THRESHOLD:
         log_step(
             "실패 경고",
-            f"재시도 임계치 초과 (app_id={app_id}, platform={platform}, country={country_code}, 누적={retry_count}, 사유={reason})"
+            f"[경고] 재시도 임계치 초과 (app_id={app_id}, platform={platform}, country={country_code}, 누적={retry_count}회, 사유={reason})",
+            "실패 경고"
         )
     return retry_count
 
@@ -416,7 +419,8 @@ def prioritize_for_retry(platform: str, candidate_apps: List[Tuple[str, Optional
     if skipped_recent:
         log_step(
             "재시도 필터",
-            f"최근 실패 쿨다운으로 {skipped_recent}개 제외 (platform={platform}, 후보={len(candidate_apps)})"
+            f"최근 실패 쿨다운으로 {skipped_recent}개 제외 (platform={platform}, 후보={len(candidate_apps)}개, 쿨다운={FAILED_RETRY_COOLDOWN_MINUTES}분)",
+            "재시도 필터"
         )
     return [(app_id, country_code) for _, _, app_id, country_code in allowed][:limit]
 

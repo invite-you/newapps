@@ -56,9 +56,10 @@ def search_apps(query, country_code, lang='en', n_hits=30):
             country=country_code,
             n_hits=min(n_hits, 30)  # 최대 30개
         )
-        return [r.get('appId') for r in results if r.get('appId')]
+        app_ids = [r.get('appId') for r in results if r.get('appId')]
+        return app_ids
     except Exception as e:
-        print(f"    검색 오류 [{query}]: {str(e)[:50]}")
+        log_step("Google Play 검색", f"[오류] 검색 실패 (query='{query}', country={country_code}): {str(e)}", "Google Play 검색")
         return []
 
 
@@ -77,7 +78,7 @@ def get_app_details(app_id, country_code, lang='en'):
     try:
         return app(app_id, lang=lang, country=country_code)
     except Exception as e:
-        print(f"    상세정보 오류 [{app_id}]: {str(e)[:50]}")
+        log_step("Google Play 상세", f"[오류] 앱 상세정보 수집 실패 (app_id={app_id}, country={country_code}): {str(e)}", "Google Play 상세")
         return None
 
 
@@ -259,7 +260,7 @@ def save_apps_to_db(apps_data):
             """, values)
             saved_count += 1
         except Exception as e:
-            print(f"  저장 실패 [{app_data.get('app_id')}]: {str(e)}")
+            log_step("Google Play DB", f"[오류] 앱 저장 실패 (app_id={app_data.get('app_id')}): {str(e)}", "Google Play DB")
 
     conn.commit()
     conn.close()
@@ -279,8 +280,9 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
         수집된 앱 개수
     """
     task_name = f"Google Play 수집 [{country_code.upper()}]"
+    start_time = datetime.now()
     timing_tracker.start_task(task_name)
-    log_step(task_name, "시작", task_name)
+    log_step(task_name, f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')}, limit={limit})", task_name)
 
     # 언어 설정 (국가별)
     lang_map = {
@@ -290,32 +292,34 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
         'id': 'id', 'in': 'hi', 'ar': 'ar', 'sa': 'ar',
     }
     lang = lang_map.get(country_code, 'en')
+    log_step(task_name, f"  언어 설정: {lang}", task_name)
 
     all_app_ids = set()
 
     # 1. 여러 검색어로 앱 ID 수집
-    print(f"  검색어 {len(GOOGLE_PLAY_SEARCH_QUERIES)}개로 앱 검색 중...")
+    log_step(task_name, f"[1단계] 검색어 {len(GOOGLE_PLAY_SEARCH_QUERIES)}개로 앱 검색 시작", task_name)
     for query in GOOGLE_PLAY_SEARCH_QUERIES:
         app_ids = search_apps(query, country_code, lang=lang)
         before_count = len(all_app_ids)
         all_app_ids.update(app_ids)
         new_count = len(all_app_ids) - before_count
         if new_count > 0:
-            print(f"    [{query}]: +{new_count}개 (총 {len(all_app_ids)}개)")
+            log_step(task_name, f"  검색어 '{query}': +{new_count}개 (누적: {len(all_app_ids)}개)", task_name)
         time.sleep(REQUEST_DELAY)
 
         # 목표 개수 도달 시 중단
         if len(all_app_ids) >= limit:
+            log_step(task_name, f"  목표 수량 {limit}개 달성, 검색 종료", task_name)
             break
 
     if not all_app_ids:
-        log_step(task_name, "앱 없음", task_name)
+        log_step(task_name, "[결과] 앱 없음 - 검색 결과가 비어있습니다", task_name)
         return 0
 
-    print(f"  총 {len(all_app_ids)}개 고유 앱 ID 수집됨")
+    log_step(task_name, f"[1단계 완료] 총 {len(all_app_ids)}개 고유 앱 ID 수집됨", task_name)
 
     # 2. 각 앱의 상세 정보 수집
-    print("  상세 정보 수집 중...")
+    log_step(task_name, f"[2단계] 앱 상세 정보 수집 시작 (최대 {min(limit, len(all_app_ids))}개)", task_name)
     apps_data = []
     collected = 0
     failed = 0
@@ -332,11 +336,11 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
 
         # 진행상황 출력 (50개마다)
         if (collected + failed) % 50 == 0:
-            print(f"    진행: {collected}개 수집, {failed}개 실패")
+            log_step(task_name, f"  진행: {collected}개 수집, {failed}개 실패", task_name)
 
         time.sleep(REQUEST_DELAY)
 
-    print(f"  -> {len(apps_data)}개 앱 상세 정보 수집됨")
+    log_step(task_name, f"[2단계 완료] {len(apps_data)}개 앱 상세 정보 수집 성공, {failed}개 실패", task_name)
 
     # 최근 업데이트 순으로 정렬
     apps_data.sort(
@@ -345,8 +349,14 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
     )
 
     # 3. 데이터베이스에 저장
+    log_step(task_name, f"[3단계] DB에 앱 정보 저장 중...", task_name)
     saved_count = save_apps_to_db(apps_data)
-    log_step(task_name, f"완료 ({saved_count}개 저장)", task_name)
+    elapsed_seconds = (datetime.now() - start_time).total_seconds()
+    log_step(
+        task_name,
+        f"[완료] 저장: {saved_count}개 | 수집: {collected}개 | 실패: {failed}개 | 소요시간: {elapsed_seconds:.1f}초",
+        task_name
+    )
 
     return saved_count
 
@@ -354,20 +364,36 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
 def scrape_all_countries():
     """모든 국가의 Google Play Store에서 앱 수집"""
     task_name = "Google Play 전체 수집"
+    start_time = datetime.now()
     timing_tracker.start_task(task_name)
-    log_step(task_name, "시작", task_name)
+    log_step(task_name, f"전체 수집 시작 (국가 수: {len(COUNTRIES)}개, 타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", task_name)
 
     total_apps = 0
-    for country in COUNTRIES:
+    success_countries = 0
+    failed_countries = []
+
+    for i, country in enumerate(COUNTRIES, 1):
         try:
+            log_step(task_name, f"[{i}/{len(COUNTRIES)}] {country['name']} ({country['code']}) 수집 시작", task_name)
             count = scrape_new_apps_by_country(country['code'])
             total_apps += count
+            success_countries += 1
+            log_step(task_name, f"[{i}/{len(COUNTRIES)}] {country['name']} 완료: {count}개 앱 저장", task_name)
             time.sleep(REQUEST_DELAY * 2)  # 국가 간 딜레이
         except Exception as e:
-            print(f"  오류 발생 [{country['code']}]: {str(e)}")
+            failed_countries.append(country['code'])
+            log_step(task_name, f"[오류] {country['name']} ({country['code']}) 수집 실패: {str(e)}", task_name)
             continue
 
-    log_step(task_name, f"완료 (총 {total_apps}개 앱)", task_name)
+    elapsed_seconds = (datetime.now() - start_time).total_seconds()
+    log_step(
+        task_name,
+        f"[완료] 총 {total_apps}개 앱 저장 | 성공: {success_countries}개국 | 실패: {len(failed_countries)}개국 | 소요시간: {elapsed_seconds:.1f}초",
+        task_name
+    )
+    if failed_countries:
+        log_step(task_name, f"  실패 국가 목록: {', '.join(failed_countries)}", task_name)
+
     return total_apps
 
 

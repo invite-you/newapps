@@ -132,9 +132,12 @@ class GooglePlaySitemapCollector:
                 for app_id in matches:
                     app_metadata[app_id] = {}
 
-        except Exception:
-            # 개별 sitemap 실패는 조용히 넘김 (전체 수집 중)
-            pass
+        except requests.RequestException as e:
+            log_step("Google Play Sitemap", f"[오류] sitemap 요청 실패 ({sitemap_filename}): {str(e)}", "Google Play Sitemap")
+        except gzip.BadGzipFile as e:
+            log_step("Google Play Sitemap", f"[오류] gzip 압축 해제 실패 ({sitemap_filename}): {str(e)}", "Google Play Sitemap")
+        except Exception as e:
+            log_step("Google Play Sitemap", f"[오류] sitemap 처리 중 예외 ({sitemap_filename}): {type(e).__name__}: {str(e)}", "Google Play Sitemap")
 
         return app_metadata, sitemap_filename
 
@@ -191,7 +194,9 @@ class GooglePlaySitemapCollector:
                         if sitemap_count % 100 == 0:
                             log_step("Google Play", f"진행: {sitemap_count}개 sitemap, {len(all_app_metadata)}개 앱 ID", "Google Play Sitemap")
 
-                    except Exception:
+                    except Exception as e:
+                        sitemap_url = futures.get(future, "unknown")
+                        log_step("Google Play Sitemap", f"[오류] 병렬 처리 중 예외 ({sitemap_url}): {type(e).__name__}: {str(e)}", "Google Play Sitemap")
                         continue
 
         log_step("Google Play Sitemap", f"수집 완료: {len(all_app_metadata)}개 앱 ID", "Google Play Sitemap")
@@ -328,8 +333,12 @@ class AppStoreSitemapCollector:
                 if country_match:
                     country_code = country_match.group(1)
 
-        except Exception:
-            pass
+        except requests.RequestException as e:
+            log_step("App Store Sitemap", f"[오류] sitemap 요청 실패 ({sitemap_filename}): {str(e)}", "App Store Sitemap")
+        except gzip.BadGzipFile as e:
+            log_step("App Store Sitemap", f"[오류] gzip 압축 해제 실패 ({sitemap_filename}): {str(e)}", "App Store Sitemap")
+        except Exception as e:
+            log_step("App Store Sitemap", f"[오류] sitemap 처리 중 예외 ({sitemap_filename}): {type(e).__name__}: {str(e)}", "App Store Sitemap")
 
         return app_metadata, country_code, sitemap_filename
 
@@ -386,7 +395,9 @@ class AppStoreSitemapCollector:
                             if sitemap_count % 50 == 0:
                                 log_step("App Store", f"{sitemap_type} 진행: {sitemap_count}개, {len(all_app_metadata)}개 앱", "App Store Sitemap")
 
-                        except Exception:
+                        except Exception as e:
+                            sitemap_url = futures.get(future, "unknown")
+                            log_step("App Store Sitemap", f"[오류] 병렬 처리 중 예외 ({sitemap_url}): {type(e).__name__}: {str(e)}", "App Store Sitemap")
                             continue
 
             result[sitemap_type] = (all_app_metadata, app_to_sitemap, sitemap_count)
@@ -406,36 +417,47 @@ def collect_and_save_google_play_apps(limit: int = None) -> Dict:
     Returns:
         수집 결과 통계
     """
+    from datetime import datetime
+    start_time = datetime.now()
+
     timing_tracker.start_task("Google Play 수집")
-    log_step("Google Play 수집", "시작", "Google Play 수집")
+    log_step("Google Play 수집", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')}, limit={limit})", "Google Play 수집")
 
     # DB 초기화
+    log_step("Google Play 수집", "[1단계] Sitemap DB 초기화 중...", "Google Play 수집")
     init_sitemap_database()
+    log_step("Google Play 수집", "[1단계 완료] Sitemap DB 초기화 완료", "Google Play 수집")
 
     # 기존에 알려진 앱 ID
+    log_step("Google Play 수집", "[2단계] 기존 앱 ID 조회 중...", "Google Play 수집")
     known_ids = get_known_app_ids('google_play')
-    log_step("Google Play", f"기존 앱 ID: {len(known_ids)}개", "Google Play 수집")
+    log_step("Google Play 수집", f"[2단계 완료] 기존 앱 ID: {len(known_ids):,}개", "Google Play 수집")
 
     # 새로 수집
+    log_step("Google Play 수집", "[3단계] Sitemap에서 앱 ID 수집 중...", "Google Play 수집")
     collector = GooglePlaySitemapCollector()
     all_app_metadata, app_to_sitemap, sitemap_count = collector.collect_all_app_ids(limit)
+    log_step("Google Play 수집", f"[3단계 완료] {sitemap_count}개 sitemap 처리 완료", "Google Play 수집")
 
     all_app_ids = set(all_app_metadata.keys())
+    log_step("Google Play 수집", f"  수집된 앱 ID: {len(all_app_ids):,}개", "Google Play 수집")
 
     # 신규 앱만 필터링
     new_app_ids = all_app_ids - known_ids
 
-    log_step("Google Play", f"신규 앱 ID: {len(new_app_ids)}개 (전체: {len(all_app_ids)}개)", "Google Play 수집")
+    log_step("Google Play 수집", f"[4단계] 신규 앱 분석 결과: 신규 {len(new_app_ids):,}개 / 기존 {len(known_ids):,}개 / 전체 {len(all_app_ids):,}개", "Google Play 수집")
 
     # 신규 앱 ID 최대 10개만 출력
     if new_app_ids:
         new_app_list = sorted(list(new_app_ids))[:10]
+        log_step("Google Play 수집", f"  신규 앱 예시 (최대 10개):", "Google Play 수집")
         for app_id in new_app_list:
-            print(f"  [신규] {app_id}")
+            log_step("Google Play 수집", f"    - {app_id}", "Google Play 수집")
         if len(new_app_ids) > 10:
-            print(f"  ... 외 {len(new_app_ids) - 10}개")
+            log_step("Google Play 수집", f"    ... 외 {len(new_app_ids) - 10}개", "Google Play 수집")
 
     # 저장 (앱별 sitemap 파일명 저장)
+    log_step("Google Play 수집", "[5단계] DB에 앱 정보 저장 중...", "Google Play 수집")
     new_count = 0
     updated_count = 0
     if all_app_ids:
@@ -467,9 +489,14 @@ def collect_and_save_google_play_apps(limit: int = None) -> Dict:
             new_count
         )
 
-        log_step("Google Play", f"저장 완료: 신규 {new_count}개, 업데이트 {updated_count}개", "Google Play 수집")
+        log_step("Google Play 수집", f"[5단계 완료] 저장 결과: 신규 {new_count:,}개, 업데이트 {updated_count:,}개", "Google Play 수집")
 
-    log_step("Google Play 수집", "완료", "Google Play 수집")
+    elapsed_seconds = (datetime.now() - start_time).total_seconds()
+    log_step(
+        "Google Play 수집",
+        f"[수집 완료] 총 {len(all_app_ids):,}개 앱 | 신규 {len(new_app_ids):,}개 | sitemap {sitemap_count}개 처리 | 소요시간: {elapsed_seconds:.1f}초",
+        "Google Play 수집"
+    )
 
     return {
         'platform': 'google_play',
@@ -490,19 +517,27 @@ def collect_and_save_app_store_apps(limit: int = None) -> Dict:
     Returns:
         수집 결과 통계
     """
+    from datetime import datetime
+    start_time = datetime.now()
+
     timing_tracker.start_task("App Store 수집")
-    log_step("App Store 수집", "시작", "App Store 수집")
+    log_step("App Store 수집", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')}, limit={limit})", "App Store 수집")
 
     # DB 초기화
+    log_step("App Store 수집", "[1단계] Sitemap DB 초기화 중...", "App Store 수집")
     init_sitemap_database()
+    log_step("App Store 수집", "[1단계 완료] Sitemap DB 초기화 완료", "App Store 수집")
 
     # 기존에 알려진 앱 ID
+    log_step("App Store 수집", "[2단계] 기존 앱 ID 조회 중...", "App Store 수집")
     known_ids = get_known_app_ids('app_store')
-    log_step("App Store", f"기존 앱 ID: {len(known_ids)}개", "App Store 수집")
+    log_step("App Store 수집", f"[2단계 완료] 기존 앱 ID: {len(known_ids):,}개", "App Store 수집")
 
     # 새로 수집
+    log_step("App Store 수집", "[3단계] Sitemap에서 앱 ID 수집 중...", "App Store 수집")
     collector = AppStoreSitemapCollector()
     results = collector.collect_all_app_ids(limit)
+    log_step("App Store 수집", "[3단계 완료] Sitemap 수집 완료", "App Store 수집")
 
     stats = {
         'platform': 'app_store',
@@ -512,19 +547,21 @@ def collect_and_save_app_store_apps(limit: int = None) -> Dict:
         'duration_seconds': 0
     }
 
+    log_step("App Store 수집", "[4단계] 타입별 결과 분석 및 저장 중...", "App Store 수집")
     for sitemap_type, (all_app_metadata, app_to_sitemap, sitemap_count) in results.items():
         all_app_ids = set(all_app_metadata.keys())
         new_app_ids = all_app_ids - known_ids
 
-        log_step("App Store", f"{sitemap_type}: {len(new_app_ids)}개 신규 (전체: {len(all_app_ids)}개)", "App Store 수집")
+        log_step("App Store 수집", f"  [{sitemap_type}] 신규: {len(new_app_ids):,}개 | 전체: {len(all_app_ids):,}개 | sitemap: {sitemap_count}개", "App Store 수집")
 
         # 신규 앱 ID 최대 10개만 출력
         if new_app_ids:
             new_app_list = sorted(list(new_app_ids))[:10]
+            log_step("App Store 수집", f"    신규 앱 예시 (최대 10개):", "App Store 수집")
             for app_id in new_app_list:
-                print(f"  [신규] {app_id}")
+                log_step("App Store 수집", f"      - {app_id}", "App Store 수집")
             if len(new_app_ids) > 10:
-                print(f"  ... 외 {len(new_app_ids) - 10}개")
+                log_step("App Store 수집", f"      ... 외 {len(new_app_ids) - 10}개", "App Store 수집")
 
         if all_app_ids:
             # sitemap 파일명별로 그룹화하여 저장
@@ -565,8 +602,13 @@ def collect_and_save_app_store_apps(limit: int = None) -> Dict:
         # known_ids 업데이트 (다음 타입 처리 시 중복 방지)
         known_ids.update(all_app_ids)
 
+    elapsed_seconds = (datetime.now() - start_time).total_seconds()
     stats['duration_seconds'] = timing_tracker.get_timing("App Store 수집")['task_duration']
-    log_step("App Store 수집", "완료", "App Store 수집")
+    log_step(
+        "App Store 수집",
+        f"[수집 완료] 총 {stats['total_collected']:,}개 앱 | 신규 {stats['new_apps']:,}개 | 소요시간: {elapsed_seconds:.1f}초",
+        "App Store 수집"
+    )
 
     return stats
 
@@ -582,32 +624,60 @@ def collect_all_sitemaps(google_limit: int = None, appstore_limit: int = None) -
     Returns:
         전체 수집 결과
     """
+    from datetime import datetime
+    start_time = datetime.now()
+
     timing_tracker.start_task("전체 Sitemap 수집")
-    log_step("전체 Sitemap 수집", "시작", "전체 Sitemap 수집")
+    log_step(
+        "전체 Sitemap 수집",
+        f"========== 전체 Sitemap 수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')}) ==========",
+        "전체 Sitemap 수집"
+    )
+    log_step("전체 Sitemap 수집", f"  Google Play limit: {google_limit}", "전체 Sitemap 수집")
+    log_step("전체 Sitemap 수집", f"  App Store limit: {appstore_limit}", "전체 Sitemap 수집")
+
+    log_step("전체 Sitemap 수집", ">>> Google Play 수집 시작 <<<", "전체 Sitemap 수집")
+    google_results = collect_and_save_google_play_apps(google_limit)
+
+    log_step("전체 Sitemap 수집", ">>> App Store 수집 시작 <<<", "전체 Sitemap 수집")
+    appstore_results = collect_and_save_app_store_apps(appstore_limit)
 
     results = {
-        'google_play': collect_and_save_google_play_apps(google_limit),
-        'app_store': collect_and_save_app_store_apps(appstore_limit),
+        'google_play': google_results,
+        'app_store': appstore_results,
         'total_duration_seconds': 0
     }
 
+    elapsed_seconds = (datetime.now() - start_time).total_seconds()
     results['total_duration_seconds'] = timing_tracker.get_timing("전체 Sitemap 수집")['task_duration']
 
     # 요약 출력
-    print("\n" + "=" * 60)
-    print("Sitemap 수집 결과 요약")
-    print("=" * 60)
-    print(f"Google Play: {results['google_play']['total_collected']:,}개 앱 "
-          f"(신규: {results['google_play']['new_apps']:,}개)")
+    log_step("전체 Sitemap 수집", "", "전체 Sitemap 수집")
+    log_step("전체 Sitemap 수집", "=" * 60, "전체 Sitemap 수집")
+    log_step("전체 Sitemap 수집", "       Sitemap 수집 결과 요약", "전체 Sitemap 수집")
+    log_step("전체 Sitemap 수집", "=" * 60, "전체 Sitemap 수집")
+    log_step(
+        "전체 Sitemap 수집",
+        f"Google Play: {results['google_play']['total_collected']:,}개 앱 (신규: {results['google_play']['new_apps']:,}개)",
+        "전체 Sitemap 수집"
+    )
 
     if 'by_type' in results['app_store']:
         for t, s in results['app_store']['by_type'].items():
-            print(f"App Store ({t}): {s['total']:,}개 앱 (신규: {s['new']:,}개)")
+            log_step(
+                "전체 Sitemap 수집",
+                f"App Store ({t}): {s['total']:,}개 앱 (신규: {s['new']:,}개)",
+                "전체 Sitemap 수집"
+            )
 
-    print(f"총 소요 시간: {results['total_duration_seconds']:.1f}초")
-    print("=" * 60 + "\n")
+    log_step("전체 Sitemap 수집", f"총 소요 시간: {elapsed_seconds:.1f}초", "전체 Sitemap 수집")
+    log_step("전체 Sitemap 수집", "=" * 60, "전체 Sitemap 수집")
 
-    log_step("전체 Sitemap 수집", "완료", "전체 Sitemap 수집")
+    log_step(
+        "전체 Sitemap 수집",
+        f"========== 전체 Sitemap 수집 완료 ==========",
+        "전체 Sitemap 수집"
+    )
 
     return results
 
