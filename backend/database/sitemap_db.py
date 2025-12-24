@@ -350,11 +350,12 @@ def clear_failed_app_detail(app_id: str, platform: str, country_code: Optional[s
     conn.close()
 
 
-def _get_failed_details(platform: str, app_ids: Set[str]) -> Dict[str, Dict]:
+def _get_failed_details(platform: str, candidate_apps: List[Tuple[str, Optional[str]]]) -> Dict[Tuple[str, Optional[str]], Dict]:
     """특정 플랫폼의 실패 기록을 조회"""
-    if not app_ids:
+    if not candidate_apps:
         return {}
 
+    app_ids = {app_id for app_id, _ in candidate_apps}
     conn = get_connection()
     cursor = conn.cursor()
     placeholders = ','.join(['?' for _ in app_ids])
@@ -367,11 +368,11 @@ def _get_failed_details(platform: str, app_ids: Set[str]) -> Dict[str, Dict]:
     rows = cursor.fetchall()
     conn.close()
 
-    result: Dict[str, Dict] = {}
+    result: Dict[Tuple[str, Optional[str]], Dict] = {}
     for row in rows:
-        app_id = row['app_id']
-        if app_id not in result:
-            result[app_id] = dict(row)
+        key = (row['app_id'], row['country_code'])
+        if key not in result:
+            result[key] = dict(row)
 
     return result
 
@@ -388,20 +389,20 @@ def _parse_failed_at(value: Optional[str]) -> Optional[datetime]:
     return None
 
 
-def prioritize_for_retry(platform: str, candidate_ids: Set[str], limit: int) -> List[str]:
+def prioritize_for_retry(platform: str, candidate_apps: List[Tuple[str, Optional[str]]], limit: int) -> List[Tuple[str, Optional[str]]]:
     """
     실패 기록을 고려하여 재시도 우선순위를 정리
     - 실패 횟수가 적은 순서
     - 오래전에 실패한 항목 우선
     - 최근 실패 후 쿨다운 시간 내 항목은 제외
     """
-    failed_map = _get_failed_details(platform, candidate_ids)
+    failed_map = _get_failed_details(platform, candidate_apps)
     now = datetime.now()
-    allowed: List[Tuple[int, datetime, str]] = []
+    allowed: List[Tuple[int, datetime, str, Optional[str]]] = []
     skipped_recent = 0
 
-    for app_id in candidate_ids:
-        failed_info = failed_map.get(app_id)
+    for app_id, country_code in candidate_apps:
+        failed_info = failed_map.get((app_id, country_code)) or failed_map.get((app_id, None))
         retry_count = failed_info.get('retry_count', 0) if failed_info else 0
         failed_at = _parse_failed_at(failed_info.get('failed_at')) if failed_info else None
 
@@ -409,15 +410,15 @@ def prioritize_for_retry(platform: str, candidate_ids: Set[str], limit: int) -> 
             if now - failed_at < timedelta(minutes=FAILED_RETRY_COOLDOWN_MINUTES):
                 skipped_recent += 1
                 continue
-        allowed.append((retry_count, failed_at or datetime.min, app_id))
+        allowed.append((retry_count, failed_at or datetime.min, app_id, country_code))
 
     allowed.sort(key=lambda item: (item[0], item[1]))
     if skipped_recent:
         log_step(
             "재시도 필터",
-            f"최근 실패 쿨다운으로 {skipped_recent}개 제외 (platform={platform}, 후보={len(candidate_ids)})"
+            f"최근 실패 쿨다운으로 {skipped_recent}개 제외 (platform={platform}, 후보={len(candidate_apps)})"
         )
-    return [app_id for _, _, app_id in allowed][:limit]
+    return [(app_id, country_code) for _, _, app_id, country_code in allowed][:limit]
 
 
 def get_new_apps_since(platform: str, since_date: str) -> List[Dict]:
