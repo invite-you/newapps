@@ -10,7 +10,7 @@ const path = require('path');
 
 // 전역 설정값 (AGENT.MD 지침 5번)
 const PORT = 3000;
-const DB_PATH = path.join(__dirname, '../data/apps.db');
+const DB_PATH = path.join(__dirname, '../database/apps.db');
 const APPS_PER_PAGE = 20;
 
 const app = express();

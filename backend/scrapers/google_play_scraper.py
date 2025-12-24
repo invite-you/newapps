@@ -10,12 +10,12 @@ import os
 import json
 import time
 from datetime import datetime
-from google_play_scraper import search, app, Sort
+from google_play_scraper import search, app
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import (
     COUNTRIES, FETCH_LIMIT_PER_COUNTRY, GOOGLE_PLAY_SEARCH_QUERIES,
-    LOG_FORMAT, REQUEST_DELAY, SSL_VERIFY, get_proxies
+    REQUEST_DELAY, SSL_VERIFY, get_proxies
 )
 from database.db import get_connection, log_step
 
@@ -314,7 +314,7 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
     print(f"  총 {len(all_app_ids)}개 고유 앱 ID 수집됨")
 
     # 2. 각 앱의 상세 정보 수집
-    print(f"  상세 정보 수집 중...")
+    print("  상세 정보 수집 중...")
     apps_data = []
     collected = 0
     failed = 0

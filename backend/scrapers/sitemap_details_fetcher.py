@@ -12,17 +12,13 @@ import json
 import time
 from datetime import datetime
 from typing import List, Dict, Optional, Set, Any, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from config import (
-    LOG_FORMAT, REQUEST_DELAY, COUNTRIES, timing_tracker
-)
-from database.db import get_connection as get_apps_connection
+from config import REQUEST_DELAY, timing_tracker
+from database.db import get_connection as get_apps_connection, log_step
 from database.sitemap_db import (
     get_connection as get_sitemap_connection,
-    get_recently_discovered_apps, get_discovery_stats,
     prioritize_for_retry,
     upsert_failed_app_detail,
     clear_failed_app_detail
@@ -38,27 +34,6 @@ except ImportError:
 
 # App Store - iTunes API
 import requests
-
-
-def log_step(step: str, message: str, task_name: Optional[str] = None):
-    """
-    타임스탬프 로그 출력
-
-    Args:
-        step: 단계 이름
-        message: 메시지
-        task_name: 태스크 이름 (태스크별 소요시간 추적용)
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    timing = timing_tracker.get_timing(task_name)
-    print(LOG_FORMAT.format(
-        timestamp=timestamp,
-        step=step,
-        message=message,
-        line_duration=f"{timing['line_duration']:.2f}",
-        task_duration=f"{timing['task_duration']:.2f}",
-        total_duration=f"{timing['total_duration']:.2f}"
-    ))
 
 
 def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[str]:

@@ -4,7 +4,6 @@
 AGENT.MD 지침 5번: 모든 설정값은 전역으로 정의하고, 메인 함수 최상단에 배치
 """
 import os
-import ssl
 import urllib3
 
 # SSL 경고 무시 (일부 환경에서 SSL 핸드셰이크 문제 해결)
@@ -102,30 +101,6 @@ GOOGLE_PLAY_SEARCH_QUERIES = [
     "finance",
     "shopping",
     "travel",
-]
-
-# Google Play 카테고리 (앱 상세 정보 조회 시 사용)
-GOOGLE_PLAY_CATEGORIES = [
-    "GAME",
-    "PRODUCTIVITY",
-    "SOCIAL",
-    "ENTERTAINMENT",
-    "LIFESTYLE",
-    "EDUCATION",
-    "HEALTH_AND_FITNESS",
-    "FINANCE",
-    "SHOPPING",
-    "TRAVEL_AND_LOCAL",
-    "TOOLS",
-    "COMMUNICATION",
-    "PHOTOGRAPHY",
-    "MUSIC_AND_AUDIO",
-    "VIDEO_PLAYERS",
-    "NEWS_AND_MAGAZINES",
-    "FOOD_AND_DRINK",
-    "WEATHER",
-    "BUSINESS",
-    "SPORTS",
 ]
 
 # 주목할만한 앱 선별 기준 (점수 기반)

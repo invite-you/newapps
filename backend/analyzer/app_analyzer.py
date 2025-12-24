@@ -14,7 +14,7 @@ except ImportError:
     date_parser = None
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import SCORE_WEIGHTS, MINIMUM_RATING, MINIMUM_RATING_COUNT, MINIMUM_SCORE, LOG_FORMAT
+from config import SCORE_WEIGHTS, MINIMUM_RATING, MINIMUM_RATING_COUNT, MINIMUM_SCORE
 from database.db import get_connection, log_step
 
 

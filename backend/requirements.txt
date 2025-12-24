@@ -1,4 +1,8 @@
-google-play-scraper==1.2.4
-app-store-scraper==0.3.5
-requests==2.31.0
-python-dateutil==2.8.2
+# Google Play Store API
+google-play-scraper>=1.2.4
+
+# HTTP 요청
+requests>=2.31.0
+
+# 날짜 파싱 (분석 기능)
+python-dateutil>=2.8.2

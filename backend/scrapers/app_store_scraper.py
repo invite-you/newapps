@@ -14,7 +14,7 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import (
     COUNTRIES, FETCH_LIMIT_PER_COUNTRY, APPLE_RSS_FEEDS,
-    LOG_FORMAT, REQUEST_DELAY, get_request_kwargs
+    REQUEST_DELAY, get_request_kwargs
 )
 from database.db import get_connection, log_step
 
@@ -348,7 +348,7 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
     print(f"  총 {len(all_app_ids)}개 고유 앱 ID 수집됨")
 
     # 2. Lookup API로 상세 정보 수집
-    print(f"  상세 정보 수집 중...")
+    print("  상세 정보 수집 중...")
     app_details = fetch_app_details(all_app_ids, country_code)
     print(f"  -> {len(app_details)}개 앱 상세 정보 수집됨")
 

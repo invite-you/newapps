@@ -10,7 +10,6 @@
 """
 import sys
 import argparse
-from datetime import datetime
 
 from config import timing_tracker
 from database.db import init_database, log_step

@@ -10,42 +10,18 @@ import io
 import re
 import requests
 import xml.etree.ElementTree as ET
-from datetime import datetime
-from typing import List, Set, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import (
-    LOG_FORMAT, REQUEST_TIMEOUT, REQUEST_DELAY,
-    get_request_kwargs, SSL_VERIFY, timing_tracker
-)
+from config import get_request_kwargs, timing_tracker
+from database.db import log_step
 from database.sitemap_db import (
     get_known_app_ids, save_discovered_apps,
     save_sitemap_snapshot, init_sitemap_database
 )
-
-
-def log_step(step: str, message: str, task_name: Optional[str] = None):
-    """
-    타임스탬프 로그 출력
-
-    Args:
-        step: 단계 이름
-        message: 메시지
-        task_name: 태스크 이름 (태스크별 소요시간 추적용)
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    timing = timing_tracker.get_timing(task_name)
-    print(LOG_FORMAT.format(
-        timestamp=timestamp,
-        step=step,
-        message=message,
-        line_duration=f"{timing['line_duration']:.2f}",
-        task_duration=f"{timing['task_duration']:.2f}",
-        total_duration=f"{timing['total_duration']:.2f}"
-    ))
 
 
 class GooglePlaySitemapCollector:
@@ -156,7 +132,7 @@ class GooglePlaySitemapCollector:
                 for app_id in matches:
                     app_metadata[app_id] = {}
 
-        except Exception as e:
+        except Exception:
             # 개별 sitemap 실패는 조용히 넘김 (전체 수집 중)
             pass
 
@@ -215,7 +191,7 @@ class GooglePlaySitemapCollector:
                         if sitemap_count % 100 == 0:
                             log_step("Google Play", f"진행: {sitemap_count}개 sitemap, {len(all_app_metadata)}개 앱 ID", "Google Play Sitemap")
 
-                    except Exception as e:
+                    except Exception:
                         continue
 
         log_step("Google Play Sitemap", f"수집 완료: {len(all_app_metadata)}개 앱 ID", "Google Play Sitemap")
@@ -352,7 +328,7 @@ class AppStoreSitemapCollector:
                 if country_match:
                     country_code = country_match.group(1)
 
-        except Exception as e:
+        except Exception:
             pass
 
         return app_metadata, country_code, sitemap_filename
@@ -410,7 +386,7 @@ class AppStoreSitemapCollector:
                             if sitemap_count % 50 == 0:
                                 log_step("App Store", f"{sitemap_type} 진행: {sitemap_count}개, {len(all_app_metadata)}개 앱", "App Store Sitemap")
 
-                        except Exception as e:
+                        except Exception:
                             continue
 
             result[sitemap_type] = (all_app_metadata, app_to_sitemap, sitemap_count)
