@@ -14,8 +14,8 @@ from typing import List, Dict, Set, Optional, Tuple
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import LOG_FORMAT, timing_tracker
 
-# Sitemap 데이터베이스 경로
-SITEMAP_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "sitemap_tracking.db")
+# Sitemap 데이터베이스 경로 (database 폴더에 정리)
+SITEMAP_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "database", "sitemap_tracking.db")
 
 
 def log_step(step: str, message: str, task_name: Optional[str] = None):

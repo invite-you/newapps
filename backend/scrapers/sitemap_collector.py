@@ -195,8 +195,11 @@ class GooglePlaySitemapCollector:
             if limit is not None:
                 sitemap_urls = sitemap_urls[:limit]
 
-            # 병렬 처리
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            # sitemap을 역순으로 처리 (최신 sitemap 먼저)
+            sitemap_urls = list(reversed(sitemap_urls))
+
+            # 병렬 처리 (4배 증가: 10 → 40 workers)
+            with ThreadPoolExecutor(max_workers=40) as executor:
                 futures = {executor.submit(self.fetch_and_parse_sitemap, url): url
                           for url in sitemap_urls}
 
@@ -388,7 +391,10 @@ class AppStoreSitemapCollector:
                 if limit is not None:
                     sitemap_urls = sitemap_urls[:limit]
 
-                with ThreadPoolExecutor(max_workers=10) as executor:
+                # sitemap을 역순으로 처리 (최신 sitemap 먼저)
+                sitemap_urls = list(reversed(sitemap_urls))
+
+                with ThreadPoolExecutor(max_workers=40) as executor:
                     futures = {executor.submit(self.fetch_and_parse_sitemap, url): url
                               for url in sitemap_urls}
 
@@ -444,6 +450,14 @@ def collect_and_save_google_play_apps(limit: int = None) -> Dict:
     new_app_ids = all_app_ids - known_ids
 
     log_step("Google Play", f"신규 앱 ID: {len(new_app_ids)}개 (전체: {len(all_app_ids)}개)", "Google Play 수집")
+
+    # 신규 앱 ID 최대 10개만 출력
+    if new_app_ids:
+        new_app_list = sorted(list(new_app_ids))[:10]
+        for app_id in new_app_list:
+            print(f"  [신규] {app_id}")
+        if len(new_app_ids) > 10:
+            print(f"  ... 외 {len(new_app_ids) - 10}개")
 
     # 저장 (앱별 sitemap 파일명 저장)
     new_count = 0
@@ -527,6 +541,14 @@ def collect_and_save_app_store_apps(limit: int = None) -> Dict:
         new_app_ids = all_app_ids - known_ids
 
         log_step("App Store", f"{sitemap_type}: {len(new_app_ids)}개 신규 (전체: {len(all_app_ids)}개)", "App Store 수집")
+
+        # 신규 앱 ID 최대 10개만 출력
+        if new_app_ids:
+            new_app_list = sorted(list(new_app_ids))[:10]
+            for app_id in new_app_list:
+                print(f"  [신규] {app_id}")
+            if len(new_app_ids) > 10:
+                print(f"  ... 외 {len(new_app_ids) - 10}개")
 
         if all_app_ids:
             # sitemap 파일명별로 그룹화하여 저장

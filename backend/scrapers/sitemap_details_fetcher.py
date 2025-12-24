@@ -11,7 +11,7 @@ import os
 import json
 import time
 from datetime import datetime
-from typing import List, Dict, Optional, Set, Any
+from typing import List, Dict, Optional, Set, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -151,6 +151,41 @@ def merge_app_data(existing: Optional[Dict], new_data: Dict) -> Dict:
             merged[key] = new_value
 
     return merged
+
+
+def has_significant_changes(existing: Dict, new_data: Dict) -> bool:
+    """
+    기존 데이터와 새 데이터를 비교하여 유의미한 변경이 있는지 확인
+    - 변경이 없으면 False 반환 (DB 업데이트 스킵)
+    - 변경이 있으면 True 반환
+    """
+    # 비교할 주요 필드들 (자주 변경되는 필드 위주)
+    compare_fields = [
+        'title', 'rating', 'rating_count', 'reviews_count',
+        'installs', 'installs_min', 'installs_exact',
+        'price', 'version', 'updated_date', 'release_notes',
+        'description', 'summary', 'content_rating'
+    ]
+
+    for field in compare_fields:
+        old_val = existing.get(field)
+        new_val = new_data.get(field)
+
+        # 둘 다 None/빈값이면 동일한 것으로 간주
+        if (old_val is None or old_val == '') and (new_val is None or new_val == ''):
+            continue
+
+        # 숫자 비교 (부동소수점 오차 허용)
+        if isinstance(old_val, (int, float)) and isinstance(new_val, (int, float)):
+            if abs(old_val - new_val) > 0.001:
+                return True
+            continue
+
+        # 문자열 비교
+        if str(old_val) != str(new_val):
+            return True
+
+    return False
 
 
 def fetch_google_play_details(app_id: str, country_code: str = 'us', lang: str = 'en') -> Optional[Dict]:
@@ -390,23 +425,24 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
     }
 
 
-def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> int:
+def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> Tuple[int, int]:
     """
-    앱 데이터를 데이터베이스에 저장 (배치 커밋으로 lock 방지)
+    앱 데이터를 데이터베이스에 저장 (변경 없으면 스킵, 배치 커밋으로 lock 방지)
 
     Args:
         apps_data: 앱 데이터 목록
         merge_existing: True면 기존 데이터와 병합 (빈 값 유지)
 
     Returns:
-        저장된 앱 수
+        (저장된 앱 수, 스킵된 앱 수)
     """
     if not apps_data:
-        return 0
+        return 0, 0
 
     conn = get_apps_connection()
     cursor = conn.cursor()
     saved_count = 0
+    skipped_count = 0
 
     columns = [
         'app_id', 'bundle_id', 'platform', 'country_code',
@@ -442,17 +478,24 @@ def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> int:
                 continue
 
             try:
-                # 기존 데이터와 병합 (빈 값 보존)
-                if merge_existing:
-                    existing = get_existing_app_data(
-                        app_data.get('platform'),
-                        app_data.get('app_id')
-                    )
-                    if existing:
-                        app_data = merge_app_data(existing, app_data)
-
                 # _collected_at 제거 (DB 컬럼에 없음, updated_at으로 대체)
                 app_data.pop('_collected_at', None)
+
+                # 기존 데이터 조회
+                existing = get_existing_app_data(
+                    app_data.get('platform'),
+                    app_data.get('app_id')
+                )
+
+                if existing:
+                    # 변경사항이 없으면 스킵
+                    if not has_significant_changes(existing, app_data):
+                        skipped_count += 1
+                        continue
+
+                    # 기존 데이터와 병합 (빈 값 보존)
+                    if merge_existing:
+                        app_data = merge_app_data(existing, app_data)
 
                 values = tuple(app_data.get(col) for col in columns)
                 cursor.execute(f"""
@@ -479,7 +522,7 @@ def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> int:
     finally:
         conn.close()
 
-    return saved_count
+    return saved_count, skipped_count
 
 
 def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Dict:
@@ -521,14 +564,15 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
 
         time.sleep(REQUEST_DELAY)
 
-    # 저장 (기존 데이터와 병합)
-    saved = save_apps_to_db(apps_data, merge_existing=True)
+    # 저장 (기존 데이터와 병합, 변경 없으면 스킵)
+    saved, skipped = save_apps_to_db(apps_data, merge_existing=True)
 
-    log_step("Google Play 상세정보", f"완료: {saved}개 저장, {failed}개 실패", "Google Play 상세정보")
+    log_step("Google Play 상세정보", f"완료: {saved}개 저장, {skipped}개 스킵(변경없음), {failed}개 실패", "Google Play 상세정보")
 
     return {
         'fetched': len(apps_data),
         'saved': saved,
+        'skipped': skipped,
         'failed': failed,
         'collected_at': start_time.strftime('%Y-%m-%d %H:%M:%S')
     }
@@ -569,15 +613,16 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
         log_step("App Store", f"배치 {i//batch_size + 1}: {len(results)}개 수집", "App Store 상세정보")
         time.sleep(REQUEST_DELAY)
 
-    # 저장 (기존 데이터와 병합)
-    saved = save_apps_to_db(apps_data, merge_existing=True)
+    # 저장 (기존 데이터와 병합, 변경 없으면 스킵)
+    saved, skipped = save_apps_to_db(apps_data, merge_existing=True)
     failed = len(unfetched_ids) - len(apps_data)
 
-    log_step("App Store 상세정보", f"완료: {saved}개 저장, {failed}개 실패", "App Store 상세정보")
+    log_step("App Store 상세정보", f"완료: {saved}개 저장, {skipped}개 스킵(변경없음), {failed}개 실패", "App Store 상세정보")
 
     return {
         'fetched': len(apps_data),
         'saved': saved,
+        'skipped': skipped,
         'failed': failed,
         'collected_at': start_time.strftime('%Y-%m-%d %H:%M:%S')
     }
@@ -609,8 +654,10 @@ def fetch_all_new_app_details(google_limit: int = 100, appstore_limit: int = 500
     print(f"상세 정보 수집 결과 (수집 시각: {results['collected_at']})")
     print("=" * 60)
     print(f"Google Play: {results['google_play']['saved']}개 저장, "
+          f"{results['google_play'].get('skipped', 0)}개 스킵, "
           f"{results['google_play']['failed']}개 실패")
     print(f"App Store: {results['app_store']['saved']}개 저장, "
+          f"{results['app_store'].get('skipped', 0)}개 스킵, "
           f"{results['app_store']['failed']}개 실패")
     print("=" * 60)
 
