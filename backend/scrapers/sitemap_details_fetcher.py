@@ -188,17 +188,31 @@ def has_significant_changes(existing: Dict, new_data: Dict) -> bool:
     return False
 
 
-def fetch_google_play_details(app_id: str, country_code: str = 'us', lang: str = 'en') -> Optional[Dict]:
-    """Google Play 앱 상세 정보 가져오기"""
+def fetch_google_play_details(app_id: str, country_code: str = 'us', lang: str = 'en') -> Tuple[Optional[Dict], Optional[str]]:
+    """Google Play 앱 상세 정보 가져오기 (재시도 포함)"""
     if not GOOGLE_PLAY_AVAILABLE:
-        return None
+        return None, "google-play-scraper 라이브러리 미설치"
 
-    try:
-        data = google_app(app_id, lang=lang, country=country_code)
-        return parse_google_play_data(data, country_code)
-    except Exception as e:
-        # 앱이 삭제되었거나 접근 불가
-        return None
+    attempts = 4  # 최초 요청 + 3회 재시도
+    backoff_delays = [1, 3, 7]
+    last_error: Optional[Exception] = None
+
+    for attempt in range(attempts):
+        try:
+            data = google_app(app_id, lang=lang, country=country_code)
+            return parse_google_play_data(data, country_code), None
+        except Exception as e:
+            last_error = e
+            log_step(
+                "Google Play",
+                f"상세 수집 실패 (app_id={app_id}, country={country_code}, 시도={attempt + 1}/{attempts}, 에러={e})",
+                "Google Play 상세정보"
+            )
+            if attempt < attempts - 1:
+                delay_index = min(attempt, len(backoff_delays) - 1)
+                time.sleep(backoff_delays[delay_index])
+
+    return None, str(last_error) if last_error else None
 
 
 def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
@@ -552,11 +566,16 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
     failed = 0
 
     for i, app_id in enumerate(unfetched_ids):
-        data = fetch_google_play_details(app_id, country_code)
+        data, error_message = fetch_google_play_details(app_id, country_code)
         if data:
             apps_data.append(data)
         else:
             failed += 1
+            log_step(
+                "Google Play",
+                f"최종 실패 (app_id={app_id}, country={country_code}, 에러={error_message})",
+                "Google Play 상세정보"
+            )
 
         # 진행 상황 출력
         if (i + 1) % 50 == 0:
