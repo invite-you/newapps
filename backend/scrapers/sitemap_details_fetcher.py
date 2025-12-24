@@ -22,7 +22,10 @@ from config import (
 from database.db import get_connection as get_apps_connection
 from database.sitemap_db import (
     get_connection as get_sitemap_connection,
-    get_recently_discovered_apps, get_discovery_stats
+    get_recently_discovered_apps, get_discovery_stats,
+    prioritize_for_retry,
+    upsert_failed_app_detail,
+    clear_failed_app_detail
 )
 
 # Google Play Scraper
@@ -104,8 +107,11 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[str]:
 
     # 차집합: sitemap에는 있지만 apps에는 없는 ID
     unfetched = sitemap_app_ids - existing_app_ids
+    if not unfetched:
+        return []
 
-    return list(unfetched)[:limit]
+    prioritized = prioritize_for_retry(platform, unfetched, limit)
+    return prioritized
 
 
 def get_existing_app_data(platform: str, app_id: str) -> Optional[Dict]:
@@ -332,6 +338,7 @@ def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us', 
     url = f"https://itunes.apple.com/lookup?id={ids_str}&country={country_code}"
     max_attempts = 3
     backoff_seconds = 2
+    last_error: Optional[str] = None
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -350,14 +357,18 @@ def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us', 
                     fetched_ids.add(parsed['app_id'])
 
             failed_ids = [app_id for app_id in app_ids[:200] if str(app_id) not in fetched_ids]
-            return {'results': results, 'failed_ids': failed_ids}
+            failure_reasons = {str(app_id): "lookup_not_returned" for app_id in failed_ids}
+            return {'results': results, 'failed_ids': failed_ids, 'failure_reasons': failure_reasons}
         except requests.Timeout:
             log_step("App Store", f"배치 조회 타임아웃 (시도 {attempt}/{max_attempts}, {len(app_ids[:200])}개)", "App Store 상세정보")
+            last_error = "timeout"
         except requests.RequestException as e:
             status_info = f", 상태코드 {e.response.status_code}" if e.response is not None else ""
             log_step("App Store", f"배치 조회 요청 오류 (시도 {attempt}/{max_attempts}{status_info}): {e}", "App Store 상세정보")
+            last_error = str(e)
         except Exception as e:
             log_step("App Store", f"배치 조회 실패 (시도 {attempt}/{max_attempts}): {e}", "App Store 상세정보")
+            last_error = str(e)
 
         if attempt < max_attempts:
             wait_seconds = backoff_seconds ** (attempt - 1)
@@ -368,16 +379,23 @@ def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us', 
         log_step("App Store", f"배치 반복 실패, 50개 단위로 재시도 진행 ({len(app_ids)}개)", "App Store 상세정보")
         aggregated_results: List[Dict] = []
         aggregated_failed: Set[str] = set()
+        aggregated_reasons: Dict[str, str] = {}
         for start in range(0, len(app_ids), 50):
             sub_ids = app_ids[start:start + 50]
             sub_result = fetch_app_store_details_batch(sub_ids, country_code, allow_split=False)
             aggregated_results.extend(sub_result['results'])
             aggregated_failed.update(sub_result['failed_ids'])
+            aggregated_reasons.update(sub_result.get('failure_reasons', {}))
             log_step("App Store", f"분할 배치 {start//50 + 1}: {len(sub_result['results'])}개 수집, 실패 {len(sub_result['failed_ids'])}개", "App Store 상세정보")
 
-        return {'results': aggregated_results, 'failed_ids': list(aggregated_failed)}
+        return {
+            'results': aggregated_results,
+            'failed_ids': list(aggregated_failed),
+            'failure_reasons': aggregated_reasons
+        }
 
-    return {'results': [], 'failed_ids': app_ids[:200]}
+    failure_reasons = {str(app_id): last_error or "lookup_failed" for app_id in app_ids[:200]}
+    return {'results': [], 'failed_ids': app_ids[:200], 'failure_reasons': failure_reasons}
 
 
 def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
@@ -604,8 +622,10 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
         data, error_message = fetch_google_play_details(app_id, country_code)
         if data:
             apps_data.append(data)
+            clear_failed_app_detail(app_id, 'google_play', country_code)
         else:
             failed += 1
+            upsert_failed_app_detail(app_id, 'google_play', country_code, error_message or "unknown_error")
             log_step(
                 "Google Play",
                 f"최종 실패 (app_id={app_id}, country={country_code}, 에러={error_message})",
@@ -663,8 +683,15 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
     for i in range(0, len(unfetched_ids), batch_size):
         batch = unfetched_ids[i:i + batch_size]
         batch_result = fetch_app_store_details_batch(batch, country_code)
-        apps_data.extend(batch_result['results'])
-        failed_ids.update(batch_result['failed_ids'])
+        for app in batch_result['results']:
+            apps_data.append(app)
+            clear_failed_app_detail(app['app_id'], 'app_store', country_code)
+
+        failure_reasons = batch_result.get('failure_reasons', {})
+        for failed_id in batch_result['failed_ids']:
+            failed_id_str = str(failed_id)
+            failed_ids.add(failed_id_str)
+            upsert_failed_app_detail(failed_id_str, 'app_store', country_code, failure_reasons.get(failed_id_str, "lookup_failed"))
 
         log_step("App Store", f"배치 {i//batch_size + 1}: {len(batch_result['results'])}개 수집, 실패 {len(batch_result['failed_ids'])}개", "App Store 상세정보")
         time.sleep(REQUEST_DELAY)

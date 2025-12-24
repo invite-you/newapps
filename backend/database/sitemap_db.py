@@ -8,11 +8,16 @@ Sitemap 데이터 트래킹 데이터베이스
 import sqlite3
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Set, Optional, Tuple
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import LOG_FORMAT, timing_tracker
+from config import (
+    LOG_FORMAT,
+    FAILED_RETRY_COOLDOWN_MINUTES,
+    FAILED_RETRY_WARNING_THRESHOLD,
+    timing_tracker,
+)
 
 # Sitemap 데이터베이스 경로 (database 폴더에 정리)
 SITEMAP_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "database", "sitemap_tracking.db")
@@ -132,6 +137,19 @@ def init_sitemap_database():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS failed_app_details (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            country_code TEXT,
+            reason TEXT,
+            failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            retry_count INTEGER DEFAULT 1,
+            UNIQUE(app_id, platform, country_code)
+        )
+    """)
+
     # 인덱스 생성
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_platform ON app_discovery(platform)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_first_seen ON app_discovery(first_seen_at DESC)")
@@ -139,6 +157,8 @@ def init_sitemap_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_app ON app_history(app_id, platform)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_date ON app_history(recorded_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshot_date ON sitemap_snapshots(snapshot_date DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_app ON failed_app_details(app_id, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_at ON failed_app_details(failed_at DESC)")
 
     conn.commit()
     conn.close()
@@ -306,6 +326,119 @@ def save_app_history(
 
     conn.commit()
     conn.close()
+
+
+def upsert_failed_app_detail(app_id: str, platform: str, country_code: Optional[str], reason: str) -> int:
+    """실패 기록을 upsert하고 누적 횟수를 반환"""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO failed_app_details (app_id, platform, country_code, reason, failed_at, retry_count)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)
+        ON CONFLICT(app_id, platform, country_code) DO UPDATE SET
+            reason = excluded.reason,
+            failed_at = CURRENT_TIMESTAMP,
+            retry_count = failed_app_details.retry_count + 1
+    """, (app_id, platform, country_code, reason[:500] if reason else None))
+
+    cursor.execute("""
+        SELECT retry_count FROM failed_app_details
+        WHERE app_id = ? AND platform = ? AND (country_code = ? OR (country_code IS NULL AND ? IS NULL))
+    """, (app_id, platform, country_code, country_code))
+    row = cursor.fetchone()
+    conn.commit()
+    conn.close()
+
+    retry_count = row['retry_count'] if row else 0
+    if retry_count >= FAILED_RETRY_WARNING_THRESHOLD:
+        log_step(
+            "실패 경고",
+            f"재시도 임계치 초과 (app_id={app_id}, platform={platform}, country={country_code}, 누적={retry_count}, 사유={reason})"
+        )
+    return retry_count
+
+
+def clear_failed_app_detail(app_id: str, platform: str, country_code: Optional[str]):
+    """성공 시 실패 기록 제거"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM failed_app_details
+        WHERE app_id = ? AND platform = ? AND (country_code = ? OR (country_code IS NULL AND ? IS NULL))
+    """, (app_id, platform, country_code, country_code))
+    conn.commit()
+    conn.close()
+
+
+def _get_failed_details(platform: str, app_ids: Set[str]) -> Dict[str, Dict]:
+    """특정 플랫폼의 실패 기록을 조회"""
+    if not app_ids:
+        return {}
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    placeholders = ','.join(['?' for _ in app_ids])
+    cursor.execute(f"""
+        SELECT app_id, country_code, reason, failed_at, retry_count
+        FROM failed_app_details
+        WHERE platform = ? AND app_id IN ({placeholders})
+        ORDER BY failed_at DESC
+    """, (platform, *app_ids))
+    rows = cursor.fetchall()
+    conn.close()
+
+    result: Dict[str, Dict] = {}
+    for row in rows:
+        app_id = row['app_id']
+        if app_id not in result:
+            result[app_id] = dict(row)
+
+    return result
+
+
+def _parse_failed_at(value: Optional[str]) -> Optional[datetime]:
+    """문자열 타임스탬프 파싱"""
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def prioritize_for_retry(platform: str, candidate_ids: Set[str], limit: int) -> List[str]:
+    """
+    실패 기록을 고려하여 재시도 우선순위를 정리
+    - 실패 횟수가 적은 순서
+    - 오래전에 실패한 항목 우선
+    - 최근 실패 후 쿨다운 시간 내 항목은 제외
+    """
+    failed_map = _get_failed_details(platform, candidate_ids)
+    now = datetime.now()
+    allowed: List[Tuple[int, datetime, str]] = []
+    skipped_recent = 0
+
+    for app_id in candidate_ids:
+        failed_info = failed_map.get(app_id)
+        retry_count = failed_info.get('retry_count', 0) if failed_info else 0
+        failed_at = _parse_failed_at(failed_info.get('failed_at')) if failed_info else None
+
+        if failed_at:
+            if now - failed_at < timedelta(minutes=FAILED_RETRY_COOLDOWN_MINUTES):
+                skipped_recent += 1
+                continue
+        allowed.append((retry_count, failed_at or datetime.min, app_id))
+
+    allowed.sort(key=lambda item: (item[0], item[1]))
+    if skipped_recent:
+        log_step(
+            "재시도 필터",
+            f"최근 실패 쿨다운으로 {skipped_recent}개 제외 (platform={platform}, 후보={len(candidate_ids)})"
+        )
+    return [app_id for _, _, app_id in allowed][:limit]
 
 
 def get_new_apps_since(platform: str, since_date: str) -> List[Dict]:

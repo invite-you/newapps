@@ -210,6 +210,10 @@ REQUEST_TIMEOUT = 30
 # API 요청 간 딜레이 (초) - 레이트 리밋 방지
 REQUEST_DELAY = 0.5
 
+# 실패 재시도 제어
+FAILED_RETRY_COOLDOWN_MINUTES = 60  # 최근 실패 이후 대기할 최소 시간
+FAILED_RETRY_WARNING_THRESHOLD = 5   # 경고 로그를 남길 실패 누적 임계치
+
 # 프록시 설정 (환경변수 또는 직접 설정)
 # 예: "http://proxy.example.com:8080" 또는 None
 # 환경변수 HTTP_PROXY, HTTPS_PROXY가 설정되어 있으면 우선 사용
