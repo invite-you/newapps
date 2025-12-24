@@ -14,7 +14,7 @@ except ImportError:
     date_parser = None
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import SCORE_WEIGHTS, MINIMUM_RATING, MINIMUM_RATING_COUNT, MINIMUM_SCORE
+from config import SCORE_WEIGHTS, MINIMUM_RATING, MINIMUM_RATING_COUNT, MINIMUM_SCORE, timing_tracker
 from database.db import get_connection, log_step
 
 
@@ -109,8 +109,9 @@ def calculate_app_score(app):
 
 def analyze_and_update_scores():
     """모든 앱의 점수를 계산하고 업데이트"""
-    start_time = datetime.now()
-    log_step("앱 점수 계산", "시작", start_time)
+    task_name = "앱 점수 계산"
+    timing_tracker.start_task(task_name)
+    log_step(task_name, "시작", task_name)
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -146,7 +147,7 @@ def analyze_and_update_scores():
     conn.commit()
     conn.close()
 
-    log_step("앱 점수 계산", f"완료 ({updated_count}개 업데이트, {featured_count}개 주목 앱)", start_time)
+    log_step(task_name, f"완료 ({updated_count}개 업데이트, {featured_count}개 주목 앱)", task_name)
     return updated_count, featured_count
 
 

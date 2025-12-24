@@ -38,7 +38,7 @@ except ImportError:
 import requests
 
 
-def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[str]:
+def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[Tuple[str, Optional[str]]]:
     """
     상세 정보가 아직 수집되지 않은 앱 ID 목록 반환
 
@@ -47,23 +47,23 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[str]:
         limit: 최대 개수
 
     Returns:
-        앱 ID 목록
+        (app_id, country_code) 목록
     """
     # sitemap에서 발견된 앱 ID
     sitemap_conn = get_sitemap_connection()
     sitemap_cursor = sitemap_conn.cursor()
 
     sitemap_cursor.execute("""
-        SELECT app_id FROM app_discovery
+        SELECT app_id, country_code FROM app_discovery
         WHERE platform = ?
         ORDER BY first_seen_at DESC
         LIMIT ?
     """, (platform, limit * 2))
 
-    sitemap_app_ids = {row['app_id'] for row in sitemap_cursor.fetchall()}
+    sitemap_records = [(row['app_id'], row['country_code']) for row in sitemap_cursor.fetchall()]
     sitemap_conn.close()
 
-    if not sitemap_app_ids:
+    if not sitemap_records:
         return []
 
     # apps DB에 이미 있는 앱 ID (배치 단위 조회로 변수 개수 제한)
@@ -86,7 +86,11 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[str]:
     apps_conn.close()
 
     # 차집합: sitemap에는 있지만 apps에는 없는 ID
-    unfetched = sitemap_app_ids - existing_app_ids
+    unfetched = [
+        (app_id, country_code)
+        for app_id, country_code in sitemap_records
+        if app_id not in existing_app_ids
+    ]
     if not unfetched:
         return []
 
@@ -585,11 +589,19 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
     """
     timing_tracker.start_task("Google Play 상세정보")
     start_time = datetime.now()
-    log_step("Google Play 상세정보", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", "Google Play 상세정보")
+    log_step(
+        "Google Play 상세정보",
+        f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')}, 기본국가={country_code})",
+        "Google Play 상세정보"
+    )
 
     # 아직 상세 정보가 없는 앱 ID 조회
     unfetched_ids = get_unfetched_app_ids('google_play', limit)
-    log_step("Google Play", f"미수집 앱: {len(unfetched_ids)}개", "Google Play 상세정보")
+    log_step(
+        "Google Play",
+        f"미수집 앱: {len(unfetched_ids)}개 (기본국가={country_code})",
+        "Google Play 상세정보"
+    )
 
     if not unfetched_ids:
         log_step("Google Play 상세정보", "수집할 앱 없음", "Google Play 상세정보")
@@ -598,23 +610,29 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
     apps_data = []
     failed = 0
 
-    for i, app_id in enumerate(unfetched_ids):
-        data, error_message = fetch_google_play_details(app_id, country_code)
+    for i, (app_id, discovered_country) in enumerate(unfetched_ids):
+        target_country = discovered_country or country_code
+        target_lang = discovered_country or 'en'
+        data, error_message = fetch_google_play_details(app_id, target_country, target_lang)
         if data:
             apps_data.append(data)
-            clear_failed_app_detail(app_id, 'google_play', country_code)
+            clear_failed_app_detail(app_id, 'google_play', target_country)
         else:
             failed += 1
-            upsert_failed_app_detail(app_id, 'google_play', country_code, error_message or "unknown_error")
+            upsert_failed_app_detail(app_id, 'google_play', target_country, error_message or "unknown_error")
             log_step(
                 "Google Play",
-                f"최종 실패 (app_id={app_id}, country={country_code}, 에러={error_message})",
+                f"최종 실패 (app_id={app_id}, country={target_country}, 에러={error_message})",
                 "Google Play 상세정보"
             )
 
         # 진행 상황 출력
         if (i + 1) % 50 == 0:
-            log_step("Google Play", f"진행: {i+1}/{len(unfetched_ids)}, 성공: {len(apps_data)}", "Google Play 상세정보")
+            log_step(
+                "Google Play",
+                f"진행: {i+1}/{len(unfetched_ids)}, 성공: {len(apps_data)}, country={target_country}",
+                "Google Play 상세정보"
+            )
 
         time.sleep(REQUEST_DELAY)
 
@@ -645,11 +663,19 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
     """
     timing_tracker.start_task("App Store 상세정보")
     start_time = datetime.now()
-    log_step("App Store 상세정보", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", "App Store 상세정보")
+    log_step(
+        "App Store 상세정보",
+        f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')}, 기본국가={country_code})",
+        "App Store 상세정보"
+    )
 
     # 아직 상세 정보가 없는 앱 ID 조회
     unfetched_ids = get_unfetched_app_ids('app_store', limit)
-    log_step("App Store", f"미수집 앱: {len(unfetched_ids)}개", "App Store 상세정보")
+    log_step(
+        "App Store",
+        f"미수집 앱: {len(unfetched_ids)}개 (기본국가={country_code})",
+        "App Store 상세정보"
+    )
 
     if not unfetched_ids:
         log_step("App Store 상세정보", "수집할 앱 없음", "App Store 상세정보")
@@ -660,21 +686,31 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
 
     # 200개씩 배치 처리
     batch_size = 200
-    for i in range(0, len(unfetched_ids), batch_size):
-        batch = unfetched_ids[i:i + batch_size]
-        batch_result = fetch_app_store_details_batch(batch, country_code)
-        for app in batch_result['results']:
-            apps_data.append(app)
-            clear_failed_app_detail(app['app_id'], 'app_store', country_code)
+    country_grouped_ids: Dict[str, List[str]] = {}
+    for app_id, discovered_country in unfetched_ids:
+        target_country = discovered_country or country_code
+        country_grouped_ids.setdefault(target_country, []).append(app_id)
 
-        failure_reasons = batch_result.get('failure_reasons', {})
-        for failed_id in batch_result['failed_ids']:
-            failed_id_str = str(failed_id)
-            failed_ids.add(failed_id_str)
-            upsert_failed_app_detail(failed_id_str, 'app_store', country_code, failure_reasons.get(failed_id_str, "lookup_failed"))
+    for target_country, grouped_ids in country_grouped_ids.items():
+        for i in range(0, len(grouped_ids), batch_size):
+            batch = grouped_ids[i:i + batch_size]
+            batch_result = fetch_app_store_details_batch(batch, target_country)
+            for app in batch_result['results']:
+                apps_data.append(app)
+                clear_failed_app_detail(app['app_id'], 'app_store', target_country)
 
-        log_step("App Store", f"배치 {i//batch_size + 1}: {len(batch_result['results'])}개 수집, 실패 {len(batch_result['failed_ids'])}개", "App Store 상세정보")
-        time.sleep(REQUEST_DELAY)
+            failure_reasons = batch_result.get('failure_reasons', {})
+            for failed_id in batch_result['failed_ids']:
+                failed_id_str = str(failed_id)
+                failed_ids.add(failed_id_str)
+                upsert_failed_app_detail(failed_id_str, 'app_store', target_country, failure_reasons.get(failed_id_str, "lookup_failed"))
+
+            log_step(
+                "App Store",
+                f"배치 {i//batch_size + 1}: {len(batch_result['results'])}개 수집, 실패 {len(batch_result['failed_ids'])}개, country={target_country}",
+                "App Store 상세정보"
+            )
+            time.sleep(REQUEST_DELAY)
 
     # 저장 (기존 데이터와 병합, 변경 없으면 스킵)
     saved, skipped = save_apps_to_db(apps_data, merge_existing=True)
