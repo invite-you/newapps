@@ -24,7 +24,7 @@ from database.sitemap_db import (
     clear_failed_app_detail
 )
 
-EXISTING_APP_ID_BATCH_SIZE = 900
+EXISTING_APP_ID_BATCH_SIZE = 899  # 플랫폼 파라미터까지 포함해 변수 개수를 900 이하로 유지
 
 # Google Play Scraper
 try:
