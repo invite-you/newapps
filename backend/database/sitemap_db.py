@@ -12,39 +12,55 @@ from datetime import datetime
 from typing import List, Dict, Set, Optional, Tuple
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import LOG_FORMAT
+from config import LOG_FORMAT, timing_tracker
 
 # Sitemap 데이터베이스 경로
 SITEMAP_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "sitemap_tracking.db")
 
 
-def log_step(step: str, message: str, start_time: Optional[datetime] = None):
-    """타임스탬프 로그 출력"""
+def log_step(step: str, message: str, task_name: Optional[str] = None):
+    """
+    타임스탬프 로그 출력
+
+    Args:
+        step: 단계 이름
+        message: 메시지
+        task_name: 태스크 이름 (태스크별 소요시간 추적용)
+    """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    duration = (datetime.now() - start_time).total_seconds() if start_time else 0
+    timing = timing_tracker.get_timing(task_name)
     print(LOG_FORMAT.format(
         timestamp=timestamp,
         step=step,
         message=message,
-        duration=f"{duration:.2f}"
+        line_duration=f"{timing['line_duration']:.2f}",
+        task_duration=f"{timing['task_duration']:.2f}",
+        total_duration=f"{timing['total_duration']:.2f}"
     ))
 
 
 def get_connection():
-    """Sitemap 데이터베이스 연결 반환"""
+    """Sitemap 데이터베이스 연결 반환 (WAL 모드, 타임아웃 설정)"""
     db_dir = os.path.dirname(SITEMAP_DB_PATH)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
 
-    conn = sqlite3.connect(SITEMAP_DB_PATH)
+    # timeout=30으로 lock 대기 시간 설정
+    conn = sqlite3.connect(SITEMAP_DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+
+    # WAL 모드 활성화 - 동시 읽기/쓰기 성능 향상
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+
     return conn
 
 
 def init_sitemap_database():
     """Sitemap 트래킹 데이터베이스 초기화"""
-    start_time = datetime.now()
-    log_step("Sitemap DB 초기화", "시작", start_time)
+    timing_tracker.start_task("Sitemap DB 초기화")
+    log_step("Sitemap DB 초기화", "시작", "Sitemap DB 초기화")
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -58,11 +74,34 @@ def init_sitemap_database():
             platform TEXT NOT NULL,           -- 'google_play' or 'app_store'
             first_seen_at TIMESTAMP NOT NULL, -- 최초 발견 시간
             last_seen_at TIMESTAMP NOT NULL,  -- 마지막 확인 시간
-            sitemap_source TEXT,              -- sitemap 파일 출처
+            sitemap_source TEXT,              -- sitemap 파일명 (예: sitemap1.xml.gz)
             country_code TEXT,                -- 국가 코드 (App Store)
+            -- Sitemap에서 제공하는 추가 정보
+            lastmod TEXT,                     -- 마지막 수정 시간 (sitemap에서)
+            changefreq TEXT,                  -- 변경 빈도 (daily, weekly, monthly 등)
+            priority REAL,                    -- 우선순위 (0.0 ~ 1.0)
+            app_url TEXT,                     -- 앱 스토어 URL
             UNIQUE(app_id, platform)
         )
     """)
+
+    # 새 컬럼 추가 (기존 DB 마이그레이션)
+    try:
+        cursor.execute("ALTER TABLE app_discovery ADD COLUMN lastmod TEXT")
+    except sqlite3.OperationalError:
+        pass  # 컬럼이 이미 존재함
+    try:
+        cursor.execute("ALTER TABLE app_discovery ADD COLUMN changefreq TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE app_discovery ADD COLUMN priority REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE app_discovery ADD COLUMN app_url TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     # Sitemap 스냅샷 기록 테이블 (수집 기록)
     cursor.execute("""
@@ -104,7 +143,7 @@ def init_sitemap_database():
     conn.commit()
     conn.close()
 
-    log_step("Sitemap DB 초기화", "완료", start_time)
+    log_step("Sitemap DB 초기화", "완료", "Sitemap DB 초기화")
 
 
 def get_known_app_ids(platform: str) -> Set[str]:
@@ -127,10 +166,18 @@ def save_discovered_apps(
     app_ids: List[str],
     platform: str,
     sitemap_source: str = None,
-    country_code: str = None
+    country_code: str = None,
+    app_metadata: Dict[str, Dict] = None
 ) -> Tuple[int, int]:
     """
-    발견된 앱 ID들을 저장
+    발견된 앱 ID들을 저장 (배치 처리로 성능 및 lock 문제 해결)
+
+    Args:
+        app_ids: 앱 ID 목록
+        platform: 플랫폼 ('google_play' 또는 'app_store')
+        sitemap_source: sitemap 파일명
+        country_code: 국가 코드
+        app_metadata: 앱별 메타데이터 {app_id: {lastmod, changefreq, priority, url}}
 
     Returns:
         (new_count, updated_count): 신규 앱 수, 업데이트된 앱 수
@@ -144,33 +191,74 @@ def save_discovered_apps(
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_count = 0
     updated_count = 0
+    app_metadata = app_metadata or {}
 
-    for app_id in app_ids:
-        try:
-            # INSERT OR IGNORE로 신규 삽입 시도
-            cursor.execute("""
-                INSERT OR IGNORE INTO app_discovery
-                (app_id, platform, first_seen_at, last_seen_at, sitemap_source, country_code)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (app_id, platform, now, now, sitemap_source, country_code))
+    # 배치 크기 설정
+    batch_size = 500
 
-            if cursor.rowcount > 0:
-                new_count += 1
+    try:
+        # 기존 앱 ID들 조회 (한 번에)
+        placeholders = ','.join(['?' for _ in app_ids])
+        cursor.execute(f"""
+            SELECT app_id FROM app_discovery
+            WHERE platform = ? AND app_id IN ({placeholders})
+        """, (platform, *app_ids))
+        existing_ids = {row['app_id'] for row in cursor.fetchall()}
+
+        # 신규 앱과 기존 앱 분류 (메타데이터 포함)
+        new_apps = []
+        update_apps = []
+
+        for app_id in app_ids:
+            meta = app_metadata.get(app_id, {})
+            lastmod = meta.get('lastmod')
+            changefreq = meta.get('changefreq')
+            priority = meta.get('priority')
+            app_url = meta.get('url')
+
+            if app_id not in existing_ids:
+                new_apps.append((
+                    app_id, platform, now, now, sitemap_source, country_code,
+                    lastmod, changefreq, priority, app_url
+                ))
             else:
-                # 이미 존재하면 last_seen_at 업데이트
-                cursor.execute("""
-                    UPDATE app_discovery
-                    SET last_seen_at = ?, sitemap_source = ?
-                    WHERE app_id = ? AND platform = ?
-                """, (now, sitemap_source, app_id, platform))
-                updated_count += 1
+                update_apps.append((
+                    now, sitemap_source, lastmod, changefreq, priority, app_url,
+                    app_id, platform
+                ))
 
-        except sqlite3.Error as e:
-            print(f"  [오류] 앱 저장 실패 ({app_id}): {e}")
-            continue
+        # 배치 INSERT (신규 앱)
+        for i in range(0, len(new_apps), batch_size):
+            batch = new_apps[i:i + batch_size]
+            cursor.executemany("""
+                INSERT OR IGNORE INTO app_discovery
+                (app_id, platform, first_seen_at, last_seen_at, sitemap_source, country_code,
+                 lastmod, changefreq, priority, app_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, batch)
+            new_count += cursor.rowcount
 
-    conn.commit()
-    conn.close()
+        # 배치 UPDATE (기존 앱)
+        for i in range(0, len(update_apps), batch_size):
+            batch = update_apps[i:i + batch_size]
+            cursor.executemany("""
+                UPDATE app_discovery
+                SET last_seen_at = ?, sitemap_source = ?,
+                    lastmod = COALESCE(?, lastmod),
+                    changefreq = COALESCE(?, changefreq),
+                    priority = COALESCE(?, priority),
+                    app_url = COALESCE(?, app_url)
+                WHERE app_id = ? AND platform = ?
+            """, batch)
+            updated_count += cursor.rowcount
+
+        conn.commit()
+
+    except sqlite3.Error as e:
+        print(f"  [오류] 배치 저장 실패: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
     return new_count, updated_count
 

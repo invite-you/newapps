@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from config import (
-    LOG_FORMAT, REQUEST_DELAY, COUNTRIES
+    LOG_FORMAT, REQUEST_DELAY, COUNTRIES, timing_tracker
 )
 from database.db import get_connection as get_apps_connection
 from database.sitemap_db import (
@@ -37,15 +37,24 @@ except ImportError:
 import requests
 
 
-def log_step(step: str, message: str, start_time: Optional[datetime] = None):
-    """타임스탬프 로그 출력"""
+def log_step(step: str, message: str, task_name: Optional[str] = None):
+    """
+    타임스탬프 로그 출력
+
+    Args:
+        step: 단계 이름
+        message: 메시지
+        task_name: 태스크 이름 (태스크별 소요시간 추적용)
+    """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    duration = (datetime.now() - start_time).total_seconds() if start_time else 0
+    timing = timing_tracker.get_timing(task_name)
     print(LOG_FORMAT.format(
         timestamp=timestamp,
         step=step,
         message=message,
-        duration=f"{duration:.2f}"
+        line_duration=f"{timing['line_duration']:.2f}",
+        task_duration=f"{timing['task_duration']:.2f}",
+        total_duration=f"{timing['total_duration']:.2f}"
     ))
 
 
@@ -283,7 +292,7 @@ def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us') 
         return results
 
     except Exception as e:
-        log_step("App Store", f"배치 조회 실패: {e}", datetime.now())
+        log_step("App Store", f"배치 조회 실패: {e}", "App Store 상세정보")
         return []
 
 
@@ -383,7 +392,7 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
 
 def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> int:
     """
-    앱 데이터를 데이터베이스에 저장
+    앱 데이터를 데이터베이스에 저장 (배치 커밋으로 lock 방지)
 
     Args:
         apps_data: 앱 데이터 목록
@@ -423,34 +432,53 @@ def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> int:
     placeholders = ', '.join(['?' for _ in columns])
     columns_str = ', '.join(columns)
 
-    for app_data in apps_data:
-        if not app_data:
-            continue
+    # 배치 크기 설정 (50개마다 커밋하여 lock 시간 단축)
+    batch_size = 50
+    batch_count = 0
 
-        try:
-            # 기존 데이터와 병합 (빈 값 보존)
-            if merge_existing:
-                existing = get_existing_app_data(
-                    app_data.get('platform'),
-                    app_data.get('app_id')
-                )
-                if existing:
-                    app_data = merge_app_data(existing, app_data)
+    try:
+        for app_data in apps_data:
+            if not app_data:
+                continue
 
-            # _collected_at 제거 (DB 컬럼에 없음, updated_at으로 대체)
-            app_data.pop('_collected_at', None)
+            try:
+                # 기존 데이터와 병합 (빈 값 보존)
+                if merge_existing:
+                    existing = get_existing_app_data(
+                        app_data.get('platform'),
+                        app_data.get('app_id')
+                    )
+                    if existing:
+                        app_data = merge_app_data(existing, app_data)
 
-            values = tuple(app_data.get(col) for col in columns)
-            cursor.execute(f"""
-                INSERT OR REPLACE INTO apps ({columns_str}, updated_at)
-                VALUES ({placeholders}, CURRENT_TIMESTAMP)
-            """, values)
-            saved_count += 1
-        except Exception as e:
-            print(f"  저장 실패 [{app_data.get('app_id')}]: {str(e)}")
+                # _collected_at 제거 (DB 컬럼에 없음, updated_at으로 대체)
+                app_data.pop('_collected_at', None)
 
-    conn.commit()
-    conn.close()
+                values = tuple(app_data.get(col) for col in columns)
+                cursor.execute(f"""
+                    INSERT OR REPLACE INTO apps ({columns_str}, updated_at)
+                    VALUES ({placeholders}, CURRENT_TIMESTAMP)
+                """, values)
+                saved_count += 1
+                batch_count += 1
+
+                # 배치 크기마다 중간 커밋 (lock 시간 단축)
+                if batch_count >= batch_size:
+                    conn.commit()
+                    batch_count = 0
+
+            except Exception as e:
+                print(f"  저장 실패 [{app_data.get('app_id')}]: {str(e)}")
+
+        # 남은 데이터 커밋
+        conn.commit()
+
+    except Exception as e:
+        print(f"  [오류] 배치 저장 실패: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
     return saved_count
 
 
@@ -465,15 +493,16 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
     Returns:
         수집 결과 통계
     """
+    timing_tracker.start_task("Google Play 상세정보")
     start_time = datetime.now()
-    log_step("Google Play 상세정보", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", start_time)
+    log_step("Google Play 상세정보", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", "Google Play 상세정보")
 
     # 아직 상세 정보가 없는 앱 ID 조회
     unfetched_ids = get_unfetched_app_ids('google_play', limit)
-    log_step("Google Play", f"미수집 앱: {len(unfetched_ids)}개", datetime.now())
+    log_step("Google Play", f"미수집 앱: {len(unfetched_ids)}개", "Google Play 상세정보")
 
     if not unfetched_ids:
-        log_step("Google Play 상세정보", "수집할 앱 없음", start_time)
+        log_step("Google Play 상세정보", "수집할 앱 없음", "Google Play 상세정보")
         return {'fetched': 0, 'saved': 0, 'failed': 0}
 
     apps_data = []
@@ -488,14 +517,14 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
 
         # 진행 상황 출력
         if (i + 1) % 50 == 0:
-            log_step("Google Play", f"진행: {i+1}/{len(unfetched_ids)}, 성공: {len(apps_data)}", datetime.now())
+            log_step("Google Play", f"진행: {i+1}/{len(unfetched_ids)}, 성공: {len(apps_data)}", "Google Play 상세정보")
 
         time.sleep(REQUEST_DELAY)
 
     # 저장 (기존 데이터와 병합)
     saved = save_apps_to_db(apps_data, merge_existing=True)
 
-    log_step("Google Play 상세정보", f"완료: {saved}개 저장, {failed}개 실패", start_time)
+    log_step("Google Play 상세정보", f"완료: {saved}개 저장, {failed}개 실패", "Google Play 상세정보")
 
     return {
         'fetched': len(apps_data),
@@ -516,15 +545,16 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
     Returns:
         수집 결과 통계
     """
+    timing_tracker.start_task("App Store 상세정보")
     start_time = datetime.now()
-    log_step("App Store 상세정보", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", start_time)
+    log_step("App Store 상세정보", f"수집 시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", "App Store 상세정보")
 
     # 아직 상세 정보가 없는 앱 ID 조회
     unfetched_ids = get_unfetched_app_ids('app_store', limit)
-    log_step("App Store", f"미수집 앱: {len(unfetched_ids)}개", datetime.now())
+    log_step("App Store", f"미수집 앱: {len(unfetched_ids)}개", "App Store 상세정보")
 
     if not unfetched_ids:
-        log_step("App Store 상세정보", "수집할 앱 없음", start_time)
+        log_step("App Store 상세정보", "수집할 앱 없음", "App Store 상세정보")
         return {'fetched': 0, 'saved': 0, 'failed': 0}
 
     apps_data = []
@@ -536,14 +566,14 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
         results = fetch_app_store_details_batch(batch, country_code)
         apps_data.extend(results)
 
-        log_step("App Store", f"배치 {i//batch_size + 1}: {len(results)}개 수집", datetime.now())
+        log_step("App Store", f"배치 {i//batch_size + 1}: {len(results)}개 수집", "App Store 상세정보")
         time.sleep(REQUEST_DELAY)
 
     # 저장 (기존 데이터와 병합)
     saved = save_apps_to_db(apps_data, merge_existing=True)
     failed = len(unfetched_ids) - len(apps_data)
 
-    log_step("App Store 상세정보", f"완료: {saved}개 저장, {failed}개 실패", start_time)
+    log_step("App Store 상세정보", f"완료: {saved}개 저장, {failed}개 실패", "App Store 상세정보")
 
     return {
         'fetched': len(apps_data),
@@ -564,8 +594,9 @@ def fetch_all_new_app_details(google_limit: int = 100, appstore_limit: int = 500
     Returns:
         전체 수집 결과
     """
+    timing_tracker.start_task("전체 상세정보 수집")
     start_time = datetime.now()
-    log_step("전체 상세정보 수집", f"시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", start_time)
+    log_step("전체 상세정보 수집", f"시작 (타임스탬프: {start_time.strftime('%Y-%m-%d %H:%M:%S')})", "전체 상세정보 수집")
 
     results = {
         'google_play': fetch_google_play_new_apps(google_limit),
@@ -583,7 +614,7 @@ def fetch_all_new_app_details(google_limit: int = 100, appstore_limit: int = 500
           f"{results['app_store']['failed']}개 실패")
     print("=" * 60)
 
-    log_step("전체 상세정보 수집", "완료", start_time)
+    log_step("전체 상세정보 수집", "완료", "전체 상세정보 수집")
 
     return results
 
