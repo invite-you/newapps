@@ -15,7 +15,7 @@ from google_play_scraper import search, app
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import (
     COUNTRIES, FETCH_LIMIT_PER_COUNTRY, GOOGLE_PLAY_SEARCH_QUERIES,
-    REQUEST_DELAY, SSL_VERIFY, get_proxies
+    REQUEST_DELAY, SSL_VERIFY, get_proxies, timing_tracker
 )
 from database.db import get_connection, log_step
 
@@ -278,8 +278,9 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
     Returns:
         수집된 앱 개수
     """
-    start_time = datetime.now()
-    log_step(f"Google Play 수집 [{country_code.upper()}]", "시작", start_time)
+    task_name = f"Google Play 수집 [{country_code.upper()}]"
+    timing_tracker.start_task(task_name)
+    log_step(task_name, "시작", task_name)
 
     # 언어 설정 (국가별)
     lang_map = {
@@ -308,7 +309,7 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
             break
 
     if not all_app_ids:
-        log_step(f"Google Play 수집 [{country_code.upper()}]", "앱 없음", start_time)
+        log_step(task_name, "앱 없음", task_name)
         return 0
 
     print(f"  총 {len(all_app_ids)}개 고유 앱 ID 수집됨")
@@ -345,15 +346,16 @@ def scrape_new_apps_by_country(country_code, limit=FETCH_LIMIT_PER_COUNTRY):
 
     # 3. 데이터베이스에 저장
     saved_count = save_apps_to_db(apps_data)
-    log_step(f"Google Play 수집 [{country_code.upper()}]", f"완료 ({saved_count}개 저장)", start_time)
+    log_step(task_name, f"완료 ({saved_count}개 저장)", task_name)
 
     return saved_count
 
 
 def scrape_all_countries():
     """모든 국가의 Google Play Store에서 앱 수집"""
-    total_start = datetime.now()
-    log_step("Google Play 전체 수집", "시작", total_start)
+    task_name = "Google Play 전체 수집"
+    timing_tracker.start_task(task_name)
+    log_step(task_name, "시작", task_name)
 
     total_apps = 0
     for country in COUNTRIES:
@@ -365,7 +367,7 @@ def scrape_all_countries():
             print(f"  오류 발생 [{country['code']}]: {str(e)}")
             continue
 
-    log_step("Google Play 전체 수집", f"완료 (총 {total_apps}개 앱)", total_start)
+    log_step(task_name, f"완료 (총 {total_apps}개 앱)", task_name)
     return total_apps
 
 
