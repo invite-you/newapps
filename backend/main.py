@@ -29,23 +29,32 @@ def run_sitemap_collection(google_limit: int = None, appstore_limit: int = None)
         appstore_limit: App Store sitemap 타입별 처리 수 제한 (None이면 전체)
     """
     timing_tracker.start_task("Sitemap 수집 모드")
-    log_step("Sitemap 수집 모드", "시작", "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", "========== Sitemap 기반 앱 수집 시작 ==========", "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", f"  Google Play sitemap limit: {google_limit}", "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", f"  App Store sitemap limit: {appstore_limit}", "Sitemap 수집 모드")
 
     # Sitemap DB 초기화
+    log_step("Sitemap 수집 모드", "[준비] Sitemap DB 초기화 중...", "Sitemap 수집 모드")
     init_sitemap_database()
+    log_step("Sitemap 수집 모드", "[준비] Sitemap DB 초기화 완료", "Sitemap 수집 모드")
 
     # 1. Sitemap에서 앱 ID 수집
-    log_step("1단계", "Sitemap에서 앱 ID 수집", "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", "[실행] Sitemap에서 앱 ID 수집 시작", "Sitemap 수집 모드")
     sitemap_results = collect_all_sitemaps(google_limit, appstore_limit)
 
     # 2. 수집 통계 출력
+    log_step("Sitemap 수집 모드", "", "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", "=" * 50, "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", "       발견된 앱 통계", "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", "=" * 50, "Sitemap 수집 모드")
     stats = get_discovery_stats()
-    print("\n발견된 앱 통계:")
     for platform, data in stats.get('by_platform', {}).items():
         today_count = stats.get('today', {}).get(platform, 0)
-        print(f"  {platform}: 전체 {data['total']:,}개, 오늘 신규 {today_count:,}개")
+        week_count = stats.get('last_7_days', {}).get(platform, 0)
+        log_step("Sitemap 수집 모드", f"  {platform}: 전체 {data['total']:,}개 | 오늘 신규 {today_count:,}개 | 7일간 신규 {week_count:,}개", "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", "=" * 50, "Sitemap 수집 모드")
 
-    log_step("Sitemap 수집 모드", "완료", "Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", "========== Sitemap 기반 앱 수집 완료 ==========", "Sitemap 수집 모드")
 
     return sitemap_results
 
@@ -59,16 +68,20 @@ def run_details_collection(google_limit: int = 200, appstore_limit: int = 500):
         appstore_limit: App Store 앱 수집 제한
     """
     timing_tracker.start_task("상세정보 수집")
-    log_step("상세정보 수집", "시작", "상세정보 수집")
+    log_step("상세정보 수집", "========== 앱 상세정보 수집 시작 ==========", "상세정보 수집")
+    log_step("상세정보 수집", f"  Google Play limit: {google_limit}개", "상세정보 수집")
+    log_step("상세정보 수집", f"  App Store limit: {appstore_limit}개", "상세정보 수집")
 
     # Apps DB 초기화
+    log_step("상세정보 수집", "[준비] Apps DB 초기화 중...", "상세정보 수집")
     init_database()
+    log_step("상세정보 수집", "[준비] Apps DB 초기화 완료", "상세정보 수집")
 
     # 상세 정보 수집
-    log_step("2단계", "상세 정보 수집", "상세정보 수집")
+    log_step("상세정보 수집", "[실행] 앱 상세 정보 수집 시작", "상세정보 수집")
     details_results = fetch_all_new_app_details(google_limit, appstore_limit)
 
-    log_step("상세정보 수집", "완료", "상세정보 수집")
+    log_step("상세정보 수집", "========== 앱 상세정보 수집 완료 ==========", "상세정보 수집")
 
     return details_results
 
@@ -76,25 +89,30 @@ def run_details_collection(google_limit: int = 200, appstore_limit: int = 500):
 def run_search_collection():
     """검색어 기반 앱 수집 실행 (기존 방식)"""
     timing_tracker.start_task("검색 수집 모드")
-    log_step("검색 수집 모드", "시작", "검색 수집 모드")
+    log_step("검색 수집 모드", "========== 검색어 기반 앱 수집 시작 ==========", "검색 수집 모드")
 
     # DB 초기화
+    log_step("검색 수집 모드", "[준비] Apps DB 초기화 중...", "검색 수집 모드")
     init_database()
+    log_step("검색 수집 모드", "[준비] Apps DB 초기화 완료", "검색 수집 모드")
 
     # Google Play Store 데이터 수집
+    log_step("검색 수집 모드", "[실행] Google Play Store 수집 시작", "검색 수집 모드")
     google_play_scraper.scrape_all_countries()
 
     # App Store 데이터 수집
+    log_step("검색 수집 모드", "[실행] App Store 수집 시작", "검색 수집 모드")
     app_store_scraper.scrape_all_countries()
 
-    log_step("검색 수집 모드", "완료", "검색 수집 모드")
+    log_step("검색 수집 모드", "========== 검색어 기반 앱 수집 완료 ==========", "검색 수집 모드")
 
 
 def run_analysis():
     """앱 점수 계산 및 주목 앱 선별"""
     timing_tracker.start_task("앱 분석")
-    log_step("3단계", "앱 분석 및 점수 계산", "앱 분석")
-    app_analyzer.analyze_and_update_scores()
+    log_step("앱 분석", "========== 앱 분석 및 점수 계산 시작 ==========", "앱 분석")
+    updated, featured = app_analyzer.analyze_and_update_scores()
+    log_step("앱 분석", f"========== 앱 분석 완료 (처리: {updated:,}개, 주목 앱: {featured:,}개) ==========", "앱 분석")
 
 
 def main():
@@ -195,21 +213,23 @@ def main():
                 run_analysis()
 
     except KeyboardInterrupt:
-        print("\n\n중단됨 (Ctrl+C)")
+        log_step("전체 프로세스", "[중단] 사용자에 의해 중단됨 (Ctrl+C)", "전체 프로세스")
         sys.exit(1)
     except Exception as e:
-        print(f"\n오류 발생: {e}")
         import traceback
-        traceback.print_exc()
+        error_details = traceback.format_exc()
+        log_step("전체 프로세스", f"[오류] 예외 발생: {type(e).__name__}: {str(e)}", "전체 프로세스")
+        log_step("전체 프로세스", f"[오류] 상세 정보:\n{error_details}", "전체 프로세스")
         sys.exit(1)
 
-    log_step("전체 프로세스", "완료", "전체 프로세스")
+    log_step("전체 프로세스", "========== 전체 프로세스 완료 ==========", "전체 프로세스")
 
-    print("\n" + "=" * 60)
-    print("데이터 수집 및 분석이 완료되었습니다!")
-    print("API 서버를 실행하여 웹사이트에서 확인하세요:")
-    print("  cd api && npm start")
-    print("=" * 60)
+    log_step("전체 프로세스", "", "전체 프로세스")
+    log_step("전체 프로세스", "=" * 60, "전체 프로세스")
+    log_step("전체 프로세스", "  데이터 수집 및 분석이 완료되었습니다!", "전체 프로세스")
+    log_step("전체 프로세스", "  API 서버를 실행하여 웹사이트에서 확인하세요:", "전체 프로세스")
+    log_step("전체 프로세스", "    cd api && npm start", "전체 프로세스")
+    log_step("전체 프로세스", "=" * 60, "전체 프로세스")
 
 
 if __name__ == "__main__":

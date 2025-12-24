@@ -64,14 +64,26 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[Tuple[str, O
     sitemap_conn.close()
 
     if not sitemap_records:
+        log_step(
+            "미수집 앱 조회",
+            f"[{platform}] sitemap에서 발견된 앱이 없습니다",
+            "미수집 앱 조회"
+        )
         return []
+
+    log_step(
+        "미수집 앱 조회",
+        f"[{platform}] sitemap에서 {len(sitemap_records)}개 앱 ID 조회 완료",
+        "미수집 앱 조회"
+    )
 
     # apps DB에 이미 있는 앱 ID (배치 단위 조회로 변수 개수 제한)
     apps_conn = get_apps_connection()
     apps_cursor = apps_conn.cursor()
 
     db_platform = platform
-    sitemap_app_id_list = list(sitemap_app_ids)
+    # 버그 수정: sitemap_app_ids -> sitemap_records에서 app_id 추출
+    sitemap_app_id_list = [app_id for app_id, country_code in sitemap_records]
     existing_app_ids: Set[str] = set()
 
     for start in range(0, len(sitemap_app_id_list), EXISTING_APP_ID_BATCH_SIZE):
@@ -85,6 +97,12 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[Tuple[str, O
 
     apps_conn.close()
 
+    log_step(
+        "미수집 앱 조회",
+        f"[{platform}] 기존 DB에 {len(existing_app_ids)}개 앱이 이미 존재",
+        "미수집 앱 조회"
+    )
+
     # 차집합: sitemap에는 있지만 apps에는 없는 ID
     unfetched = [
         (app_id, country_code)
@@ -92,9 +110,25 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[Tuple[str, O
         if app_id not in existing_app_ids
     ]
     if not unfetched:
+        log_step(
+            "미수집 앱 조회",
+            f"[{platform}] 모든 앱이 이미 수집되어 있습니다 (신규 앱 없음)",
+            "미수집 앱 조회"
+        )
         return []
 
+    log_step(
+        "미수집 앱 조회",
+        f"[{platform}] 미수집 앱 {len(unfetched)}개 발견 (limit={limit})",
+        "미수집 앱 조회"
+    )
+
     prioritized = prioritize_for_retry(platform, unfetched, limit)
+    log_step(
+        "미수집 앱 조회",
+        f"[{platform}] 재시도 우선순위 적용 후 {len(prioritized)}개 선택됨",
+        "미수집 앱 조회"
+    )
     return prioritized
 
 
