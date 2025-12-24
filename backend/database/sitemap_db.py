@@ -13,35 +13,14 @@ from typing import List, Dict, Set, Optional, Tuple
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import (
-    LOG_FORMAT,
     FAILED_RETRY_COOLDOWN_MINUTES,
     FAILED_RETRY_WARNING_THRESHOLD,
     timing_tracker,
 )
+from database.db import log_step
 
 # Sitemap 데이터베이스 경로 (database 폴더에 정리)
 SITEMAP_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "database", "sitemap_tracking.db")
-
-
-def log_step(step: str, message: str, task_name: Optional[str] = None):
-    """
-    타임스탬프 로그 출력
-
-    Args:
-        step: 단계 이름
-        message: 메시지
-        task_name: 태스크 이름 (태스크별 소요시간 추적용)
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    timing = timing_tracker.get_timing(task_name)
-    print(LOG_FORMAT.format(
-        timestamp=timestamp,
-        step=step,
-        message=message,
-        line_duration=f"{timing['line_duration']:.2f}",
-        task_duration=f"{timing['task_duration']:.2f}",
-        total_duration=f"{timing['total_duration']:.2f}"
-    ))
 
 
 def get_connection():
