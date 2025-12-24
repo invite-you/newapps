@@ -13,8 +13,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # SSL 검증 비활성화 플래그 (테스트 환경에서만 사용 권장)
 SSL_VERIFY = False
 
-# 데이터베이스 설정 (절대경로 사용)
-DATABASE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "apps.db")
+# 데이터베이스 설정 (절대경로 사용, database 폴더에 정리)
+DATABASE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "database", "apps.db")
 
 # 앱스토어 국가 코드 목록
 # Google Play와 App Store에서 지원하는 주요 국가
