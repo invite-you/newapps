@@ -24,6 +24,8 @@ from database.sitemap_db import (
     clear_failed_app_detail
 )
 
+EXISTING_APP_ID_BATCH_SIZE = 899  # 플랫폼 파라미터까지 포함해 변수 개수를 900 이하로 유지
+
 # Google Play Scraper
 try:
     from google_play_scraper import app as google_app
@@ -64,21 +66,23 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[Tuple[str, O
     if not sitemap_records:
         return []
 
-    # apps DB에 이미 있는 앱 ID
+    # apps DB에 이미 있는 앱 ID (배치 단위 조회로 변수 개수 제한)
     apps_conn = get_apps_connection()
     apps_cursor = apps_conn.cursor()
 
-    # 플랫폼 이름 매핑
     db_platform = platform
+    sitemap_app_id_list = list(sitemap_app_ids)
+    existing_app_ids: Set[str] = set()
 
-    sitemap_app_ids = {app_id for app_id, _ in sitemap_records}
-    placeholders = ','.join(['?' for _ in sitemap_app_ids])
-    apps_cursor.execute(f"""
-        SELECT DISTINCT app_id FROM apps
-        WHERE platform = ? AND app_id IN ({placeholders})
-    """, (db_platform, *sitemap_app_ids))
+    for start in range(0, len(sitemap_app_id_list), EXISTING_APP_ID_BATCH_SIZE):
+        chunked_ids = sitemap_app_id_list[start:start + EXISTING_APP_ID_BATCH_SIZE]
+        placeholders = ','.join(['?' for _ in chunked_ids])
+        apps_cursor.execute(f"""
+            SELECT DISTINCT app_id FROM apps
+            WHERE platform = ? AND app_id IN ({placeholders})
+        """, (db_platform, *chunked_ids))
+        existing_app_ids.update(row['app_id'] for row in apps_cursor.fetchall())
 
-    existing_app_ids = {row['app_id'] for row in apps_cursor.fetchall()}
     apps_conn.close()
 
     # 차집합: sitemap에는 있지만 apps에는 없는 ID
