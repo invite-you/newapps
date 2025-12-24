@@ -309,40 +309,75 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
     }
 
 
-def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us') -> List[Dict]:
+def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us', allow_split: bool = True) -> Dict[str, Any]:
     """
     App Store 앱 상세 정보 배치로 가져오기 (iTunes Lookup API)
 
     Args:
         app_ids: 앱 ID 목록 (최대 200개)
         country_code: 국가 코드
+        allow_split: 재시도 실패 시 50개 단위 분할 재시도 허용 여부
 
     Returns:
-        앱 정보 딕셔너리 목록
+        {
+            'results': 앱 정보 딕셔너리 목록,
+            'failed_ids': 조회 실패 앱 ID 목록
+        }
     """
     if not app_ids:
-        return []
+        return {'results': [], 'failed_ids': []}
 
     # 200개 제한
     ids_str = ','.join(app_ids[:200])
     url = f"https://itunes.apple.com/lookup?id={ids_str}&country={country_code}"
+    max_attempts = 3
+    backoff_seconds = 2
 
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.get(url, timeout=30)
+            if response.status_code != 200:
+                log_step("App Store", f"배치 조회 상태코드 {response.status_code} (시도 {attempt}/{max_attempts})", "App Store 상세정보")
+            response.raise_for_status()
+            data = response.json()
 
-        results = []
-        for item in data.get('results', []):
-            parsed = parse_app_store_data(item, country_code)
-            if parsed:
-                results.append(parsed)
+            results = []
+            fetched_ids: Set[str] = set()
+            for item in data.get('results', []):
+                parsed = parse_app_store_data(item, country_code)
+                if parsed:
+                    results.append(parsed)
+                    fetched_ids.add(parsed['app_id'])
 
-        return results
+            failed_ids = [app_id for app_id in app_ids[:200] if str(app_id) not in fetched_ids]
+            return {'results': results, 'failed_ids': failed_ids}
+        except requests.Timeout:
+            log_step("App Store", f"배치 조회 타임아웃 (시도 {attempt}/{max_attempts}, {len(app_ids[:200])}개)", "App Store 상세정보")
+        except requests.RequestException as e:
+            status_info = f", 상태코드 {e.response.status_code}" if e.response is not None else ""
+            log_step("App Store", f"배치 조회 요청 오류 (시도 {attempt}/{max_attempts}{status_info}): {e}", "App Store 상세정보")
+        except Exception as e:
+            log_step("App Store", f"배치 조회 실패 (시도 {attempt}/{max_attempts}): {e}", "App Store 상세정보")
 
-    except Exception as e:
-        log_step("App Store", f"배치 조회 실패: {e}", "App Store 상세정보")
-        return []
+        if attempt < max_attempts:
+            wait_seconds = backoff_seconds ** (attempt - 1)
+            log_step("App Store", f"재시도 대기 {wait_seconds}초 후 재요청", "App Store 상세정보")
+            time.sleep(wait_seconds)
+
+    if allow_split and len(app_ids) > 50:
+        log_step("App Store", f"배치 반복 실패, 50개 단위로 재시도 진행 ({len(app_ids)}개)", "App Store 상세정보")
+        aggregated_results: List[Dict] = []
+        aggregated_failed: Set[str] = set()
+        for start in range(0, len(app_ids), 50):
+            sub_ids = app_ids[start:start + 50]
+            sub_result = fetch_app_store_details_batch(sub_ids, country_code, allow_split=False)
+            aggregated_results.extend(sub_result['results'])
+            aggregated_failed.update(sub_result['failed_ids'])
+            log_step("App Store", f"분할 배치 {start//50 + 1}: {len(sub_result['results'])}개 수집, 실패 {len(sub_result['failed_ids'])}개", "App Store 상세정보")
+
+        return {'results': aggregated_results, 'failed_ids': list(aggregated_failed)}
+
+    return {'results': [], 'failed_ids': app_ids[:200]}
 
 
 def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
@@ -621,20 +656,22 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
         return {'fetched': 0, 'saved': 0, 'failed': 0}
 
     apps_data = []
+    failed_ids: Set[str] = set()
 
     # 200개씩 배치 처리
     batch_size = 200
     for i in range(0, len(unfetched_ids), batch_size):
         batch = unfetched_ids[i:i + batch_size]
-        results = fetch_app_store_details_batch(batch, country_code)
-        apps_data.extend(results)
+        batch_result = fetch_app_store_details_batch(batch, country_code)
+        apps_data.extend(batch_result['results'])
+        failed_ids.update(batch_result['failed_ids'])
 
-        log_step("App Store", f"배치 {i//batch_size + 1}: {len(results)}개 수집", "App Store 상세정보")
+        log_step("App Store", f"배치 {i//batch_size + 1}: {len(batch_result['results'])}개 수집, 실패 {len(batch_result['failed_ids'])}개", "App Store 상세정보")
         time.sleep(REQUEST_DELAY)
 
     # 저장 (기존 데이터와 병합, 변경 없으면 스킵)
     saved, skipped = save_apps_to_db(apps_data, merge_existing=True)
-    failed = len(unfetched_ids) - len(apps_data)
+    failed = len(failed_ids)
 
     log_step("App Store 상세정보", f"완료: {saved}개 저장, {skipped}개 스킵(변경없음), {failed}개 실패", "App Store 상세정보")
 
@@ -643,6 +680,7 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
         'saved': saved,
         'skipped': skipped,
         'failed': failed,
+        'failed_ids': list(failed_ids),
         'collected_at': start_time.strftime('%Y-%m-%d %H:%M:%S')
     }
 
