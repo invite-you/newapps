@@ -142,7 +142,67 @@ MINIMUM_RATING_COUNT = 10    # 최소 리뷰 수
 MINIMUM_SCORE = 60           # 최소 종합 점수 (주목 앱 선별)
 
 # 로그 형식
-LOG_FORMAT = "[{timestamp}] {step}: {message} (소요시간: {duration}초)"
+LOG_FORMAT = "[{timestamp}] {step}: {message} (라인: {line_duration}초 | 태스크: {task_duration}초 | 누적: {total_duration}초)"
+
+
+class TimingTracker:
+    """전역 타이밍 추적기"""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._reset()
+        return cls._instance
+
+    def _reset(self):
+        from datetime import datetime
+        self._start_time = datetime.now()
+        self._last_log_time = datetime.now()
+        self._task_start_times = {}
+
+    def reset(self):
+        """전체 타이밍 초기화"""
+        self._reset()
+
+    def start_task(self, task_name: str):
+        """태스크 시작 시간 기록"""
+        from datetime import datetime
+        self._task_start_times[task_name] = datetime.now()
+
+    def get_timing(self, task_name: str = None) -> dict:
+        """
+        타이밍 정보 반환
+
+        Returns:
+            dict: {
+                'line_duration': 마지막 로그 이후 경과 시간,
+                'task_duration': 현재 태스크 시작 이후 경과 시간,
+                'total_duration': 전체 프로세스 시작 이후 경과 시간
+            }
+        """
+        from datetime import datetime
+        now = datetime.now()
+
+        line_duration = (now - self._last_log_time).total_seconds()
+        total_duration = (now - self._start_time).total_seconds()
+
+        task_duration = 0.0
+        if task_name and task_name in self._task_start_times:
+            task_duration = (now - self._task_start_times[task_name]).total_seconds()
+
+        # 마지막 로그 시간 업데이트
+        self._last_log_time = now
+
+        return {
+            'line_duration': line_duration,
+            'task_duration': task_duration,
+            'total_duration': total_duration
+        }
+
+
+# 전역 타이밍 트래커 인스턴스
+timing_tracker = TimingTracker()
 
 # 요청 타임아웃 설정 (초)
 REQUEST_TIMEOUT = 30

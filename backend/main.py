@@ -12,6 +12,7 @@ import sys
 import argparse
 from datetime import datetime
 
+from config import timing_tracker
 from database.db import init_database, log_step
 from database.sitemap_db import init_sitemap_database, get_discovery_stats
 from scrapers import google_play_scraper, app_store_scraper
@@ -28,14 +29,14 @@ def run_sitemap_collection(google_limit: int = None, appstore_limit: int = None)
         google_limit: Google Play sitemap 처리 수 제한 (None이면 전체)
         appstore_limit: App Store sitemap 타입별 처리 수 제한 (None이면 전체)
     """
-    start_time = datetime.now()
-    log_step("Sitemap 수집 모드", "시작", start_time)
+    timing_tracker.start_task("Sitemap 수집 모드")
+    log_step("Sitemap 수집 모드", "시작", "Sitemap 수집 모드")
 
     # Sitemap DB 초기화
     init_sitemap_database()
 
     # 1. Sitemap에서 앱 ID 수집
-    log_step("1단계", "Sitemap에서 앱 ID 수집", datetime.now())
+    log_step("1단계", "Sitemap에서 앱 ID 수집", "Sitemap 수집 모드")
     sitemap_results = collect_all_sitemaps(google_limit, appstore_limit)
 
     # 2. 수집 통계 출력
@@ -45,7 +46,7 @@ def run_sitemap_collection(google_limit: int = None, appstore_limit: int = None)
         today_count = stats.get('today', {}).get(platform, 0)
         print(f"  {platform}: 전체 {data['total']:,}개, 오늘 신규 {today_count:,}개")
 
-    log_step("Sitemap 수집 모드", "완료", start_time)
+    log_step("Sitemap 수집 모드", "완료", "Sitemap 수집 모드")
 
     return sitemap_results
 
@@ -58,25 +59,25 @@ def run_details_collection(google_limit: int = 200, appstore_limit: int = 500):
         google_limit: Google Play 앱 수집 제한
         appstore_limit: App Store 앱 수집 제한
     """
-    start_time = datetime.now()
-    log_step("상세정보 수집", "시작", start_time)
+    timing_tracker.start_task("상세정보 수집")
+    log_step("상세정보 수집", "시작", "상세정보 수집")
 
     # Apps DB 초기화
     init_database()
 
     # 상세 정보 수집
-    log_step("2단계", "상세 정보 수집", datetime.now())
+    log_step("2단계", "상세 정보 수집", "상세정보 수집")
     details_results = fetch_all_new_app_details(google_limit, appstore_limit)
 
-    log_step("상세정보 수집", "완료", start_time)
+    log_step("상세정보 수집", "완료", "상세정보 수집")
 
     return details_results
 
 
 def run_search_collection():
     """검색어 기반 앱 수집 실행 (기존 방식)"""
-    start_time = datetime.now()
-    log_step("검색 수집 모드", "시작", start_time)
+    timing_tracker.start_task("검색 수집 모드")
+    log_step("검색 수집 모드", "시작", "검색 수집 모드")
 
     # DB 초기화
     init_database()
@@ -87,12 +88,13 @@ def run_search_collection():
     # App Store 데이터 수집
     app_store_scraper.scrape_all_countries()
 
-    log_step("검색 수집 모드", "완료", start_time)
+    log_step("검색 수집 모드", "완료", "검색 수집 모드")
 
 
 def run_analysis():
     """앱 점수 계산 및 주목 앱 선별"""
-    log_step("3단계", "앱 분석 및 점수 계산", datetime.now())
+    timing_tracker.start_task("앱 분석")
+    log_step("3단계", "앱 분석 및 점수 계산", "앱 분석")
     app_analyzer.analyze_and_update_scores()
 
 
@@ -146,9 +148,10 @@ def main():
 
     args = parser.parse_args()
 
-    # 전체 시작
-    total_start = datetime.now()
-    log_step("전체 프로세스", "시작", total_start)
+    # 전체 시작 - 타이밍 트래커 초기화
+    timing_tracker.reset()
+    timing_tracker.start_task("전체 프로세스")
+    log_step("전체 프로세스", "시작", "전체 프로세스")
 
     print("\n" + "=" * 60)
     print("앱 마켓 데이터 수집 및 분석")
@@ -201,7 +204,7 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
-    log_step("전체 프로세스", "완료", total_start)
+    log_step("전체 프로세스", "완료", "전체 프로세스")
 
     print("\n" + "=" * 60)
     print("데이터 수집 및 분석이 완료되었습니다!")
