@@ -25,6 +25,53 @@ from database.sitemap_db import (
 )
 
 EXISTING_APP_ID_BATCH_SIZE = 899  # 플랫폼 파라미터까지 포함해 변수 개수를 900 이하로 유지
+DEFAULT_LANGUAGE = 'en'
+COUNTRY_TO_LANGUAGE = {
+    'us': 'en',
+    'kr': 'ko',
+    'jp': 'ja',
+    'cn': 'zh',
+    'tw': 'zh',
+    'hk': 'zh',
+    'gb': 'en',
+    'ca': 'en',
+    'au': 'en',
+    'nz': 'en',
+    'in': 'en',
+    'fr': 'fr',
+    'de': 'de',
+    'it': 'it',
+    'es': 'es',
+    'mx': 'es',
+    'ar': 'es',
+    'cl': 'es',
+    'br': 'pt',
+    'pt': 'pt',
+    'ru': 'ru',
+    'tr': 'tr',
+    'id': 'id',
+    'th': 'th',
+    'vn': 'vi',
+}
+
+
+def normalize_country_code(code: Optional[str], fallback: str = 'us') -> str:
+    if not code:
+        return fallback
+
+    normalized = str(code).strip().lower()
+    if len(normalized) != 2 or not normalized.isalpha():
+        return fallback
+
+    return normalized
+
+
+def resolve_language_for_country(country_code: str) -> str:
+    normalized = normalize_country_code(country_code, fallback=None) if country_code else None
+    if not normalized:
+        return DEFAULT_LANGUAGE
+
+    return COUNTRY_TO_LANGUAGE.get(normalized, DEFAULT_LANGUAGE)
 
 # Google Play Scraper
 try:
@@ -598,9 +645,11 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
     apps_data = []
     failed = 0
 
+    normalized_default_country = normalize_country_code(country_code, fallback='us')
+
     for i, (app_id, discovered_country) in enumerate(unfetched_ids):
-        target_country = discovered_country or country_code
-        target_lang = discovered_country or 'en'
+        target_country = normalize_country_code(discovered_country, fallback=normalized_default_country)
+        target_lang = resolve_language_for_country(target_country)
         data, error_message = fetch_google_play_details(app_id, target_country, target_lang)
         if data:
             apps_data.append(data)
