@@ -14,7 +14,8 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import (
     COUNTRIES, FETCH_LIMIT_PER_COUNTRY, APPLE_RSS_FEEDS,
-    REQUEST_DELAY, get_request_kwargs
+    REQUEST_DELAY, get_request_kwargs,
+    normalize_date, normalize_price, normalize_rating, normalize_count, normalize_file_size
 )
 from database.db import get_connection, log_step
 
@@ -128,7 +129,7 @@ def fetch_app_details(app_ids, country_code):
 
 def parse_app_store_data(app_data, country_code, chart_info=None):
     """
-    iTunes Lookup API 응답을 DB 저장 형식으로 변환
+    iTunes Lookup API 응답을 DB 저장 형식으로 변환 (정규화 적용)
 
     Args:
         app_data: iTunes Lookup API 응답의 앱 정보
@@ -170,6 +171,18 @@ def parse_app_store_data(app_data, country_code, chart_info=None):
     if 'isGameCenterEnabled' in app_data:
         game_center_enabled = 1 if app_data.get('isGameCenterEnabled') else 0
 
+    # 날짜 정규화: App Store는 이미 ISO 8601 형식이지만 normalize_date로 일관성 유지
+    release_date = normalize_date(app_data.get('releaseDate'))
+    current_version_release_date = normalize_date(app_data.get('currentVersionReleaseDate'))
+
+    # 평점 및 숫자 정규화
+    rating = normalize_rating(app_data.get('averageUserRating'))
+    rating_count = normalize_count(app_data.get('userRatingCount'))
+    rating_count_current = normalize_count(app_data.get('userRatingCountForCurrentVersion'))
+    rating_current = normalize_rating(app_data.get('averageUserRatingForCurrentVersion'))
+    price = normalize_price(app_data.get('price'))
+    file_size = normalize_file_size(app_data.get('fileSizeBytes'))
+
     return {
         'app_id': app_id,
         'bundle_id': app_data.get('bundleId'),
@@ -193,21 +206,21 @@ def parse_app_store_data(app_data, country_code, chart_info=None):
         'screenshots': json.dumps(screenshots) if screenshots else None,
 
         # 평점
-        'rating': app_data.get('averageUserRating'),
-        'rating_count': app_data.get('userRatingCount'),
-        'rating_count_current_version': app_data.get('userRatingCountForCurrentVersion'),
-        'rating_current_version': app_data.get('averageUserRatingForCurrentVersion'),
-        'reviews_count': app_data.get('userRatingCount'),
+        'rating': rating,
+        'rating_count': rating_count,
+        'rating_count_current_version': rating_count_current,
+        'rating_current_version': rating_current,
+        'reviews_count': rating_count,  # App Store에서는 rating_count와 동일
         'histogram': None,
 
         # 가격
         'installs': None,  # App Store에서 제공하지 않음
         'installs_min': None,
         'installs_exact': None,
-        'price': app_data.get('price'),
+        'price': price,
         'price_formatted': app_data.get('formattedPrice'),
         'currency': app_data.get('currency'),
-        'free': 1 if app_data.get('price', 0) == 0 else 0,
+        'free': 1 if price == 0 or price is None else 0,
 
         # 카테고리
         'category': app_data.get('primaryGenreName'),
@@ -222,14 +235,14 @@ def parse_app_store_data(app_data, country_code, chart_info=None):
         'release_notes': app_data.get('releaseNotes'),
 
         # 날짜
-        'release_date': app_data.get('releaseDate'),
-        'updated_date': app_data.get('currentVersionReleaseDate'),
-        'current_version_release_date': app_data.get('currentVersionReleaseDate'),
+        'release_date': release_date,
+        'updated_date': current_version_release_date,
+        'current_version_release_date': current_version_release_date,
 
         # 버전 및 기술 정보
         'version': app_data.get('version'),
         'minimum_os_version': app_data.get('minimumOsVersion'),
-        'file_size': app_data.get('fileSizeBytes'),
+        'file_size': file_size,
         'file_size_formatted': None,
         'supported_devices': json.dumps(app_data.get('supportedDevices', [])),
         'languages': json.dumps(app_data.get('languageCodesISO2A', [])),

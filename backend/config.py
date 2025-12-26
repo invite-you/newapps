@@ -217,3 +217,228 @@ def get_request_kwargs():
     if proxies:
         kwargs['proxies'] = proxies
     return kwargs
+
+
+# ============ 날짜 정규화 함수들 ============
+
+from datetime import datetime
+import re
+
+# 표준 출력 포맷: ISO 8601
+DATE_FORMAT_ISO = "%Y-%m-%dT%H:%M:%SZ"
+DATE_FORMAT_DATE_ONLY = "%Y-%m-%d"
+
+
+def normalize_date(value, fallback: str = None) -> str:
+    """
+    다양한 형식의 날짜를 ISO 8601 형식으로 정규화
+
+    지원 형식:
+    - ISO 8601: "2010-10-06T08:12:41Z"
+    - Unix timestamp: 1766466534 (int or float)
+    - 한국어 형식: "2010. 2. 25." 또는 "2010. 2. 25"
+    - 기타 형식: "Mar 25, 2020", "2020-03-25" 등
+
+    Args:
+        value: 날짜 값 (str, int, float, datetime)
+        fallback: 파싱 실패 시 반환할 기본값
+
+    Returns:
+        ISO 8601 형식 문자열 또는 fallback
+    """
+    if value is None:
+        return fallback
+
+    # datetime 객체
+    if isinstance(value, datetime):
+        return value.strftime(DATE_FORMAT_ISO)
+
+    # Unix timestamp (int or float)
+    if isinstance(value, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(value)
+            return dt.strftime(DATE_FORMAT_ISO)
+        except (ValueError, OSError, OverflowError):
+            return fallback
+
+    # 문자열 처리
+    if not isinstance(value, str):
+        return fallback
+
+    value = value.strip()
+    if not value:
+        return fallback
+
+    # 이미 ISO 8601 형식인 경우 그대로 반환
+    if re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', value):
+        return value
+
+    # 한국어 형식 파싱: "2010. 2. 25." 또는 "2010. 2. 25"
+    korean_match = re.match(r'^(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?$', value)
+    if korean_match:
+        year, month, day = korean_match.groups()
+        try:
+            dt = datetime(int(year), int(month), int(day))
+            return dt.strftime(DATE_FORMAT_DATE_ONLY)
+        except ValueError:
+            pass
+
+    # 다양한 날짜 형식 시도
+    date_formats = [
+        "%Y-%m-%d",                    # 2020-03-25
+        "%Y/%m/%d",                    # 2020/03/25
+        "%d-%m-%Y",                    # 25-03-2020
+        "%d/%m/%Y",                    # 25/03/2020
+        "%B %d, %Y",                   # March 25, 2020
+        "%b %d, %Y",                   # Mar 25, 2020
+        "%d %B %Y",                    # 25 March 2020
+        "%d %b %Y",                    # 25 Mar 2020
+        "%Y년 %m월 %d일",              # 2020년 03월 25일
+    ]
+
+    for fmt in date_formats:
+        try:
+            dt = datetime.strptime(value, fmt)
+            return dt.strftime(DATE_FORMAT_DATE_ONLY)
+        except ValueError:
+            continue
+
+    # Unix timestamp 문자열
+    if value.isdigit():
+        try:
+            dt = datetime.fromtimestamp(int(value))
+            return dt.strftime(DATE_FORMAT_ISO)
+        except (ValueError, OSError, OverflowError):
+            pass
+
+    return fallback
+
+
+def normalize_price(price_value, currency: str = None) -> float:
+    """
+    가격 값을 float으로 정규화
+
+    Args:
+        price_value: 가격 값 (str, int, float)
+        currency: 통화 코드 (사용하지 않지만 확장성을 위해)
+
+    Returns:
+        float 가격 또는 0.0
+    """
+    if price_value is None:
+        return None
+
+    if isinstance(price_value, (int, float)):
+        return float(price_value)
+
+    if isinstance(price_value, str):
+        # "Free", "무료" 등
+        if price_value.lower() in ('free', '무료', '0', ''):
+            return 0.0
+
+        # 숫자만 추출
+        price_match = re.search(r'[\d.,]+', price_value.replace(',', ''))
+        if price_match:
+            try:
+                return float(price_match.group())
+            except ValueError:
+                pass
+
+    return None
+
+
+def normalize_rating(rating_value) -> float:
+    """
+    평점 값을 float으로 정규화
+
+    Args:
+        rating_value: 평점 값 (str, int, float)
+
+    Returns:
+        float 평점 또는 None
+    """
+    if rating_value is None:
+        return None
+
+    if isinstance(rating_value, (int, float)):
+        return round(float(rating_value), 2)
+
+    if isinstance(rating_value, str):
+        try:
+            return round(float(rating_value), 2)
+        except ValueError:
+            pass
+
+    return None
+
+
+def normalize_count(count_value) -> int:
+    """
+    숫자 값을 int로 정규화 (설치 수, 리뷰 수 등)
+
+    Args:
+        count_value: 숫자 값 (str, int, float)
+
+    Returns:
+        int 또는 None
+    """
+    if count_value is None:
+        return None
+
+    if isinstance(count_value, int):
+        return count_value
+
+    if isinstance(count_value, float):
+        return int(count_value)
+
+    if isinstance(count_value, str):
+        # "100,000,000+" -> 100000000
+        clean = re.sub(r'[^\d]', '', count_value)
+        if clean:
+            try:
+                return int(clean)
+            except ValueError:
+                pass
+
+    return None
+
+
+def normalize_file_size(size_value) -> int:
+    """
+    파일 크기를 bytes로 정규화
+
+    Args:
+        size_value: 파일 크기 값 (str, int, float)
+
+    Returns:
+        int bytes 또는 None
+    """
+    if size_value is None:
+        return None
+
+    if isinstance(size_value, (int, float)):
+        return int(size_value)
+
+    if isinstance(size_value, str):
+        size_value = size_value.strip().upper()
+
+        # "496357376" 숫자 문자열
+        if size_value.isdigit():
+            return int(size_value)
+
+        # "100M", "1.5G", "500K" 등
+        size_match = re.match(r'^([\d.]+)\s*(K|KB|M|MB|G|GB)?$', size_value, re.IGNORECASE)
+        if size_match:
+            num = float(size_match.group(1))
+            unit = (size_match.group(2) or '').upper()
+
+            if unit in ('K', 'KB'):
+                return int(num * 1024)
+            elif unit in ('M', 'MB'):
+                return int(num * 1024 * 1024)
+            elif unit in ('G', 'GB'):
+                return int(num * 1024 * 1024 * 1024)
+            else:
+                return int(num)
+
+    return None

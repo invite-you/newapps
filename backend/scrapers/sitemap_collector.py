@@ -20,7 +20,9 @@ from config import get_request_kwargs, timing_tracker
 from database.db import log_step
 from database.sitemap_db import (
     get_known_app_ids, save_discovered_apps,
-    save_sitemap_snapshot, init_sitemap_database
+    save_sitemap_snapshot, init_sitemap_database,
+    upsert_failed_sitemap_url, clear_failed_sitemap_url,
+    get_failed_sitemap_urls, get_sitemap_retry_stats
 )
 
 
@@ -74,15 +76,20 @@ class GooglePlaySitemapCollector:
             log_step("Google Play", f"Sitemap index 파싱 실패 ({index_url}): {e}", "Google Play Sitemap")
             return []
 
-    def fetch_and_parse_sitemap(self, sitemap_url: str) -> Tuple[Dict[str, Dict], str]:
+    def fetch_and_parse_sitemap(self, sitemap_url: str) -> Tuple[Dict[str, Dict], str, bool]:
         """
         개별 sitemap.gz 파일에서 앱 ID 및 메타데이터 추출
 
         Returns:
-            (app_metadata, sitemap_filename): {app_id: {url, lastmod, changefreq, priority}}, 파일명
+            (app_metadata, sitemap_filename, success):
+                app_metadata: {app_id: {url, lastmod, changefreq, priority}}
+                sitemap_filename: 파일명
+                success: 성공 여부 (True/False)
         """
         app_metadata = {}
         sitemap_filename = sitemap_url.split('/')[-1]  # 파일명 추출
+        success = False
+        error_reason = None
 
         try:
             response = requests.get(sitemap_url, **self.request_kwargs)
@@ -132,21 +139,33 @@ class GooglePlaySitemapCollector:
                 for app_id in matches:
                     app_metadata[app_id] = {}
 
+            # 성공 - 실패 기록 제거
+            success = True
+            clear_failed_sitemap_url(sitemap_url, 'google_play')
+
         except requests.RequestException as e:
+            error_reason = f"request_error: {str(e)}"
             log_step("Google Play Sitemap", f"[오류] sitemap 요청 실패 ({sitemap_filename}): {str(e)}", "Google Play Sitemap")
         except gzip.BadGzipFile as e:
+            error_reason = f"gzip_error: {str(e)}"
             log_step("Google Play Sitemap", f"[오류] gzip 압축 해제 실패 ({sitemap_filename}): {str(e)}", "Google Play Sitemap")
         except Exception as e:
+            error_reason = f"{type(e).__name__}: {str(e)}"
             log_step("Google Play Sitemap", f"[오류] sitemap 처리 중 예외 ({sitemap_filename}): {type(e).__name__}: {str(e)}", "Google Play Sitemap")
 
-        return app_metadata, sitemap_filename
+        # 실패 시 기록
+        if not success and error_reason:
+            upsert_failed_sitemap_url(sitemap_url, 'google_play', error_reason)
 
-    def collect_all_app_ids(self, limit: int = None) -> Tuple[Dict[str, Dict], Dict[str, str], int]:
+        return app_metadata, sitemap_filename, success
+
+    def collect_all_app_ids(self, limit: int = None, retry_failed: bool = True) -> Tuple[Dict[str, Dict], Dict[str, str], int]:
         """
         모든 sitemap에서 앱 ID 및 메타데이터 수집
 
         Args:
             limit: 처리할 sitemap 수 제한 (None이면 전체 처리, 테스트 목적)
+            retry_failed: 이전에 실패한 sitemap URL도 재시도할지 여부
 
         Returns:
             (app_metadata, app_to_sitemap, sitemap_count):
@@ -160,6 +179,7 @@ class GooglePlaySitemapCollector:
         all_app_metadata = {}
         app_to_sitemap = {}
         sitemap_count = 0
+        failed_count = 0
 
         # sitemap index URLs 가져오기
         index_urls = self.get_sitemap_index_urls()
@@ -184,22 +204,51 @@ class GooglePlaySitemapCollector:
 
                 for future in as_completed(futures):
                     try:
-                        app_metadata, sitemap_filename = future.result()
-                        all_app_metadata.update(app_metadata)
-                        # 각 앱에 대해 sitemap 파일명 매핑
-                        for app_id in app_metadata:
-                            app_to_sitemap[app_id] = sitemap_filename
-                        sitemap_count += 1
+                        app_metadata, sitemap_filename, success = future.result()
+                        if success:
+                            all_app_metadata.update(app_metadata)
+                            # 각 앱에 대해 sitemap 파일명 매핑
+                            for app_id in app_metadata:
+                                app_to_sitemap[app_id] = sitemap_filename
+                            sitemap_count += 1
+                        else:
+                            failed_count += 1
 
-                        if sitemap_count % 100 == 0:
-                            log_step("Google Play", f"진행: {sitemap_count}개 sitemap, {len(all_app_metadata)}개 앱 ID", "Google Play Sitemap")
+                        if (sitemap_count + failed_count) % 100 == 0:
+                            log_step("Google Play", f"진행: {sitemap_count}개 성공, {failed_count}개 실패, {len(all_app_metadata)}개 앱 ID", "Google Play Sitemap")
 
                     except Exception as e:
                         sitemap_url = futures.get(future, "unknown")
                         log_step("Google Play Sitemap", f"[오류] 병렬 처리 중 예외 ({sitemap_url}): {type(e).__name__}: {str(e)}", "Google Play Sitemap")
+                        upsert_failed_sitemap_url(sitemap_url, 'google_play', f"parallel_error: {str(e)}")
+                        failed_count += 1
                         continue
 
-        log_step("Google Play Sitemap", f"수집 완료: {len(all_app_metadata)}개 앱 ID", "Google Play Sitemap")
+        # 이전에 실패한 sitemap URL 재시도
+        if retry_failed:
+            retry_urls = get_failed_sitemap_urls('google_play')
+            if retry_urls:
+                log_step("Google Play Sitemap", f"실패한 sitemap {len(retry_urls)}개 재시도 시작", "Google Play Sitemap")
+                retry_success = 0
+                for retry_info in retry_urls:
+                    sitemap_url = retry_info['sitemap_url']
+                    app_metadata, sitemap_filename, success = self.fetch_and_parse_sitemap(sitemap_url)
+                    if success:
+                        all_app_metadata.update(app_metadata)
+                        for app_id in app_metadata:
+                            app_to_sitemap[app_id] = sitemap_filename
+                        retry_success += 1
+                        sitemap_count += 1
+
+                if retry_success > 0:
+                    log_step("Google Play Sitemap", f"재시도 성공: {retry_success}/{len(retry_urls)}개", "Google Play Sitemap")
+
+        # 최종 통계 출력
+        retry_stats = get_sitemap_retry_stats('google_play')
+        if retry_stats['total_failed'] > 0:
+            log_step("Google Play Sitemap", f"실패 통계: 총 {retry_stats['total_failed']}개, 임계치 초과 {retry_stats['exceeded_threshold']}개, 재시도 대기 {retry_stats['retryable']}개", "Google Play Sitemap")
+
+        log_step("Google Play Sitemap", f"수집 완료: {len(all_app_metadata)}개 앱 ID (성공 {sitemap_count}개, 실패 {failed_count}개)", "Google Play Sitemap")
         return all_app_metadata, app_to_sitemap, sitemap_count
 
 
@@ -261,19 +310,22 @@ class AppStoreSitemapCollector:
             log_step("App Store", f"Sitemap index 파싱 실패: {e}", "App Store Sitemap")
             return []
 
-    def fetch_and_parse_sitemap(self, sitemap_url: str) -> Tuple[Dict[str, Dict], str, str]:
+    def fetch_and_parse_sitemap(self, sitemap_url: str) -> Tuple[Dict[str, Dict], str, str, bool]:
         """
         개별 sitemap.gz에서 앱 ID 및 메타데이터 추출
 
         Returns:
-            (app_metadata, country_code, sitemap_filename):
+            (app_metadata, country_code, sitemap_filename, success):
                 app_metadata: {app_id: {url, lastmod, changefreq, priority}}
                 country_code: 국가 코드
                 sitemap_filename: sitemap 파일명
+                success: 성공 여부 (True/False)
         """
         app_metadata = {}
         country_code = None
         sitemap_filename = sitemap_url.split('/')[-1]  # 파일명 추출
+        success = False
+        error_reason = None
 
         try:
             response = requests.get(sitemap_url, **self.request_kwargs)
@@ -333,21 +385,33 @@ class AppStoreSitemapCollector:
                 if country_match:
                     country_code = country_match.group(1)
 
+            # 성공 - 실패 기록 제거
+            success = True
+            clear_failed_sitemap_url(sitemap_url, 'app_store')
+
         except requests.RequestException as e:
+            error_reason = f"request_error: {str(e)}"
             log_step("App Store Sitemap", f"[오류] sitemap 요청 실패 ({sitemap_filename}): {str(e)}", "App Store Sitemap")
         except gzip.BadGzipFile as e:
+            error_reason = f"gzip_error: {str(e)}"
             log_step("App Store Sitemap", f"[오류] gzip 압축 해제 실패 ({sitemap_filename}): {str(e)}", "App Store Sitemap")
         except Exception as e:
+            error_reason = f"{type(e).__name__}: {str(e)}"
             log_step("App Store Sitemap", f"[오류] sitemap 처리 중 예외 ({sitemap_filename}): {type(e).__name__}: {str(e)}", "App Store Sitemap")
 
-        return app_metadata, country_code, sitemap_filename
+        # 실패 시 기록
+        if not success and error_reason:
+            upsert_failed_sitemap_url(sitemap_url, 'app_store', error_reason)
 
-    def collect_all_app_ids(self, limit: int = None) -> Dict[str, Tuple[Dict[str, Dict], Dict[str, str], int]]:
+        return app_metadata, country_code, sitemap_filename, success
+
+    def collect_all_app_ids(self, limit: int = None, retry_failed: bool = True) -> Dict[str, Tuple[Dict[str, Dict], Dict[str, str], int]]:
         """
         모든 sitemap에서 앱 ID 및 메타데이터 수집 (타입별)
 
         Args:
             limit: 타입별 처리할 sitemap 수 제한 (None이면 전체 처리)
+            retry_failed: 이전에 실패한 sitemap URL도 재시도할지 여부
 
         Returns:
             {sitemap_type: (app_metadata, app_to_sitemap, sitemap_count)}
@@ -366,6 +430,7 @@ class AppStoreSitemapCollector:
             all_app_metadata = {}
             app_to_sitemap = {}
             sitemap_count = 0
+            failed_count = 0
 
             log_step("App Store", f"{sitemap_type} 타입 처리 시작", "App Store Sitemap")
 
@@ -385,23 +450,53 @@ class AppStoreSitemapCollector:
 
                     for future in as_completed(futures):
                         try:
-                            app_metadata, _, sitemap_filename = future.result()
-                            all_app_metadata.update(app_metadata)
-                            # 각 앱에 대해 sitemap 파일명 매핑
-                            for app_id in app_metadata:
-                                app_to_sitemap[app_id] = sitemap_filename
-                            sitemap_count += 1
+                            app_metadata, _, sitemap_filename, success = future.result()
+                            if success:
+                                all_app_metadata.update(app_metadata)
+                                # 각 앱에 대해 sitemap 파일명 매핑
+                                for app_id in app_metadata:
+                                    app_to_sitemap[app_id] = sitemap_filename
+                                sitemap_count += 1
+                            else:
+                                failed_count += 1
 
-                            if sitemap_count % 50 == 0:
-                                log_step("App Store", f"{sitemap_type} 진행: {sitemap_count}개, {len(all_app_metadata)}개 앱", "App Store Sitemap")
+                            if (sitemap_count + failed_count) % 50 == 0:
+                                log_step("App Store", f"{sitemap_type} 진행: {sitemap_count}개 성공, {failed_count}개 실패, {len(all_app_metadata)}개 앱", "App Store Sitemap")
 
                         except Exception as e:
                             sitemap_url = futures.get(future, "unknown")
                             log_step("App Store Sitemap", f"[오류] 병렬 처리 중 예외 ({sitemap_url}): {type(e).__name__}: {str(e)}", "App Store Sitemap")
+                            upsert_failed_sitemap_url(sitemap_url, 'app_store', f"parallel_error: {str(e)}")
+                            failed_count += 1
                             continue
 
             result[sitemap_type] = (all_app_metadata, app_to_sitemap, sitemap_count)
-            log_step("App Store", f"{sitemap_type} 완료: {len(all_app_metadata)}개 앱 ID", "App Store Sitemap")
+            log_step("App Store", f"{sitemap_type} 완료: {len(all_app_metadata)}개 앱 ID (성공 {sitemap_count}개, 실패 {failed_count}개)", "App Store Sitemap")
+
+        # 이전에 실패한 sitemap URL 재시도
+        if retry_failed:
+            retry_urls = get_failed_sitemap_urls('app_store')
+            if retry_urls:
+                log_step("App Store Sitemap", f"실패한 sitemap {len(retry_urls)}개 재시도 시작", "App Store Sitemap")
+                retry_success = 0
+                for retry_info in retry_urls:
+                    sitemap_url = retry_info['sitemap_url']
+                    app_metadata, _, sitemap_filename, success = self.fetch_and_parse_sitemap(sitemap_url)
+                    if success:
+                        # 결과를 적절한 타입에 추가 (기본적으로 'app' 타입에 추가)
+                        if 'app' in result:
+                            result['app'][0].update(app_metadata)
+                            for app_id in app_metadata:
+                                result['app'][1][app_id] = sitemap_filename
+                        retry_success += 1
+
+                if retry_success > 0:
+                    log_step("App Store Sitemap", f"재시도 성공: {retry_success}/{len(retry_urls)}개", "App Store Sitemap")
+
+        # 최종 통계 출력
+        retry_stats = get_sitemap_retry_stats('app_store')
+        if retry_stats['total_failed'] > 0:
+            log_step("App Store Sitemap", f"실패 통계: 총 {retry_stats['total_failed']}개, 임계치 초과 {retry_stats['exceeded_threshold']}개, 재시도 대기 {retry_stats['retryable']}개", "App Store Sitemap")
 
         log_step("App Store Sitemap", "수집 완료", "App Store Sitemap")
         return result

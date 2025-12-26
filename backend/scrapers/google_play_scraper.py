@@ -15,7 +15,8 @@ from google_play_scraper import search, app
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import (
     COUNTRIES, FETCH_LIMIT_PER_COUNTRY, GOOGLE_PLAY_SEARCH_QUERIES,
-    REQUEST_DELAY, SSL_VERIFY, get_proxies, timing_tracker
+    REQUEST_DELAY, SSL_VERIFY, get_proxies, timing_tracker,
+    normalize_date, normalize_price, normalize_rating, normalize_count, normalize_file_size
 )
 from database.db import get_connection, log_step
 
@@ -84,7 +85,7 @@ def get_app_details(app_id, country_code, lang='en'):
 
 def parse_google_play_data(app_data, country_code):
     """
-    Google Play Scraper 응답을 DB 저장 형식으로 변환
+    Google Play Scraper 응답을 DB 저장 형식으로 변환 (정규화 적용)
 
     Args:
         app_data: google-play-scraper app() 응답
@@ -104,22 +105,18 @@ def parse_google_play_data(app_data, country_code):
     # 히스토그램 (별점별 리뷰 수)
     histogram = app_data.get('histogram')
 
-    # 업데이트 날짜 파싱 (timestamp 또는 문자열)
-    updated = app_data.get('updated')
-    updated_date = None
-    if updated:
-        if isinstance(updated, (int, float)):
-            # Unix timestamp인 경우
-            try:
-                updated_date = datetime.fromtimestamp(updated).isoformat()
-            except (ValueError, OSError):
-                updated_date = None
-        else:
-            updated_date = str(updated)
+    # 날짜 정규화: updated는 Unix timestamp, released는 지역화된 문자열
+    updated_date = normalize_date(app_data.get('updated'))
+    release_date = normalize_date(app_data.get('released'))
 
-    # 출시일 파싱
-    released = app_data.get('released')
-    release_date = str(released) if released else None
+    # 평점 및 숫자 정규화
+    rating = normalize_rating(app_data.get('score'))
+    rating_count = normalize_count(app_data.get('ratings'))
+    reviews_count = normalize_count(app_data.get('reviews'))
+    installs_min = normalize_count(app_data.get('minInstalls'))
+    installs_exact = normalize_count(app_data.get('realInstalls'))
+    price = normalize_price(app_data.get('price'))
+    file_size = normalize_file_size(app_data.get('size'))
 
     return {
         'app_id': app_data.get('appId'),
@@ -144,19 +141,19 @@ def parse_google_play_data(app_data, country_code):
         'screenshots': json.dumps(app_data.get('screenshots', [])),
 
         # 평점
-        'rating': app_data.get('score'),
-        'rating_count': app_data.get('ratings'),
+        'rating': rating,
+        'rating_count': rating_count,
         'rating_count_current_version': None,
         'rating_current_version': None,
-        'reviews_count': app_data.get('reviews'),
+        'reviews_count': reviews_count,
         'histogram': json.dumps(histogram) if histogram else None,
 
         # 설치 및 가격
-        'installs': app_data.get('installs'),
-        'installs_min': app_data.get('minInstalls'),
-        'installs_exact': app_data.get('realInstalls'),
-        'price': app_data.get('price'),
-        'price_formatted': str(app_data.get('price', 0)) if app_data.get('price') else 'Free',
+        'installs': app_data.get('installs'),  # 원본 문자열 유지 (예: "100,000,000+")
+        'installs_min': installs_min,
+        'installs_exact': installs_exact,
+        'price': price,
+        'price_formatted': str(price) if price is not None else 'Free',
         'currency': app_data.get('currency'),
         'free': 1 if app_data.get('free', True) else 0,
 
@@ -180,7 +177,7 @@ def parse_google_play_data(app_data, country_code):
         # 버전 및 기술 정보
         'version': app_data.get('version'),
         'minimum_os_version': app_data.get('androidVersion'),
-        'file_size': None,
+        'file_size': file_size,
         'file_size_formatted': app_data.get('size'),
         'supported_devices': None,
         'languages': None,
