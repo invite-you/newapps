@@ -33,6 +33,11 @@ def log_step(step, message, task_name=None):
     ))
 
 
+def _dict_factory(cursor, row):
+    """sqlite3 결과를 딕셔너리로 변환하는 팩토리"""
+    return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
+
+
 def get_connection():
     """데이터베이스 연결 반환 (WAL 모드, 타임아웃 설정)"""
     db_dir = os.path.dirname(DATABASE_PATH)
@@ -42,7 +47,7 @@ def get_connection():
 
     # timeout=30으로 lock 대기 시간 설정
     conn = sqlite3.connect(DATABASE_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row  # 딕셔너리 형태로 결과 반환
+    conn.row_factory = _dict_factory  # dict로 반환하여 .get() 사용 가능
 
     # WAL 모드 활성화 - 동시 읽기/쓰기 성능 향상
     conn.execute("PRAGMA journal_mode=WAL")
@@ -60,17 +65,13 @@ def init_database(force_reset: bool = False):
         force_reset: True면 테이블 삭제 후 재생성 (기존 데이터 삭제됨)
     """
     timing_tracker.start_task("데이터베이스 초기화")
-    log_step("데이터베이스 초기화", f"Apps DB 초기화 시작 (force_reset={force_reset})", "데이터베이스 초기화")
-    log_step("데이터베이스 초기화", f"  DB 경로: {DATABASE_PATH}", "데이터베이스 초기화")
 
     conn = get_connection()
     cursor = conn.cursor()
 
     # 기존 테이블 삭제 (스키마 변경 시에만 사용)
     if force_reset:
-        log_step("데이터베이스 초기화", "  [경고] 기존 테이블 삭제 중 (force_reset=True)...", "데이터베이스 초기화")
         cursor.execute("DROP TABLE IF EXISTS apps")
-        log_step("데이터베이스 초기화", "  [경고] 기존 테이블 삭제 완료", "데이터베이스 초기화")
 
     # 확장된 앱 정보 테이블 - App Store/Google Play 모든 필드 포함
     cursor.execute("""
@@ -202,9 +203,6 @@ def init_database(force_reset: bool = False):
 
     conn.commit()
     conn.close()
-
-    log_step("데이터베이스 초기화", "  테이블 및 인덱스 생성/확인 완료", "데이터베이스 초기화")
-    log_step("데이터베이스 초기화", "Apps DB 초기화 완료", "데이터베이스 초기화")
 
 
 def get_app_columns():
