@@ -15,7 +15,7 @@ from typing import List, Dict, Optional, Set, Any, Tuple
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from config import REQUEST_DELAY, timing_tracker
+from config import REQUEST_DELAY, timing_tracker, get_request_kwargs
 from database.db import get_connection as get_apps_connection, log_step
 from database.sitemap_db import (
     get_connection as get_sitemap_connection,
@@ -305,7 +305,12 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
     }
 
 
-def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us', allow_split: bool = True) -> Dict[str, Any]:
+def fetch_app_store_details_batch(
+    app_ids: List[str],
+    country_code: str = 'us',
+    allow_split: bool = True,
+    request_kwargs: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
     App Store 앱 상세 정보 배치로 가져오기 (iTunes Lookup API)
 
@@ -329,10 +334,11 @@ def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us', 
     max_attempts = 3
     backoff_seconds = 2
     last_error: Optional[str] = None
+    prepared_request_kwargs = request_kwargs or get_request_kwargs()
 
     for attempt in range(1, max_attempts + 1):
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, **prepared_request_kwargs)
             response.raise_for_status()
             data = response.json()
 
@@ -365,7 +371,12 @@ def fetch_app_store_details_batch(app_ids: List[str], country_code: str = 'us', 
         aggregated_reasons: Dict[str, str] = {}
         for start in range(0, len(app_ids), 50):
             sub_ids = app_ids[start:start + 50]
-            sub_result = fetch_app_store_details_batch(sub_ids, country_code, allow_split=False)
+            sub_result = fetch_app_store_details_batch(
+                sub_ids,
+                country_code,
+                allow_split=False,
+                request_kwargs=prepared_request_kwargs
+            )
             aggregated_results.extend(sub_result['results'])
             aggregated_failed.update(sub_result['failed_ids'])
             aggregated_reasons.update(sub_result.get('failure_reasons', {}))
