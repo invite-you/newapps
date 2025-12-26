@@ -26,6 +26,7 @@ from database.sitemap_db import (
 
 EXISTING_APP_ID_BATCH_SIZE = 899  # 플랫폼 파라미터까지 포함해 변수 개수를 900 이하로 유지
 DEFAULT_LANGUAGE = 'en'
+DEFAULT_COUNTRY_FALLBACK = 'us'
 COUNTRY_TO_LANGUAGE = {
     'us': 'en',
     'kr': 'ko',
@@ -125,16 +126,21 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[Tuple[str, O
     db_platform = platform
     # 버그 수정: sitemap_app_ids -> sitemap_records에서 app_id 추출
     sitemap_app_id_list = [app_id for app_id, country_code in sitemap_records]
-    existing_app_ids: Set[str] = set()
+    existing_app_country_pairs: Set[Tuple[str, str]] = set()
 
     for start in range(0, len(sitemap_app_id_list), EXISTING_APP_ID_BATCH_SIZE):
         chunked_ids = sitemap_app_id_list[start:start + EXISTING_APP_ID_BATCH_SIZE]
         placeholders = ','.join(['?' for _ in chunked_ids])
         apps_cursor.execute(f"""
-            SELECT DISTINCT app_id FROM apps
+            SELECT DISTINCT app_id, country_code FROM apps
             WHERE platform = ? AND app_id IN ({placeholders})
         """, (db_platform, *chunked_ids))
-        existing_app_ids.update(row['app_id'] for row in apps_cursor.fetchall())
+        for row in apps_cursor.fetchall():
+            normalized_country = normalize_country_code(
+                row.get('country_code'),
+                fallback=DEFAULT_COUNTRY_FALLBACK
+            )
+            existing_app_country_pairs.add((row['app_id'], normalized_country))
 
     apps_conn.close()
 
@@ -142,7 +148,7 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[Tuple[str, O
     unfetched = [
         (app_id, country_code)
         for app_id, country_code in sitemap_records
-        if app_id not in existing_app_ids
+        if (app_id, normalize_country_code(country_code, fallback=DEFAULT_COUNTRY_FALLBACK)) not in existing_app_country_pairs
     ]
     if not unfetched:
         return []
