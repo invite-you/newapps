@@ -146,6 +146,23 @@ def init_sitemap_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_app ON failed_app_details(app_id, platform)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_at ON failed_app_details(failed_at DESC)")
 
+    # 실패한 sitemap URL 기록 테이블
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS failed_sitemap_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sitemap_url TEXT NOT NULL,
+            platform TEXT NOT NULL,            -- 'google_play' or 'app_store'
+            reason TEXT,
+            failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            retry_count INTEGER DEFAULT 1,
+            last_success_at TIMESTAMP,         -- 마지막 성공 시간
+            UNIQUE(sitemap_url, platform)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_sitemap_url ON failed_sitemap_urls(sitemap_url, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_sitemap_at ON failed_sitemap_urls(failed_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_sitemap_retry ON failed_sitemap_urls(retry_count)")
+
     conn.commit()
     conn.close()
 
@@ -529,6 +546,139 @@ def get_missing_apps(platform: str, days: int = 30) -> List[str]:
     conn.close()
 
     return results
+
+
+# ============ 실패한 Sitemap URL 관리 함수들 ============
+
+def upsert_failed_sitemap_url(sitemap_url: str, platform: str, reason: str) -> int:
+    """
+    실패한 sitemap URL 기록을 upsert하고 누적 횟수를 반환
+
+    Args:
+        sitemap_url: 실패한 sitemap URL
+        platform: 플랫폼 ('google_play' 또는 'app_store')
+        reason: 실패 사유
+
+    Returns:
+        누적 재시도 횟수
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO failed_sitemap_urls (sitemap_url, platform, reason, failed_at, retry_count)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP, 1)
+        ON CONFLICT(sitemap_url, platform) DO UPDATE SET
+            reason = excluded.reason,
+            failed_at = CURRENT_TIMESTAMP,
+            retry_count = failed_sitemap_urls.retry_count + 1
+    """, (sitemap_url, platform, reason[:500] if reason else None))
+
+    cursor.execute("""
+        SELECT retry_count FROM failed_sitemap_urls
+        WHERE sitemap_url = ? AND platform = ?
+    """, (sitemap_url, platform))
+    row = cursor.fetchone()
+    conn.commit()
+    conn.close()
+
+    retry_count = row['retry_count'] if row else 0
+    if retry_count >= FAILED_RETRY_WARNING_THRESHOLD:
+        log_step("경고", f"Sitemap 재시도 {retry_count}회 초과: {sitemap_url}", "Sitemap 재시도")
+    return retry_count
+
+
+def clear_failed_sitemap_url(sitemap_url: str, platform: str):
+    """
+    성공 시 실패 기록 제거 (또는 last_success_at 업데이트)
+
+    Args:
+        sitemap_url: 성공한 sitemap URL
+        platform: 플랫폼
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 성공하면 기록 삭제
+    cursor.execute("""
+        DELETE FROM failed_sitemap_urls
+        WHERE sitemap_url = ? AND platform = ?
+    """, (sitemap_url, platform))
+
+    conn.commit()
+    conn.close()
+
+
+def get_failed_sitemap_urls(platform: str, max_retry_count: int = 10) -> List[Dict]:
+    """
+    재시도가 필요한 실패한 sitemap URL 목록 반환
+
+    Args:
+        platform: 플랫폼 ('google_play' 또는 'app_store')
+        max_retry_count: 최대 재시도 횟수 (이 이상이면 제외)
+
+    Returns:
+        재시도가 필요한 sitemap URL 정보 목록
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 쿨다운 시간이 지난 항목만 반환
+    cursor.execute("""
+        SELECT sitemap_url, reason, failed_at, retry_count
+        FROM failed_sitemap_urls
+        WHERE platform = ?
+          AND retry_count < ?
+          AND failed_at < datetime('now', ?)
+        ORDER BY retry_count ASC, failed_at ASC
+    """, (platform, max_retry_count, f'-{FAILED_RETRY_COOLDOWN_MINUTES} minutes'))
+
+    results = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    return results
+
+
+def get_sitemap_retry_stats(platform: str) -> Dict:
+    """
+    Sitemap 재시도 통계 반환
+
+    Args:
+        platform: 플랫폼
+
+    Returns:
+        통계 정보 딕셔너리
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 전체 실패 기록 수
+    cursor.execute("""
+        SELECT COUNT(*) as total,
+               SUM(CASE WHEN retry_count >= ? THEN 1 ELSE 0 END) as exceeded_threshold
+        FROM failed_sitemap_urls
+        WHERE platform = ?
+    """, (FAILED_RETRY_WARNING_THRESHOLD, platform))
+    row = cursor.fetchone()
+
+    stats = {
+        'total_failed': row['total'] if row else 0,
+        'exceeded_threshold': row['exceeded_threshold'] if row else 0
+    }
+
+    # 쿨다운 후 재시도 가능한 개수
+    cursor.execute("""
+        SELECT COUNT(*) as retryable
+        FROM failed_sitemap_urls
+        WHERE platform = ?
+          AND retry_count < ?
+          AND failed_at < datetime('now', ?)
+    """, (platform, FAILED_RETRY_WARNING_THRESHOLD * 2, f'-{FAILED_RETRY_COOLDOWN_MINUTES} minutes'))
+    row = cursor.fetchone()
+    stats['retryable'] = row['retryable'] if row else 0
+
+    conn.close()
+    return stats
 
 
 if __name__ == "__main__":

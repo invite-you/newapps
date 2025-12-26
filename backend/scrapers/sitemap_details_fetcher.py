@@ -15,7 +15,10 @@ from typing import List, Dict, Optional, Set, Any, Tuple
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from config import REQUEST_DELAY, timing_tracker, get_request_kwargs
+from config import (
+    REQUEST_DELAY, timing_tracker, get_request_kwargs,
+    normalize_date, normalize_price, normalize_rating, normalize_count, normalize_file_size
+)
 from database.db import get_connection as get_apps_connection, log_step
 from database.sitemap_db import (
     get_connection as get_sitemap_connection,
@@ -265,7 +268,7 @@ def fetch_google_play_details(app_id: str, country_code: str = 'us', lang: str =
 
 
 def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
-    """Google Play Scraper 응답을 DB 저장 형식으로 변환"""
+    """Google Play Scraper 응답을 DB 저장 형식으로 변환 (정규화 적용)"""
     if not app_data:
         return None
 
@@ -278,19 +281,18 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
 
     histogram = app_data.get('histogram')
 
-    updated = app_data.get('updated')
-    updated_date = None
-    if updated:
-        if isinstance(updated, (int, float)):
-            try:
-                updated_date = datetime.fromtimestamp(updated).isoformat()
-            except (ValueError, OSError):
-                updated_date = None
-        else:
-            updated_date = str(updated)
+    # 날짜 정규화: updated는 Unix timestamp, released는 지역화된 문자열
+    updated_date = normalize_date(app_data.get('updated'))
+    release_date = normalize_date(app_data.get('released'))
 
-    released = app_data.get('released')
-    release_date = str(released) if released else None
+    # 평점 및 숫자 정규화
+    rating = normalize_rating(app_data.get('score'))
+    rating_count = normalize_count(app_data.get('ratings'))
+    reviews_count = normalize_count(app_data.get('reviews'))
+    installs_min = normalize_count(app_data.get('minInstalls'))
+    installs_exact = normalize_count(app_data.get('realInstalls'))
+    price = normalize_price(app_data.get('price'))
+    file_size = normalize_file_size(app_data.get('size'))
 
     return {
         'app_id': app_data.get('appId'),
@@ -309,17 +311,17 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'icon_url_large': app_data.get('icon'),
         'header_image': app_data.get('headerImage'),
         'screenshots': json.dumps(app_data.get('screenshots', [])) if app_data.get('screenshots') else None,
-        'rating': app_data.get('score'),
-        'rating_count': app_data.get('ratings'),
+        'rating': rating,
+        'rating_count': rating_count,
         'rating_count_current_version': None,
         'rating_current_version': None,
-        'reviews_count': app_data.get('reviews'),
+        'reviews_count': reviews_count,
         'histogram': json.dumps(histogram) if histogram else None,
-        'installs': app_data.get('installs'),
-        'installs_min': app_data.get('minInstalls'),
-        'installs_exact': app_data.get('realInstalls'),
-        'price': app_data.get('price'),
-        'price_formatted': str(app_data.get('price', 0)) if app_data.get('price') is not None else None,
+        'installs': app_data.get('installs'),  # 원본 문자열 유지 (예: "100,000,000+")
+        'installs_min': installs_min,
+        'installs_exact': installs_exact,
+        'price': price,
+        'price_formatted': str(price) if price is not None else None,
         'currency': app_data.get('currency'),
         'free': 1 if app_data.get('free', True) else 0,
         'category': app_data.get('genre'),
@@ -335,7 +337,7 @@ def parse_google_play_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'current_version_release_date': updated_date,
         'version': app_data.get('version'),
         'minimum_os_version': app_data.get('androidVersion'),
-        'file_size': None,
+        'file_size': file_size,
         'file_size_formatted': app_data.get('size'),
         'supported_devices': None,
         'languages': None,
@@ -445,7 +447,7 @@ def fetch_app_store_details_batch(
 
 
 def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
-    """iTunes Lookup API 응답을 DB 저장 형식으로 변환"""
+    """iTunes Lookup API 응답을 DB 저장 형식으로 변환 (정규화 적용)"""
     if not app_data or app_data.get('wrapperType') != 'software':
         return None
 
@@ -466,9 +468,17 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
     # 언어
     languages = app_data.get('languageCodesISO2A', [])
 
-    # 날짜 파싱
-    release_date = app_data.get('releaseDate')
-    current_version_release_date = app_data.get('currentVersionReleaseDate')
+    # 날짜 정규화: App Store는 이미 ISO 8601 형식이지만 normalize_date로 일관성 유지
+    release_date = normalize_date(app_data.get('releaseDate'))
+    current_version_release_date = normalize_date(app_data.get('currentVersionReleaseDate'))
+
+    # 평점 및 숫자 정규화
+    rating = normalize_rating(app_data.get('averageUserRating'))
+    rating_count = normalize_count(app_data.get('userRatingCount'))
+    rating_count_current = normalize_count(app_data.get('userRatingCountForCurrentVersion'))
+    rating_current = normalize_rating(app_data.get('averageUserRatingForCurrentVersion'))
+    price = normalize_price(app_data.get('price'))
+    file_size = normalize_file_size(app_data.get('fileSizeBytes'))
 
     all_screenshots = screenshots + ipad_screenshots
 
@@ -489,19 +499,19 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'icon_url_large': app_data.get('artworkUrl512'),
         'header_image': None,
         'screenshots': json.dumps(all_screenshots) if all_screenshots else None,
-        'rating': app_data.get('averageUserRating'),
-        'rating_count': app_data.get('userRatingCount'),
-        'rating_count_current_version': app_data.get('userRatingCountForCurrentVersion'),
-        'rating_current_version': app_data.get('averageUserRatingForCurrentVersion'),
-        'reviews_count': app_data.get('userRatingCount'),
+        'rating': rating,
+        'rating_count': rating_count,
+        'rating_count_current_version': rating_count_current,
+        'rating_current_version': rating_current,
+        'reviews_count': rating_count,  # App Store에서는 rating_count와 동일
         'histogram': None,
         'installs': None,
         'installs_min': None,
         'installs_exact': None,
-        'price': app_data.get('price'),
+        'price': price,
         'price_formatted': app_data.get('formattedPrice'),
         'currency': app_data.get('currency'),
-        'free': 1 if app_data.get('price', 0) == 0 else 0,
+        'free': 1 if price == 0 or price is None else 0,
         'category': app_data.get('primaryGenreName'),
         'category_id': str(app_data.get('primaryGenreId', '')) if app_data.get('primaryGenreId') else None,
         'genres': json.dumps(genres) if genres else None,
@@ -515,7 +525,7 @@ def parse_app_store_data(app_data: Dict, country_code: str) -> Optional[Dict]:
         'current_version_release_date': current_version_release_date,
         'version': app_data.get('version'),
         'minimum_os_version': app_data.get('minimumOsVersion'),
-        'file_size': app_data.get('fileSizeBytes'),
+        'file_size': file_size,
         'file_size_formatted': None,
         'supported_devices': json.dumps(supported_devices) if supported_devices else None,
         'languages': json.dumps(languages) if languages else None,
