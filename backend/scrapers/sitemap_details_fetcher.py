@@ -105,54 +105,64 @@ def get_unfetched_app_ids(platform: str, limit: int = 1000) -> List[Tuple[str, O
     Returns:
         (app_id, country_code) 목록
     """
-    # sitemap에서 발견된 앱 ID
     sitemap_conn = get_sitemap_connection()
     sitemap_cursor = sitemap_conn.cursor()
-
-    sitemap_cursor.execute("""
-        SELECT app_id, country_code FROM app_discovery
-        WHERE platform = ?
-        ORDER BY first_seen_at DESC
-        LIMIT ?
-    """, (platform, limit * 2))
-
-    sitemap_records = [(row['app_id'], row['country_code']) for row in sitemap_cursor.fetchall()]
-    sitemap_conn.close()
-
-    if not sitemap_records:
-        return []
-
-    # apps DB에 이미 있는 앱 ID (배치 단위 조회로 변수 개수 제한)
     apps_conn = get_apps_connection()
     apps_cursor = apps_conn.cursor()
 
-    db_platform = platform
-    # 버그 수정: sitemap_app_ids -> sitemap_records에서 app_id 추출
-    sitemap_app_id_list = [app_id for app_id, country_code in sitemap_records]
-    existing_app_country_pairs: Set[Tuple[str, str]] = set()
+    unfetched: List[Tuple[str, Optional[str]]] = []
+    # 기존 limit * 2 조회는 이미 수집된 앱이 상위에 쌓이면 이후 앱들이 영원히 선택되지 않는 문제가 있어
+    # 오래된 항목부터 순차적으로 훑어가며 비수집 앱을 모으는 방식으로 변경했다.
+    batch_size = max(200, min(limit, 1000))
+    offset = 0
 
-    for start in range(0, len(sitemap_app_id_list), EXISTING_APP_ID_BATCH_SIZE):
-        chunked_ids = sitemap_app_id_list[start:start + EXISTING_APP_ID_BATCH_SIZE]
-        placeholders = ','.join(['?' for _ in chunked_ids])
-        apps_cursor.execute(f"""
-            SELECT DISTINCT app_id, country_code FROM apps
-            WHERE platform = ? AND app_id IN ({placeholders})
-        """, (db_platform, *chunked_ids))
-        for row in apps_cursor.fetchall():
-            normalized_country = normalize_country_code(
-                row.get('country_code'),
-                fallback=DEFAULT_COUNTRY_FALLBACK
-            )
-            existing_app_country_pairs.add((row['app_id'], normalized_country))
+    try:
+        while len(unfetched) < limit:
+            sitemap_cursor.execute("""
+                SELECT app_id, country_code
+                FROM app_discovery
+                WHERE platform = ?
+                ORDER BY first_seen_at ASC
+                LIMIT ? OFFSET ?
+            """, (platform, batch_size, offset))
+            rows = sitemap_cursor.fetchall()
+            if not rows:
+                break
 
-    apps_conn.close()
+            sitemap_app_ids = [row['app_id'] for row in rows]
+            existing_app_country_pairs: Set[Tuple[str, str]] = set()
 
-    # 차집합: sitemap에는 있지만 apps에는 없는 ID
-    unfetched = [
-        (app_id, country_code)
-        for app_id, country_code in sitemap_records
-        if (app_id, normalize_country_code(country_code, fallback=DEFAULT_COUNTRY_FALLBACK)) not in existing_app_country_pairs
-    ]
+            for start in range(0, len(sitemap_app_ids), EXISTING_APP_ID_BATCH_SIZE):
+                chunked_ids = sitemap_app_ids[start:start + EXISTING_APP_ID_BATCH_SIZE]
+                placeholders = ','.join(['?' for _ in chunked_ids])
+                apps_cursor.execute(f"""
+                    SELECT DISTINCT app_id, country_code FROM apps
+                    WHERE platform = ? AND app_id IN ({placeholders})
+                """, (platform, *chunked_ids))
+                for row in apps_cursor.fetchall():
+                    normalized_country = normalize_country_code(
+                        row.get('country_code'),
+                        fallback=DEFAULT_COUNTRY_FALLBACK
+                    )
+                    existing_app_country_pairs.add((row['app_id'], normalized_country))
+
+            for row in rows:
+                normalized_country = normalize_country_code(
+                    row.get('country_code'),
+                    fallback=DEFAULT_COUNTRY_FALLBACK
+                )
+                if (row['app_id'], normalized_country) not in existing_app_country_pairs:
+                    unfetched.append((row['app_id'], normalized_country))
+                    if len(unfetched) >= limit:
+                        break
+
+            offset += batch_size
+            if len(rows) < batch_size:
+                break
+    finally:
+        sitemap_conn.close()
+        apps_conn.close()
+
     if not unfetched:
         return []
 
