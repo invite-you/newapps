@@ -285,7 +285,7 @@ def save_discovered_apps(
                     changefreq = COALESCE(?, changefreq),
                     priority = COALESCE(?, priority),
                     app_url = COALESCE(?, app_url),
-                    country_code = COALESCE(?, country_code)
+                    country_code = COALESCE(country_code, ?)
                 WHERE app_id = ? AND platform = ?
             """, batch)
             updated_count += cursor.rowcount
