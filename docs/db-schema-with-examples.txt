@@ -1,0 +1,791 @@
+================================================================================
+앱 마켓 데이터 수집 시스템 - 데이터베이스 스키마 및 실제 데이터 예시
+================================================================================
+
+[개요]
+이 시스템은 Google Play Store와 Apple App Store에서 앱 정보를 수집하여 SQLite 데이터베이스에 저장합니다.
+- 메인 데이터베이스: apps.db (앱 상세 정보)
+- 추적 데이터베이스: sitemap_tracking.db (수집 이력 관리)
+
+================================================================================
+1. apps.db - apps 테이블 (총 66개 컬럼)
+================================================================================
+
+[1.1] 기본 식별 정보
+--------------------------------------------------------------------------------
+컬럼: id (INTEGER, PRIMARY KEY)
+설명: 내부 자동 증가 ID
+예시:
+  - 67
+  - 119
+  - 502
+  - 311
+
+컬럼: app_id (TEXT, NOT NULL)
+설명: 앱 스토어 고유 식별자. Google Play는 패키지명, App Store는 숫자 ID
+예시:
+  - com.calendar.holidays.events (Google Play)
+  - com.goethe.f50languages (Google Play)
+  - 1047961826 (App Store)
+  - 1037595083 (App Store)
+
+컬럼: bundle_id (TEXT)
+설명: 앱 번들 식별자
+예시:
+  - com.calendar.holidays.events
+  - com.goethe.f50languages
+  - com.featherweightgames.stampede
+  - com.gunthermarktl.stepapp
+
+컬럼: platform (TEXT, NOT NULL)
+설명: 플랫폼 구분자
+예시:
+  - google_play
+  - google_play
+  - app_store
+  - app_store
+
+컬럼: country_code (TEXT)
+설명: 2자리 국가 코드 (소문자)
+예시:
+  - us
+  - us
+  - tw
+  - tw
+
+--------------------------------------------------------------------------------
+[1.2] 앱 기본 정보
+--------------------------------------------------------------------------------
+컬럼: title (TEXT)
+설명: 앱 이름
+예시:
+  - Calendar 2026
+  - Learn 50 languages
+  - 瘋狂動物園-經典像素跑酷
+  - StepsApp 計步器
+
+컬럼: developer (TEXT)
+설명: 개발자/회사명
+예시:
+  - Graphic Sniper
+  - 50LANGUAGES LLC
+  - Featherweight Games Pty Limited
+  - StepsApp GmbH
+
+컬럼: developer_id (TEXT)
+설명: 개발자 고유 ID
+예시:
+  - Graphic+Sniper (Google Play)
+  - 50LANGUAGES+LLC (Google Play)
+  - 914400752 (App Store)
+  - 1018640589 (App Store)
+
+컬럼: developer_email (TEXT)
+설명: 개발자 이메일 (Google Play에서만 제공)
+예시:
+  - graphicsnipeer@gmail.com
+  - apps@50languages.com
+  - NULL (App Store)
+  - NULL (App Store)
+
+컬럼: developer_website (TEXT)
+설명: 개발자 웹사이트 URL
+예시:
+  - https://graphicsniper.blogspot.com/
+  - http://www.50languages.com
+  - http://www.yodo1.com
+  - https://www.steps.app
+
+컬럼: developer_address (TEXT)
+설명: 개발자 주소
+예시:
+  - NULL
+  - NULL
+  - NULL
+  - NULL
+
+컬럼: seller_name (TEXT)
+설명: 판매자명
+예시:
+  - Graphic Sniper
+  - 50LANGUAGES LLC
+  - Featherweight Games Pty Limited
+  - StepsApp GmbH
+
+--------------------------------------------------------------------------------
+[1.3] 아이콘 및 이미지
+--------------------------------------------------------------------------------
+컬럼: icon_url (TEXT)
+설명: 기본 아이콘 이미지 URL
+예시:
+  - https://play-lh.googleusercontent.com/hytkfmYtqngk0XuuSh9nXguClSsdGvQ0jX0B9V5-ODoaQkxYyuOOxTSn7HUTMJB8-oz8MoCDH5dI9gDmQVGmKCQ
+  - https://play-lh.googleusercontent.com/gdrBV9SfcMPJAhw753ZLjSfLTFkzs7UullBb4EyqV2f-sKyk3EGoLCGBjxeu1ONTMMI
+  - https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/61/69/47/616947a2-ecc6-0b9d-83df-f3feadf58ab2/AppIcon-1x_U007emarketing-0-8-0-85-220-0.png/100x100bb.jpg
+  - https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/64/4f/2e/644f2e82-d077-1672-640f-891caf5c61d7/AppIconNew-0-1x_U007ephone-0-1-0-sRGB-0-85-220-0.png/100x100bb.jpg
+
+컬럼: icon_url_small (TEXT)
+설명: 작은 아이콘 URL (60x60)
+예시:
+  - https://play-lh.googleusercontent.com/hytkfmYtqngk... (Google Play는 동일)
+  - https://play-lh.googleusercontent.com/gdrBV9SfcMP...
+  - https://is1-ssl.mzstatic.com/.../60x60bb.jpg
+  - https://is1-ssl.mzstatic.com/.../60x60bb.jpg
+
+컬럼: icon_url_large (TEXT)
+설명: 큰 아이콘 URL (512x512)
+예시:
+  - https://play-lh.googleusercontent.com/hytkfmYtqngk... (Google Play는 동일)
+  - https://play-lh.googleusercontent.com/gdrBV9SfcMP...
+  - https://is1-ssl.mzstatic.com/.../512x512bb.jpg
+  - https://is1-ssl.mzstatic.com/.../512x512bb.jpg
+
+컬럼: header_image (TEXT)
+설명: 헤더 이미지 URL (Google Play에서만 제공)
+예시:
+  - https://play-lh.googleusercontent.com/rjK0r768AIHpr0whe0VI1cJMKOmDseGq2YdRfhMvJmTTkajCxMbphGIn8iIfPAAt6UV4dl0nzUoqI_4T34HUMQ
+  - https://play-lh.googleusercontent.com/PdmFwafI17IZgkClu82KpPY9mC-z_0-rCYrHQioP--KiPtl0qM6HR45uuuOMv5cOrSk
+  - NULL (App Store)
+  - NULL (App Store)
+
+컬럼: screenshots (TEXT, JSON 배열)
+설명: 스크린샷 URL 목록
+예시:
+  - ["https://play-lh.googleusercontent.com/Hfn6nJAZ5JxrJJQ4rJA_lmDM0u-11JdJJ_DJxAtjM2Au2BsrGAliZX8oMexsXNXXAwVnKIua26rL2n8mvUzy", "https://play-lh.googleusercontent.com/q07S28G8f1F38TW8O0_5aL_UFoFU64FkeY..."]
+  - ["https://play-lh.googleusercontent.com/ruf4zYbG89zFr98WaWe4Er6GQKwkpmSEaDsMuDNoTqEaUNA8-mC9tQGzM2vugczrv7o", ...]
+  - NULL
+  - ["https://is1-ssl.mzstatic.com/image/thumb/PurpleSource221/v4/1e/1c/05/1e1c0515-1e03-6ea1-ef2d-52c19f66e463/8f6cd45c-a736-443b-a050-1b8a0fa4b758_0_APP_IPHONE_55_0.png/392x696bb.png", ...]
+
+--------------------------------------------------------------------------------
+[1.4] 평점 및 리뷰
+--------------------------------------------------------------------------------
+컬럼: rating (REAL)
+설명: 평균 평점 (1.0 ~ 5.0)
+예시:
+  - 4.26
+  - 4.65
+  - 4.65
+  - 4.8
+
+컬럼: rating_count (INTEGER)
+설명: 총 평가 수
+예시:
+  - 3836
+  - 63700
+  - 33163
+  - 20328
+
+컬럼: rating_count_current_version (INTEGER)
+설명: 현재 버전의 평가 수 (App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - 33163
+  - 20328
+
+컬럼: rating_current_version (REAL)
+설명: 현재 버전 평점 (App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - 4.65
+  - 4.8
+
+컬럼: reviews_count (INTEGER)
+설명: 텍스트 리뷰 수
+예시:
+  - 28
+  - 2289
+  - 33163
+  - 20328
+
+컬럼: histogram (TEXT, JSON 배열)
+설명: 별점 분포 [1점, 2점, 3점, 4점, 5점] (Google Play에서만 제공)
+예시:
+  - [340, 170, 340, 298, 2685]
+  - [2495, 1869, 1869, 3120, 54329]
+  - NULL (App Store)
+  - NULL (App Store)
+
+--------------------------------------------------------------------------------
+[1.5] 다운로드 및 가격
+--------------------------------------------------------------------------------
+컬럼: installs (TEXT)
+설명: 설치 수 표시 문자열 (Google Play에서만 제공)
+예시:
+  - 1,000,000+
+  - 5,000,000+
+  - NULL (App Store)
+  - NULL (App Store)
+
+컬럼: installs_min (INTEGER)
+설명: 최소 설치 수 (Google Play에서만 제공)
+예시:
+  - 1000000
+  - 5000000
+  - NULL (App Store)
+  - NULL (App Store)
+
+컬럼: installs_exact (INTEGER)
+설명: 정확한 설치 수 (Google Play에서만 제공)
+예시:
+  - 2203197
+  - 7936316
+  - NULL (App Store)
+  - NULL (App Store)
+
+컬럼: price (REAL)
+설명: 가격 (숫자)
+예시:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+
+컬럼: price_formatted (TEXT)
+설명: 포맷된 가격 문자열
+예시:
+  - 0.0
+  - 0.0
+  - 免費
+  - 免費
+
+컬럼: currency (TEXT)
+설명: 통화 코드
+예시:
+  - USD
+  - USD
+  - TWD
+  - TWD
+
+컬럼: free (INTEGER)
+설명: 무료 여부 (1=무료, 0=유료)
+예시:
+  - 1
+  - 1
+  - 1
+  - 1
+
+--------------------------------------------------------------------------------
+[1.6] 카테고리 및 장르
+--------------------------------------------------------------------------------
+컬럼: category (TEXT)
+설명: 메인 카테고리명
+예시:
+  - Tools
+  - Education
+  - Games
+  - Health & Fitness
+
+컬럼: category_id (TEXT)
+설명: 카테고리 ID
+예시:
+  - TOOLS (Google Play)
+  - EDUCATION (Google Play)
+  - 6014 (App Store)
+  - 6013 (App Store)
+
+컬럼: genres (TEXT, JSON 배열)
+설명: 장르 목록
+예시:
+  - ["Tools"]
+  - ["Education"]
+  - ["遊戲", "動作", "休閒"]
+  - ["健康與健身", "生活風格"]
+
+컬럼: genre_ids (TEXT, JSON 배열)
+설명: 장르 ID 목록
+예시:
+  - ["TOOLS"]
+  - ["EDUCATION"]
+  - ["6014", "7001", "7003"]
+  - ["6013", "6012"]
+
+--------------------------------------------------------------------------------
+[1.7] 설명 텍스트
+--------------------------------------------------------------------------------
+컬럼: description (TEXT)
+설명: 앱 전체 설명
+예시:
+  - Keep track of all your important dates and never miss a special moment again! Our simple and easy-to-use calendar app helps you organize your day, plan events, and set reminders for birthdays, holidays...
+  - 50languages.com contains 100 lessons that provide you with a basic vocabulary. With no prior knowledge, you will learn to fluently speak short sentences in real-world situations in no time...
+  - 榮獲App Store 2016年度十佳遊戲！多次榮獲App Store官方全球首頁大圖推薦，遊戲類別大圖推薦！在26個國家App Store遊戲榜單排名第一...
+  - 已有 20+ 百萬使用者熱愛 StepsApp。StepsApp 將你的 iPhone 變成一個簡潔又美觀的計步器...
+
+컬럼: description_html (TEXT)
+설명: HTML 형식 설명 (Google Play에서만 제공)
+예시:
+  - Keep track of all your important dates...<br><br>Features:...
+  - 50languages.com contains 100 lessons...<br><br>The 50...
+  - NULL (App Store)
+  - NULL (App Store)
+
+컬럼: summary (TEXT)
+설명: 짧은 요약 설명 (Google Play에서만 제공)
+예시:
+  - keep track events, birthdays, holidays, and appointments with the calendar app.
+  - Learn 50 languages fast using your native language!
+  - NULL (App Store)
+  - NULL (App Store)
+
+컬럼: release_notes (TEXT)
+설명: 최신 버전 업데이트 노트 (App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - 聖誕鈴聲響起！ 歡迎來到我們為您精心準備的節日盛宴！在這個全新的限時聖誕活動中，我們推出了一張充滿節日歡樂的特別地圖...
+  - Liquid Glass support for iOS 26
+
+--------------------------------------------------------------------------------
+[1.8] 날짜 및 버전 정보
+--------------------------------------------------------------------------------
+컬럼: release_date (TEXT)
+설명: 최초 출시일 (ISO 8601 형식)
+예시:
+  - 2023-02-06
+  - 2011-08-30
+  - 2016-06-22T14:15:44Z
+  - 2015-10-10T07:45:24Z
+
+컬럼: updated_date (TEXT)
+설명: 마지막 업데이트일 (ISO 8601 형식)
+예시:
+  - 2025-12-17T11:17:34Z
+  - 2025-07-06T05:48:26Z
+  - 2025-12-18T09:27:40Z
+  - 2025-12-22T09:46:34Z
+
+컬럼: current_version_release_date (TEXT)
+설명: 현재 버전 출시일
+예시:
+  - 2025-12-17T11:17:34Z
+  - 2025-07-06T05:48:26Z
+  - 2025-12-18T09:27:40Z
+  - 2025-12-22T09:46:34Z
+
+컬럼: version (TEXT)
+설명: 현재 앱 버전
+예시:
+  - 1.0.34
+  - 16.3
+  - 4.18.0
+  - 8.6.3
+
+컬럼: minimum_os_version (TEXT)
+설명: 최소 OS 버전 요구사항 (App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - 15.0
+  - 15.0
+
+--------------------------------------------------------------------------------
+[1.9] 기술 정보
+--------------------------------------------------------------------------------
+컬럼: file_size (INTEGER)
+설명: 앱 파일 크기 (바이트 단위, App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - 805700608 (약 768MB)
+  - 300749824 (약 287MB)
+
+컬럼: file_size_formatted (TEXT)
+설명: 포맷된 파일 크기 문자열
+예시:
+  - NULL
+  - NULL
+  - NULL
+  - NULL
+
+컬럼: supported_devices (TEXT, JSON 배열)
+설명: 지원 기기 목록 (App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - ["iPhone5s-iPhone5s", "iPadAir-iPadAir", "iPadAirCellular-iPadAirCellular", "iPadMiniRetina-iPadMiniRetina", "iPhone6-iPhone6", "iPhone6Plus-iPhone6Plus", ...]
+  - ["iPhone5s-iPhone5s", "iPadAir-iPadAir", ...]
+
+컬럼: languages (TEXT, JSON 배열)
+설명: 지원 언어 코드 목록 (App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - ["AR", "EN", "FR", "DE", "IT", "JA", "KO", "PT", "RU", "ZH", "ES", "ZH"]
+  - ["AR", "CA", "CS", "DA", "NL", "EN", "FI", "FR", "DE", "HE", "HI", "HU", "ID", "IT", "JA", "KO", "MS", "NB", "PL", "PT", "RO", "RU", "ZH", "SK", "ES", "SV", "TH", "ZH", "TR", "UK", "VI"]
+
+컬럼: content_rating (TEXT)
+설명: 연령 등급
+예시:
+  - Everyone (Google Play)
+  - Everyone (Google Play)
+  - 9+ (App Store)
+  - 4+ (App Store)
+
+컬럼: content_rating_description (TEXT)
+설명: 연령 등급 상세 설명
+예시:
+  - NULL
+  - NULL
+  - 9+
+  - 4+
+
+컬럼: advisories (TEXT, JSON 배열)
+설명: 콘텐츠 주의사항 (App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - ["偶爾/輕微的競賽"]
+  - ["偶爾/輕微的競賽"]
+
+--------------------------------------------------------------------------------
+[1.10] 수익화 정보
+--------------------------------------------------------------------------------
+컬럼: has_iap (INTEGER)
+설명: 인앱결제 포함 여부 (1=있음, 0=없음)
+예시:
+  - 1
+  - 1
+  - 1
+  - 1
+
+컬럼: iap_price_range (TEXT)
+설명: 인앱결제 가격 범위 (Google Play에서만 제공)
+예시:
+  - $5.99 - $36.99 per item
+  - $2.99 - $9.99 per item
+  - NULL (App Store)
+  - NULL (App Store)
+
+컬럼: contains_ads (INTEGER)
+설명: 광고 포함 여부 (1=있음, 0=없음)
+예시:
+  - 1 (Google Play)
+  - 1 (Google Play)
+  - 0 (App Store)
+  - 0 (App Store)
+
+컬럼: ad_supported (INTEGER)
+설명: 광고 지원 여부
+예시:
+  - 1
+  - 1
+  - 0
+  - 0
+
+컬럼: game_center_enabled (INTEGER)
+설명: Game Center 지원 여부 (App Store 게임)
+예시:
+  - NULL
+  - NULL
+  - NULL
+  - NULL
+
+--------------------------------------------------------------------------------
+[1.11] URL 정보
+--------------------------------------------------------------------------------
+컬럼: url (TEXT)
+설명: 앱 스토어 상세 페이지 URL
+예시:
+  - https://play.google.com/store/apps/details?id=com.calendar.holidays.events&hl=en&gl=us
+  - https://play.google.com/store/apps/details?id=com.goethe.f50languages&hl=en&gl=us
+  - https://apps.apple.com/tw/app/%E7%98%8B%E7%8B%82%E5%8B%95%E7%89%A9%E5%9C%92-%E7%B6%93%E5%85%B8%E5%83%8F%E7%B4%A0%E8%B7%91%E9%85%B7/id1047961826?uo=4
+  - https://apps.apple.com/tw/app/stepsapp-%E8%A8%88%E6%AD%A5%E5%99%A8/id1037595083?uo=4
+
+컬럼: store_url (TEXT)
+설명: 스토어 URL (url과 동일)
+예시:
+  - https://play.google.com/store/apps/details?id=com.calendar.holidays.events&hl=en&gl=us
+  - https://play.google.com/store/apps/details?id=com.goethe.f50languages&hl=en&gl=us
+  - https://apps.apple.com/tw/app/.../id1047961826?uo=4
+  - https://apps.apple.com/tw/app/.../id1037595083?uo=4
+
+컬럼: privacy_policy_url (TEXT)
+설명: 개인정보처리방침 URL
+예시:
+  - https://sites.google.com/view/calendar-2024-pro/
+  - https://www.50lang.com/privacy.html
+  - NULL
+  - NULL
+
+--------------------------------------------------------------------------------
+[1.12] 차트 정보
+--------------------------------------------------------------------------------
+컬럼: chart_position (INTEGER)
+설명: 차트 순위
+예시:
+  - NULL
+  - NULL
+  - NULL
+  - NULL
+
+컬럼: chart_type (TEXT)
+설명: 차트 유형 (예: top_free, top_paid)
+예시:
+  - NULL
+  - NULL
+  - NULL
+  - NULL
+
+--------------------------------------------------------------------------------
+[1.13] 기능 및 권한
+--------------------------------------------------------------------------------
+컬럼: features (TEXT, JSON 배열)
+설명: 앱 기능 목록 (App Store에서만 제공)
+예시:
+  - NULL (Google Play)
+  - NULL (Google Play)
+  - ["gameCenter", "iosUniversal"]
+  - NULL
+
+컬럼: permissions (TEXT, JSON 배열)
+설명: 앱 권한 목록
+예시:
+  - NULL
+  - NULL
+  - NULL
+  - NULL
+
+--------------------------------------------------------------------------------
+[1.14] 점수 및 추천
+--------------------------------------------------------------------------------
+컬럼: score (REAL)
+설명: 시스템 계산 점수 (0-100점)
+      계산 공식: 평점(30%) + 리뷰수(20%) + 설치수(20%) + 신선도(20%) + 성장률(10%)
+예시:
+  - 91.34
+  - 85.90
+  - 77.82
+  - 77.52
+
+컬럼: is_featured (INTEGER)
+설명: 주목 앱 여부 (1=주목앱)
+      조건: 평점 >= 4.0 AND 평가수 >= 10 AND 점수 >= 60
+예시:
+  - 1
+  - 1
+  - 1
+  - 1
+
+--------------------------------------------------------------------------------
+[1.15] 타임스탬프
+--------------------------------------------------------------------------------
+컬럼: created_at (TIMESTAMP)
+설명: 레코드 생성 시간
+예시:
+  - 2025-12-29 07:47:14
+  - 2025-12-29 07:47:14
+  - 2025-12-29 07:47:27
+  - 2025-12-29 07:47:26
+
+컬럼: updated_at (TIMESTAMP)
+설명: 레코드 수정 시간 (트리거로 자동 갱신)
+예시:
+  - 2025-12-29 07:47:27
+  - 2025-12-29 07:47:27
+  - 2025-12-29 07:47:27
+  - 2025-12-29 07:47:27
+
+
+================================================================================
+2. sitemap_tracking.db - 추적 데이터베이스 (4개 테이블)
+================================================================================
+
+--------------------------------------------------------------------------------
+[2.1] app_discovery 테이블
+--------------------------------------------------------------------------------
+설명: 앱 최초 발견 및 추적 정보
+
+컬럼: id (INTEGER, PRIMARY KEY)
+설명: 자동 증가 ID
+
+컬럼: app_id (TEXT, NOT NULL)
+설명: 앱 ID
+
+컬럼: platform (TEXT, NOT NULL)
+설명: 플랫폼 (google_play 또는 app_store)
+
+컬럼: first_seen_at (TIMESTAMP, NOT NULL)
+설명: 최초 발견 시간
+
+컬럼: last_seen_at (TIMESTAMP, NOT NULL)
+설명: 마지막 확인 시간
+
+컬럼: sitemap_source (TEXT)
+설명: 발견된 sitemap 파일명 (예: sitemap1.xml.gz)
+
+컬럼: country_code (TEXT)
+설명: 국가 코드
+
+컬럼: lastmod (TEXT)
+설명: sitemap에서 제공하는 마지막 수정 시간
+
+컬럼: changefreq (TEXT)
+설명: 변경 빈도 (daily, weekly, monthly 등)
+
+컬럼: priority (REAL)
+설명: 우선순위 (0.0 ~ 1.0)
+
+컬럼: app_url (TEXT)
+설명: 앱 스토어 URL
+
+제약조건: UNIQUE(app_id, platform)
+
+--------------------------------------------------------------------------------
+[2.2] sitemap_snapshots 테이블
+--------------------------------------------------------------------------------
+설명: Sitemap 수집 기록
+
+컬럼: id (INTEGER, PRIMARY KEY)
+설명: 자동 증가 ID
+
+컬럼: platform (TEXT, NOT NULL)
+설명: 플랫폼
+
+컬럼: snapshot_date (DATE, NOT NULL)
+설명: 스냅샷 날짜
+
+컬럼: sitemap_url (TEXT)
+설명: Sitemap URL
+
+컬럼: total_apps (INTEGER, DEFAULT 0)
+설명: 해당 sitemap의 전체 앱 수
+
+컬럼: new_apps (INTEGER, DEFAULT 0)
+설명: 신규 발견 앱 수
+
+컬럼: created_at (TIMESTAMP)
+설명: 생성 시간
+
+제약조건: UNIQUE(platform, snapshot_date, sitemap_url)
+
+--------------------------------------------------------------------------------
+[2.3] app_history 테이블
+--------------------------------------------------------------------------------
+설명: 앱 일별 히스토리 추적
+
+컬럼: id (INTEGER, PRIMARY KEY)
+설명: 자동 증가 ID
+
+컬럼: app_id (TEXT, NOT NULL)
+설명: 앱 ID
+
+컬럼: platform (TEXT, NOT NULL)
+설명: 플랫폼
+
+컬럼: recorded_at (DATE, NOT NULL)
+설명: 기록 날짜
+
+컬럼: in_sitemap (INTEGER, DEFAULT 1)
+설명: sitemap 존재 여부
+
+컬럼: chart_position (INTEGER)
+설명: 차트 순위
+
+컬럼: chart_type (TEXT)
+설명: 차트 유형
+
+컬럼: country_code (TEXT)
+설명: 국가 코드
+
+제약조건: UNIQUE(app_id, platform, recorded_at, country_code)
+
+--------------------------------------------------------------------------------
+[2.4] failed_app_details 테이블
+--------------------------------------------------------------------------------
+설명: 수집 실패 앱 추적 (재시도 관리)
+
+컬럼: id (INTEGER, PRIMARY KEY)
+설명: 자동 증가 ID
+
+컬럼: app_id (TEXT, NOT NULL)
+설명: 실패한 앱 ID
+
+컬럼: platform (TEXT, NOT NULL)
+설명: 플랫폼
+
+컬럼: country_code (TEXT)
+설명: 국가 코드
+
+컬럼: reason (TEXT)
+설명: 실패 사유 (예: not_found_404, timeout, rate_limit)
+
+컬럼: failed_at (TIMESTAMP)
+설명: 실패 시간
+
+컬럼: retry_count (INTEGER, DEFAULT 1)
+설명: 재시도 횟수
+
+제약조건: UNIQUE(app_id, platform, country_code)
+
+
+================================================================================
+3. 플랫폼별 데이터 가용성 비교
+================================================================================
+
+필드                          | Google Play | App Store
+------------------------------|-------------|----------
+installs (설치 수)            | O           | X
+installs_exact (정확한 수)    | O           | X
+histogram (별점 분포)         | O           | X
+developer_email               | O           | X
+summary (짧은 설명)           | O           | X
+description_html              | O           | X
+header_image                  | O           | X
+iap_price_range               | O           | X
+contains_ads                  | O (정확)    | X (항상 0)
+file_size                     | X           | O
+minimum_os_version            | X           | O
+supported_devices             | X           | O
+languages                     | X           | O
+release_notes                 | X           | O
+rating_current_version        | X           | O
+rating_count_current_version  | X           | O
+advisories                    | X           | O
+features                      | X           | O
+
+
+================================================================================
+4. 인덱스 정보
+================================================================================
+
+apps 테이블 인덱스:
+- idx_apps_platform: platform
+- idx_apps_country: country_code
+- idx_apps_score: score
+- idx_apps_featured: is_featured
+- idx_apps_created: created_at
+- idx_apps_updated: updated_date
+- idx_apps_release: release_date
+- idx_apps_rating: rating
+- idx_apps_category: category
+- idx_apps_developer: developer
+- idx_apps_chart: chart_type, chart_position
+
+고유 제약조건:
+- UNIQUE(app_id, platform, country_code)
+
+
+================================================================================
+5. 데이터 정규화 규칙
+================================================================================
+
+날짜 정규화:
+- 모든 날짜는 ISO 8601 형식으로 저장 (YYYY-MM-DD 또는 YYYY-MM-DDTHH:MM:SSZ)
+
+가격 정규화:
+- 숫자는 REAL 타입으로, 표시 문자열은 TEXT로 별도 저장
+
+평점 정규화:
+- 1.0 ~ 5.0 범위로 정규화
+- NULL이 아닌 경우에만 저장
+
+설치 수 정규화:
+- 텍스트 형식 (예: "1,000,000+")과 숫자 형식 모두 저장
+
+국가 코드 정규화:
+- 2자리 소문자 ISO 국가 코드 (예: us, kr, jp, tw)
+
+
+================================================================================
+끝
+================================================================================
