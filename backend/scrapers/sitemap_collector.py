@@ -349,6 +349,9 @@ class AppStoreSitemapCollector:
                     if match:
                         app_id = match.group(1)
                         meta = {'url': url_text}
+                        # 국가 코드 저장 (후속 상세 수집에서 활용)
+                        if country_code:
+                            meta['country_code'] = country_code
 
                         # 국가 코드 추출
                         if country_code is None:
@@ -378,7 +381,10 @@ class AppStoreSitemapCollector:
                 # XML 파싱 실패 시 정규식으로 fallback
                 matches = self.APP_ID_PATTERN.findall(content)
                 for app_id in matches:
-                    app_metadata[app_id] = {}
+                    meta: Dict[str, Dict] = {}
+                    if country_code:
+                        meta['country_code'] = country_code
+                    app_metadata[app_id] = meta
 
                 # 국가 코드 추출 (fallback)
                 country_match = re.search(r'apple\.com/([a-z]{2})/', content)

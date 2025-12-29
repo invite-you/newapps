@@ -600,6 +600,7 @@ def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> Tuple
 
     placeholders = ', '.join(['?' for _ in columns])
     columns_str = ', '.join(columns)
+    update_columns = ', '.join([f"{col}=excluded.{col}" for col in columns])
 
     # 배치 크기 설정 (50개마다 커밋하여 lock 시간 단축)
     batch_size = 50
@@ -632,8 +633,11 @@ def save_apps_to_db(apps_data: List[Dict], merge_existing: bool = True) -> Tuple
 
                 values = tuple(app_data.get(col) for col in columns)
                 cursor.execute(f"""
-                    INSERT OR REPLACE INTO apps ({columns_str}, updated_at)
+                    INSERT INTO apps ({columns_str}, updated_at)
                     VALUES ({placeholders}, CURRENT_TIMESTAMP)
+                    ON CONFLICT(app_id, platform, country_code) DO UPDATE SET
+                        {update_columns},
+                        updated_at = CURRENT_TIMESTAMP
                 """, values)
                 saved_count += 1
                 batch_count += 1
