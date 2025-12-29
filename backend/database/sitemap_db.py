@@ -26,6 +26,16 @@ PERMANENT_FAILURE_REASONS = frozenset(["not_found_404", "app_removed"])
 SITEMAP_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "database", "sitemap_tracking.db")
 
 
+def _normalize_country(code: Optional[str]) -> Optional[str]:
+    """2자리 국가 코드를 소문자로 정규화"""
+    if not code:
+        return None
+    trimmed = str(code).strip().lower()
+    if len(trimmed) != 2 or not trimmed.isalpha():
+        return None
+    return trimmed
+
+
 def _dict_factory(cursor, row):
     """sqlite3 결과를 딕셔너리로 변환하는 팩토리"""
     return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
@@ -218,13 +228,17 @@ def save_discovered_apps(
     batch_size = 500
 
     try:
-        # 기존 앱 ID들 조회 (한 번에)
-        placeholders = ','.join(['?' for _ in app_ids])
-        cursor.execute(f"""
-            SELECT app_id FROM app_discovery
-            WHERE platform = ? AND app_id IN ({placeholders})
-        """, (platform, *app_ids))
-        existing_ids = {row['app_id'] for row in cursor.fetchall()}
+        # 기존 앱 ID들 조회 (쿼리 변수 한도 초과 방지 위해 청크 단위 조회)
+        existing_ids: Set[str] = set()
+        lookup_chunk = 400  # platform 바인딩까지 포함해 999 제한을 피하기 위한 안전선
+        for start in range(0, len(app_ids), lookup_chunk):
+            chunk = app_ids[start:start + lookup_chunk]
+            placeholders = ','.join(['?' for _ in chunk])
+            cursor.execute(f"""
+                SELECT app_id FROM app_discovery
+                WHERE platform = ? AND app_id IN ({placeholders})
+            """, (platform, *chunk))
+            existing_ids.update({row['app_id'] for row in cursor.fetchall()})
 
         # 신규 앱과 기존 앱 분류 (메타데이터 포함)
         new_apps = []
@@ -232,6 +246,8 @@ def save_discovered_apps(
 
         for app_id in app_ids:
             meta = app_metadata.get(app_id, {})
+            meta_country = _normalize_country(meta.get('country_code'))
+            effective_country = meta_country or _normalize_country(country_code)
             lastmod = meta.get('lastmod')
             changefreq = meta.get('changefreq')
             priority = meta.get('priority')
@@ -239,13 +255,13 @@ def save_discovered_apps(
 
             if app_id not in existing_ids:
                 new_apps.append((
-                    app_id, platform, now, now, sitemap_source, country_code,
+                    app_id, platform, now, now, sitemap_source, effective_country,
                     lastmod, changefreq, priority, app_url
                 ))
             else:
                 update_apps.append((
                     now, sitemap_source, lastmod, changefreq, priority, app_url,
-                    app_id, platform
+                    effective_country, app_id, platform
                 ))
 
         # 배치 INSERT (신규 앱)
@@ -268,7 +284,8 @@ def save_discovered_apps(
                     lastmod = COALESCE(?, lastmod),
                     changefreq = COALESCE(?, changefreq),
                     priority = COALESCE(?, priority),
-                    app_url = COALESCE(?, app_url)
+                    app_url = COALESCE(?, app_url),
+                    country_code = COALESCE(?, country_code)
                 WHERE app_id = ? AND platform = ?
             """, batch)
             updated_count += cursor.rowcount
