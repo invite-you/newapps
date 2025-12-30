@@ -128,6 +128,52 @@ def init_database(force_reset: bool = False):
             summary TEXT,
             release_notes TEXT,
 
+            -- 다국어 필드 (ko, en, es, ja, zh)
+            -- title
+            title_ko TEXT,
+            title_en TEXT,
+            title_es TEXT,
+            title_ja TEXT,
+            title_zh TEXT,
+            -- summary
+            summary_ko TEXT,
+            summary_en TEXT,
+            summary_es TEXT,
+            summary_ja TEXT,
+            summary_zh TEXT,
+            -- description
+            description_ko TEXT,
+            description_en TEXT,
+            description_es TEXT,
+            description_ja TEXT,
+            description_zh TEXT,
+            -- description_html
+            description_html_ko TEXT,
+            description_html_en TEXT,
+            description_html_es TEXT,
+            description_html_ja TEXT,
+            description_html_zh TEXT,
+            -- release_notes
+            release_notes_ko TEXT,
+            release_notes_en TEXT,
+            release_notes_es TEXT,
+            release_notes_ja TEXT,
+            release_notes_zh TEXT,
+            -- category
+            category_ko TEXT,
+            category_en TEXT,
+            category_es TEXT,
+            category_ja TEXT,
+            category_zh TEXT,
+            -- content_rating
+            content_rating_ko TEXT,
+            content_rating_en TEXT,
+            content_rating_es TEXT,
+            content_rating_ja TEXT,
+            content_rating_zh TEXT,
+            -- 개발자가 직접 현지화한 언어 목록 (title 기준)
+            available_languages TEXT,  -- JSON: ["ko", "en", "ja"]
+
             -- 날짜 정보
             release_date TEXT,
             updated_date TEXT,
@@ -218,6 +264,15 @@ def get_app_columns():
         'currency', 'free',
         'category', 'category_id', 'genres', 'genre_ids',
         'description', 'description_html', 'summary', 'release_notes',
+        # 다국어 필드 (ko, en, es, ja, zh)
+        'title_ko', 'title_en', 'title_es', 'title_ja', 'title_zh',
+        'summary_ko', 'summary_en', 'summary_es', 'summary_ja', 'summary_zh',
+        'description_ko', 'description_en', 'description_es', 'description_ja', 'description_zh',
+        'description_html_ko', 'description_html_en', 'description_html_es', 'description_html_ja', 'description_html_zh',
+        'release_notes_ko', 'release_notes_en', 'release_notes_es', 'release_notes_ja', 'release_notes_zh',
+        'category_ko', 'category_en', 'category_es', 'category_ja', 'category_zh',
+        'content_rating_ko', 'content_rating_en', 'content_rating_es', 'content_rating_ja', 'content_rating_zh',
+        'available_languages',
         'release_date', 'updated_date', 'current_version_release_date',
         'version', 'minimum_os_version', 'file_size', 'file_size_formatted',
         'supported_devices', 'languages',
@@ -228,6 +283,21 @@ def get_app_columns():
         'features', 'permissions',
         'score', 'is_featured',
     ]
+
+
+# 다국어 지원 상수
+SUPPORTED_LANGUAGES = ['ko', 'en', 'es', 'ja', 'zh']
+MULTILANG_FIELDS = ['title', 'summary', 'description', 'description_html', 'release_notes', 'category', 'content_rating']
+
+
+def get_multilang_columns():
+    """다국어 컬럼 목록 반환"""
+    columns = []
+    for field in MULTILANG_FIELDS:
+        for lang in SUPPORTED_LANGUAGES:
+            columns.append(f"{field}_{lang}")
+    columns.append('available_languages')
+    return columns
 
 
 if __name__ == "__main__":
