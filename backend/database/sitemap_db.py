@@ -756,18 +756,31 @@ def get_sitemap_retry_stats(platform: str) -> Dict:
 # ============ 앱 메트릭 히스토리 관리 함수들 (시계열 분석) ============
 
 # 메트릭 변화 감지 임계값 (Delta Storage용)
+# - 값이 0이면 모든 변화 감지 (권장)
+# - 값이 양수면 해당 임계값 이상 변화 시에만 저장
+#
+# 사용 예시:
+#   'rating': 0       → 평점(0-5)이 조금이라도 변하면 저장
+#   'rating': 0.1     → 평점이 0.1 이상 변할 때만 저장 (예: 4.5→4.6)
+#   'rating_count': 0 → 평점 수가 1개라도 변하면 저장
+#   'rating_count': 0.05 → 평점 수가 5% 이상 변할 때만 저장
+#
+# 단위 설명:
+#   rating, score, price: 절대값 비교 (예: 0.1 = 0.1점 차이)
+#   rating_count, reviews_count, installs_*: 비율 비교 (예: 0.01 = 1% 차이)
+#   chart_position: 절대값 비교 (예: 1 = 순위 1단계 차이)
 METRICS_CHANGE_THRESHOLDS = {
-    'rating': 0.05,           # 평점 0.05 이상 변화
-    'rating_count': 0.01,     # 평점 수 1% 이상 변화
-    'reviews_count': 0.01,    # 리뷰 수 1% 이상 변화
-    'installs_min': 0.01,     # 설치 수 1% 이상 변화
-    'installs_exact': 0.01,   # 정확한 설치 수 1% 이상 변화
-    'chart_position': 1,      # 순위 1 이상 변화 (절대값)
-    'score': 0.5,             # 점수 0.5 이상 변화
-    'price': 0.01,            # 가격 변화 (거의 모든 변화 감지)
+    'rating': 0,              # 평점 (0-5), 절대값 비교
+    'rating_count': 0,        # 평점 수, 비율 비교 (0.01 = 1%)
+    'reviews_count': 0,       # 리뷰 수, 비율 비교
+    'installs_min': 0,        # 최소 설치 수, 비율 비교
+    'installs_exact': 0,      # 정확한 설치 수, 비율 비교
+    'chart_position': 0,      # 차트 순위, 절대값 비교
+    'score': 0,               # 계산된 점수 (0-100), 절대값 비교
+    'price': 0,               # 가격, 절대값 비교
 }
 
-# 데이터 보관 기간 (일)
+# 데이터 보관 기간 (일) - cleanup_old_metrics() 호출 시 사용
 METRICS_RETENTION_DAYS = 90
 
 
