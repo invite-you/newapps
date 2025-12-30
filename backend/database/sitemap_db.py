@@ -133,6 +133,55 @@ def init_sitemap_database():
         )
     """)
 
+    # 앱 메트릭 히스토리 테이블 (시계열 분석용)
+    # 매일 앱의 주요 지표를 저장하여 시간에 따른 변화 추적
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_metrics_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            country_code TEXT NOT NULL,
+            recorded_date DATE NOT NULL,
+
+            -- 평점 관련 지표
+            rating REAL,                      -- 평점 (0-5)
+            rating_count INTEGER,             -- 총 평점 수
+            rating_count_current_version INTEGER,  -- 현재 버전 평점 수
+
+            -- 리뷰 관련 지표
+            reviews_count INTEGER,            -- 리뷰 수
+            histogram TEXT,                   -- 별점별 분포 (JSON)
+
+            -- 설치 수 (Google Play)
+            installs_min INTEGER,             -- 최소 설치 수
+            installs_exact INTEGER,           -- 정확한 설치 수 (가능한 경우)
+
+            -- 차트 순위
+            chart_position INTEGER,           -- 차트 순위
+            chart_type TEXT,                  -- 차트 종류 (top-free, top-paid 등)
+
+            -- 점수 및 상태
+            score REAL,                       -- 계산된 종합 점수
+            is_featured INTEGER,              -- 주목 앱 여부
+
+            -- 가격 정보
+            price REAL,                       -- 현재 가격
+            currency TEXT,                    -- 통화
+
+            -- 앱 내 구매/광고
+            has_iap INTEGER,                  -- 앱 내 구매 여부
+            contains_ads INTEGER,             -- 광고 포함 여부
+
+            -- 버전 정보 (업데이트 추적)
+            version TEXT,                     -- 현재 버전
+
+            -- 타임스탬프
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+            UNIQUE(app_id, platform, country_code, recorded_date)
+        )
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS failed_app_details (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,6 +204,12 @@ def init_sitemap_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshot_date ON sitemap_snapshots(snapshot_date DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_app ON failed_app_details(app_id, platform)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_at ON failed_app_details(failed_at DESC)")
+
+    # 앱 메트릭 히스토리 인덱스 (시계열 조회 최적화)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_app ON app_metrics_history(app_id, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_date ON app_metrics_history(recorded_date DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_country ON app_metrics_history(country_code)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_app_date ON app_metrics_history(app_id, platform, country_code, recorded_date DESC)")
 
     # 실패한 sitemap URL 기록 테이블
     cursor.execute("""
@@ -693,6 +748,463 @@ def get_sitemap_retry_stats(platform: str) -> Dict:
     """, (platform, FAILED_RETRY_WARNING_THRESHOLD * 2, f'-{FAILED_RETRY_COOLDOWN_MINUTES} minutes'))
     row = cursor.fetchone()
     stats['retryable'] = row['retryable'] if row else 0
+
+    conn.close()
+    return stats
+
+
+# ============ 앱 메트릭 히스토리 관리 함수들 (시계열 분석) ============
+
+
+def save_app_metrics(app_data: Dict, recorded_date: str = None) -> bool:
+    """
+    앱의 메트릭을 히스토리에 저장 (시계열 분석용)
+
+    Args:
+        app_data: 앱 정보 딕셔너리 (apps 테이블 레코드)
+        recorded_date: 기록 날짜 (기본값: 오늘)
+
+    Returns:
+        저장 성공 여부
+    """
+    if not app_data:
+        return False
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if not recorded_date:
+        recorded_date = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        cursor.execute("""
+            INSERT OR REPLACE INTO app_metrics_history (
+                app_id, platform, country_code, recorded_date,
+                rating, rating_count, rating_count_current_version,
+                reviews_count, histogram,
+                installs_min, installs_exact,
+                chart_position, chart_type,
+                score, is_featured,
+                price, currency,
+                has_iap, contains_ads,
+                version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            app_data.get('app_id'),
+            app_data.get('platform'),
+            app_data.get('country_code'),
+            recorded_date,
+            app_data.get('rating'),
+            app_data.get('rating_count'),
+            app_data.get('rating_count_current_version'),
+            app_data.get('reviews_count'),
+            app_data.get('histogram'),
+            app_data.get('installs_min'),
+            app_data.get('installs_exact'),
+            app_data.get('chart_position'),
+            app_data.get('chart_type'),
+            app_data.get('score'),
+            app_data.get('is_featured'),
+            app_data.get('price'),
+            app_data.get('currency'),
+            app_data.get('has_iap'),
+            app_data.get('contains_ads'),
+            app_data.get('version'),
+        ))
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        log_step("메트릭 저장", f"[오류] {app_data.get('app_id')}: {e}", "메트릭 저장")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def save_app_metrics_batch(apps_data: List[Dict], recorded_date: str = None) -> Tuple[int, int]:
+    """
+    여러 앱의 메트릭을 배치로 저장
+
+    Args:
+        apps_data: 앱 정보 딕셔너리 리스트
+        recorded_date: 기록 날짜 (기본값: 오늘)
+
+    Returns:
+        (성공 수, 실패 수)
+    """
+    if not apps_data:
+        return 0, 0
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if not recorded_date:
+        recorded_date = datetime.now().strftime("%Y-%m-%d")
+
+    success_count = 0
+    fail_count = 0
+    batch_size = 500
+
+    try:
+        batch = []
+        for app in apps_data:
+            batch.append((
+                app.get('app_id'),
+                app.get('platform'),
+                app.get('country_code'),
+                recorded_date,
+                app.get('rating'),
+                app.get('rating_count'),
+                app.get('rating_count_current_version'),
+                app.get('reviews_count'),
+                app.get('histogram'),
+                app.get('installs_min'),
+                app.get('installs_exact'),
+                app.get('chart_position'),
+                app.get('chart_type'),
+                app.get('score'),
+                app.get('is_featured'),
+                app.get('price'),
+                app.get('currency'),
+                app.get('has_iap'),
+                app.get('contains_ads'),
+                app.get('version'),
+            ))
+
+            if len(batch) >= batch_size:
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO app_metrics_history (
+                        app_id, platform, country_code, recorded_date,
+                        rating, rating_count, rating_count_current_version,
+                        reviews_count, histogram,
+                        installs_min, installs_exact,
+                        chart_position, chart_type,
+                        score, is_featured,
+                        price, currency,
+                        has_iap, contains_ads,
+                        version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, batch)
+                success_count += len(batch)
+                batch = []
+
+        # 남은 배치 처리
+        if batch:
+            cursor.executemany("""
+                INSERT OR REPLACE INTO app_metrics_history (
+                    app_id, platform, country_code, recorded_date,
+                    rating, rating_count, rating_count_current_version,
+                    reviews_count, histogram,
+                    installs_min, installs_exact,
+                    chart_position, chart_type,
+                    score, is_featured,
+                    price, currency,
+                    has_iap, contains_ads,
+                    version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, batch)
+            success_count += len(batch)
+
+        conn.commit()
+        log_step("메트릭 저장", f"배치 저장 완료: {success_count}개 앱", "메트릭 저장")
+
+    except sqlite3.Error as e:
+        log_step("메트릭 저장", f"[오류] 배치 저장 실패: {e}", "메트릭 저장")
+        fail_count = len(apps_data) - success_count
+        conn.rollback()
+    finally:
+        conn.close()
+
+    return success_count, fail_count
+
+
+def get_app_metrics_timeseries(
+    app_id: str,
+    platform: str,
+    country_code: str = None,
+    days: int = 30,
+    metrics: List[str] = None
+) -> List[Dict]:
+    """
+    앱의 시계열 메트릭 데이터 조회
+
+    Args:
+        app_id: 앱 ID
+        platform: 플랫폼
+        country_code: 국가 코드 (None이면 모든 국가)
+        days: 조회 기간 (일)
+        metrics: 조회할 메트릭 목록 (None이면 전체)
+
+    Returns:
+        시계열 데이터 리스트
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 기본 메트릭 목록
+    all_metrics = [
+        'rating', 'rating_count', 'reviews_count',
+        'installs_min', 'installs_exact',
+        'chart_position', 'score', 'price', 'version'
+    ]
+    selected_metrics = metrics if metrics else all_metrics
+
+    # 유효한 메트릭만 선택
+    valid_metrics = [m for m in selected_metrics if m in all_metrics]
+    if not valid_metrics:
+        valid_metrics = all_metrics
+
+    columns = ', '.join(['recorded_date', 'country_code'] + valid_metrics)
+
+    if country_code:
+        cursor.execute(f"""
+            SELECT {columns}
+            FROM app_metrics_history
+            WHERE app_id = ? AND platform = ? AND country_code = ?
+              AND recorded_date >= date('now', ?)
+            ORDER BY recorded_date ASC
+        """, (app_id, platform, country_code, f'-{days} days'))
+    else:
+        cursor.execute(f"""
+            SELECT {columns}
+            FROM app_metrics_history
+            WHERE app_id = ? AND platform = ?
+              AND recorded_date >= date('now', ?)
+            ORDER BY recorded_date ASC, country_code
+        """, (app_id, platform, f'-{days} days'))
+
+    results = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    return results
+
+
+def get_metrics_changes(
+    app_id: str,
+    platform: str,
+    country_code: str,
+    compare_days: int = 7
+) -> Dict:
+    """
+    특정 기간 동안의 메트릭 변화량 계산
+
+    Args:
+        app_id: 앱 ID
+        platform: 플랫폼
+        country_code: 국가 코드
+        compare_days: 비교 기간 (일)
+
+    Returns:
+        메트릭별 변화량 딕셔너리
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 현재 데이터 (가장 최근)
+    cursor.execute("""
+        SELECT rating, rating_count, reviews_count, installs_min, installs_exact,
+               chart_position, score, price
+        FROM app_metrics_history
+        WHERE app_id = ? AND platform = ? AND country_code = ?
+        ORDER BY recorded_date DESC
+        LIMIT 1
+    """, (app_id, platform, country_code))
+    current = cursor.fetchone()
+
+    # 과거 데이터 (compare_days일 전 근처)
+    cursor.execute("""
+        SELECT rating, rating_count, reviews_count, installs_min, installs_exact,
+               chart_position, score, price
+        FROM app_metrics_history
+        WHERE app_id = ? AND platform = ? AND country_code = ?
+          AND recorded_date <= date('now', ?)
+        ORDER BY recorded_date DESC
+        LIMIT 1
+    """, (app_id, platform, country_code, f'-{compare_days} days'))
+    past = cursor.fetchone()
+
+    conn.close()
+
+    if not current or not past:
+        return {}
+
+    # 변화량 계산
+    changes = {}
+    numeric_fields = ['rating', 'rating_count', 'reviews_count', 'installs_min',
+                      'installs_exact', 'chart_position', 'score', 'price']
+
+    for field in numeric_fields:
+        curr_val = current.get(field)
+        past_val = past.get(field)
+
+        if curr_val is not None and past_val is not None:
+            diff = curr_val - past_val
+            pct_change = ((curr_val - past_val) / past_val * 100) if past_val != 0 else None
+            changes[field] = {
+                'current': curr_val,
+                'past': past_val,
+                'diff': diff,
+                'pct_change': round(pct_change, 2) if pct_change is not None else None
+            }
+
+    return changes
+
+
+def get_top_growing_apps(
+    platform: str = None,
+    country_code: str = None,
+    metric: str = 'rating_count',
+    days: int = 7,
+    limit: int = 50
+) -> List[Dict]:
+    """
+    특정 메트릭 기준으로 가장 많이 성장한 앱 조회
+
+    Args:
+        platform: 플랫폼 (None이면 전체)
+        country_code: 국가 코드 (None이면 전체)
+        metric: 비교 메트릭 (rating_count, reviews_count, installs_min 등)
+        days: 비교 기간 (일)
+        limit: 최대 결과 수
+
+    Returns:
+        성장률 순으로 정렬된 앱 리스트
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 유효한 메트릭 확인
+    valid_metrics = ['rating', 'rating_count', 'reviews_count', 'installs_min',
+                     'installs_exact', 'score']
+    if metric not in valid_metrics:
+        metric = 'rating_count'
+
+    # 동적 쿼리 구성
+    where_clauses = ["recorded_date >= date('now', ?)"]
+    params = [f'-{days} days']
+
+    if platform:
+        where_clauses.append("platform = ?")
+        params.append(platform)
+
+    if country_code:
+        where_clauses.append("country_code = ?")
+        params.append(country_code)
+
+    where_sql = " AND ".join(where_clauses)
+
+    cursor.execute(f"""
+        WITH date_range AS (
+            SELECT
+                app_id, platform, country_code,
+                MIN(recorded_date) as first_date,
+                MAX(recorded_date) as last_date
+            FROM app_metrics_history
+            WHERE {where_sql}
+            GROUP BY app_id, platform, country_code
+            HAVING first_date != last_date
+        ),
+        first_metrics AS (
+            SELECT m.app_id, m.platform, m.country_code, m.{metric} as first_value
+            FROM app_metrics_history m
+            JOIN date_range d ON m.app_id = d.app_id
+                AND m.platform = d.platform
+                AND m.country_code = d.country_code
+                AND m.recorded_date = d.first_date
+        ),
+        last_metrics AS (
+            SELECT m.app_id, m.platform, m.country_code, m.{metric} as last_value
+            FROM app_metrics_history m
+            JOIN date_range d ON m.app_id = d.app_id
+                AND m.platform = d.platform
+                AND m.country_code = d.country_code
+                AND m.recorded_date = d.last_date
+        )
+        SELECT
+            f.app_id, f.platform, f.country_code,
+            f.first_value,
+            l.last_value,
+            (l.last_value - f.first_value) as diff,
+            CASE WHEN f.first_value > 0
+                THEN ROUND((l.last_value - f.first_value) * 100.0 / f.first_value, 2)
+                ELSE NULL
+            END as growth_pct
+        FROM first_metrics f
+        JOIN last_metrics l ON f.app_id = l.app_id
+            AND f.platform = l.platform
+            AND f.country_code = l.country_code
+        WHERE l.last_value > f.first_value
+        ORDER BY diff DESC
+        LIMIT ?
+    """, params + [limit])
+
+    results = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    return results
+
+
+def get_metrics_stats(
+    platform: str = None,
+    country_code: str = None,
+    days: int = 30
+) -> Dict:
+    """
+    전체 메트릭 통계 조회
+
+    Args:
+        platform: 플랫폼 (None이면 전체)
+        country_code: 국가 코드 (None이면 전체)
+        days: 조회 기간 (일)
+
+    Returns:
+        통계 정보 딕셔너리
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 동적 WHERE 절 구성
+    where_clauses = ["recorded_date >= date('now', ?)"]
+    params = [f'-{days} days']
+
+    if platform:
+        where_clauses.append("platform = ?")
+        params.append(platform)
+
+    if country_code:
+        where_clauses.append("country_code = ?")
+        params.append(country_code)
+
+    where_sql = " AND ".join(where_clauses)
+
+    # 기본 통계
+    cursor.execute(f"""
+        SELECT
+            COUNT(DISTINCT app_id || platform || country_code) as unique_apps,
+            COUNT(*) as total_records,
+            COUNT(DISTINCT recorded_date) as days_recorded,
+            MIN(recorded_date) as first_date,
+            MAX(recorded_date) as last_date
+        FROM app_metrics_history
+        WHERE {where_sql}
+    """, params)
+
+    row = cursor.fetchone()
+    stats = dict(row) if row else {}
+
+    # 플랫폼별 통계
+    cursor.execute(f"""
+        SELECT
+            platform,
+            COUNT(DISTINCT app_id) as app_count,
+            AVG(rating) as avg_rating,
+            AVG(rating_count) as avg_rating_count
+        FROM app_metrics_history
+        WHERE {where_sql}
+        GROUP BY platform
+    """, params)
+
+    stats['by_platform'] = {row['platform']: dict(row) for row in cursor.fetchall()}
 
     conn.close()
     return stats

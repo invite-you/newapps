@@ -16,6 +16,7 @@ except ImportError:
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import SCORE_WEIGHTS, MINIMUM_RATING, MINIMUM_RATING_COUNT, MINIMUM_SCORE, timing_tracker
 from database.db import get_connection, log_step
+from database.sitemap_db import save_app_metrics_batch
 
 
 def calculate_app_score(app):
@@ -172,7 +173,16 @@ def analyze_and_update_scores():
             log_step(task_name, f"  진행: {i + 1:,}/{len(apps):,}개 처리됨 ({(i+1)*100//len(apps)}%)", task_name)
 
     conn.commit()
+
+    # 점수가 업데이트된 앱 데이터를 다시 조회하여 메트릭 히스토리에 저장
+    log_step(task_name, "[3단계] 시계열 분석용 메트릭 저장 중...", task_name)
+    cursor.execute("SELECT * FROM apps")
+    updated_apps = [dict(row) for row in cursor.fetchall()]
     conn.close()
+
+    if updated_apps:
+        metrics_saved, metrics_failed = save_app_metrics_batch(updated_apps)
+        log_step(task_name, f"[3단계 완료] 메트릭 저장: {metrics_saved}개 앱", task_name)
 
     elapsed_seconds = (datetime.now() - start_time).total_seconds()
 
