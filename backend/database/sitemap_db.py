@@ -812,20 +812,34 @@ def _has_significant_metric_change(old: Dict, new: Dict) -> bool:
 
         # 순위는 절대값 비교
         if field == 'chart_position':
-            if abs(old_val - new_val) >= threshold:
+            diff = abs(old_val - new_val)
+            # threshold가 0이면 값이 달라야만 변화로 감지
+            if threshold == 0:
+                if diff > 0:
+                    return True
+            elif diff >= threshold:
                 return True
             continue
 
-        # 평점은 절대값 비교
+        # 평점/점수/가격은 절대값 비교
         if field in ('rating', 'score', 'price'):
-            if abs(old_val - new_val) >= threshold:
+            diff = abs(old_val - new_val)
+            # threshold가 0이면 값이 달라야만 변화로 감지
+            if threshold == 0:
+                if diff > 0:
+                    return True
+            elif diff >= threshold:
                 return True
             continue
 
         # 나머지는 퍼센트 비교
         if old_val > 0:
             pct_change = abs(new_val - old_val) / old_val
-            if pct_change >= threshold:
+            # threshold가 0이면 값이 달라야만 변화로 감지
+            if threshold == 0:
+                if pct_change > 0:
+                    return True
+            elif pct_change >= threshold:
                 return True
         elif new_val > 0:
             return True  # 0에서 양수로 변화
