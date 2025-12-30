@@ -16,7 +16,7 @@ except ImportError:
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import SCORE_WEIGHTS, MINIMUM_RATING, MINIMUM_RATING_COUNT, MINIMUM_SCORE, timing_tracker
 from database.db import get_connection, log_step
-from database.sitemap_db import save_app_metrics_batch, cleanup_old_metrics
+from database.sitemap_db import save_app_metrics_batch
 
 
 def calculate_app_score(app):
@@ -183,14 +183,6 @@ def analyze_and_update_scores():
     if updated_apps:
         metrics_saved, metrics_skipped = save_app_metrics_batch(updated_apps)
         log_step(task_name, f"[3단계 완료] 메트릭 저장: {metrics_saved}개 변경, {metrics_skipped}개 스킵", task_name)
-
-    # 오래된 메트릭 데이터 정리 (90일 이전)
-    log_step(task_name, "[4단계] 오래된 메트릭 데이터 정리 중...", task_name)
-    deleted_count = cleanup_old_metrics()
-    if deleted_count > 0:
-        log_step(task_name, f"[4단계 완료] {deleted_count}개 레코드 삭제", task_name)
-    else:
-        log_step(task_name, "[4단계 완료] 삭제할 데이터 없음", task_name)
 
     elapsed_seconds = (datetime.now() - start_time).total_seconds()
 
