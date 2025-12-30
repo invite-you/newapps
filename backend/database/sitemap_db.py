@@ -755,82 +755,89 @@ def get_sitemap_retry_stats(platform: str) -> Dict:
 
 # ============ 앱 메트릭 히스토리 관리 함수들 (시계열 분석) ============
 
+# 메트릭 변화 감지 임계값 (Delta Storage용)
+METRICS_CHANGE_THRESHOLDS = {
+    'rating': 0.05,           # 평점 0.05 이상 변화
+    'rating_count': 0.01,     # 평점 수 1% 이상 변화
+    'reviews_count': 0.01,    # 리뷰 수 1% 이상 변화
+    'installs_min': 0.01,     # 설치 수 1% 이상 변화
+    'installs_exact': 0.01,   # 정확한 설치 수 1% 이상 변화
+    'chart_position': 1,      # 순위 1 이상 변화 (절대값)
+    'score': 0.5,             # 점수 0.5 이상 변화
+    'price': 0.01,            # 가격 변화 (거의 모든 변화 감지)
+}
 
-def save_app_metrics(app_data: Dict, recorded_date: str = None) -> bool:
+# 데이터 보관 기간 (일)
+METRICS_RETENTION_DAYS = 90
+
+
+def _has_significant_metric_change(old: Dict, new: Dict) -> bool:
     """
-    앱의 메트릭을 히스토리에 저장 (시계열 분석용)
+    두 메트릭 간에 유의미한 변화가 있는지 확인
 
     Args:
-        app_data: 앱 정보 딕셔너리 (apps 테이블 레코드)
-        recorded_date: 기록 날짜 (기본값: 오늘)
+        old: 이전 메트릭 딕셔너리
+        new: 새 메트릭 딕셔너리
 
     Returns:
-        저장 성공 여부
+        유의미한 변화 여부
     """
-    if not app_data:
-        return False
+    if not old:
+        return True  # 이전 데이터가 없으면 항상 저장
 
-    conn = get_connection()
-    cursor = conn.cursor()
+    for field, threshold in METRICS_CHANGE_THRESHOLDS.items():
+        old_val = old.get(field)
+        new_val = new.get(field)
 
-    if not recorded_date:
-        recorded_date = datetime.now().strftime("%Y-%m-%d")
+        # 둘 다 None이면 변화 없음
+        if old_val is None and new_val is None:
+            continue
 
-    try:
-        cursor.execute("""
-            INSERT OR REPLACE INTO app_metrics_history (
-                app_id, platform, country_code, recorded_date,
-                rating, rating_count, rating_count_current_version,
-                reviews_count, histogram,
-                installs_min, installs_exact,
-                chart_position, chart_type,
-                score, is_featured,
-                price, currency,
-                has_iap, contains_ads,
-                version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            app_data.get('app_id'),
-            app_data.get('platform'),
-            app_data.get('country_code'),
-            recorded_date,
-            app_data.get('rating'),
-            app_data.get('rating_count'),
-            app_data.get('rating_count_current_version'),
-            app_data.get('reviews_count'),
-            app_data.get('histogram'),
-            app_data.get('installs_min'),
-            app_data.get('installs_exact'),
-            app_data.get('chart_position'),
-            app_data.get('chart_type'),
-            app_data.get('score'),
-            app_data.get('is_featured'),
-            app_data.get('price'),
-            app_data.get('currency'),
-            app_data.get('has_iap'),
-            app_data.get('contains_ads'),
-            app_data.get('version'),
-        ))
-        conn.commit()
+        # 하나만 None이면 변화 있음
+        if old_val is None or new_val is None:
+            return True
+
+        # 순위는 절대값 비교
+        if field == 'chart_position':
+            if abs(old_val - new_val) >= threshold:
+                return True
+            continue
+
+        # 평점은 절대값 비교
+        if field in ('rating', 'score', 'price'):
+            if abs(old_val - new_val) >= threshold:
+                return True
+            continue
+
+        # 나머지는 퍼센트 비교
+        if old_val > 0:
+            pct_change = abs(new_val - old_val) / old_val
+            if pct_change >= threshold:
+                return True
+        elif new_val > 0:
+            return True  # 0에서 양수로 변화
+
+    # 버전 변화 감지
+    if old.get('version') != new.get('version') and new.get('version'):
         return True
-    except sqlite3.Error as e:
-        log_step("메트릭 저장", f"[오류] {app_data.get('app_id')}: {e}", "메트릭 저장")
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
+
+    # is_featured 변화 감지
+    if old.get('is_featured') != new.get('is_featured'):
+        return True
+
+    return False
 
 
 def save_app_metrics_batch(apps_data: List[Dict], recorded_date: str = None) -> Tuple[int, int]:
     """
-    여러 앱의 메트릭을 배치로 저장
+    여러 앱의 메트릭을 배치로 저장 (Delta Storage - 변경분만 저장)
 
     Args:
         apps_data: 앱 정보 딕셔너리 리스트
         recorded_date: 기록 날짜 (기본값: 오늘)
 
     Returns:
-        (성공 수, 실패 수)
+        (저장된 앱 수, 스킵된 앱 수)
     """
     if not apps_data:
         return 0, 0
@@ -841,13 +848,77 @@ def save_app_metrics_batch(apps_data: List[Dict], recorded_date: str = None) -> 
     if not recorded_date:
         recorded_date = datetime.now().strftime("%Y-%m-%d")
 
-    success_count = 0
-    fail_count = 0
+    saved_count = 0
+    skipped_count = 0
     batch_size = 500
 
     try:
-        batch = []
+        # 1. 기존 최신 메트릭 조회 (비교용)
+        app_keys = [(app.get('app_id'), app.get('platform'), app.get('country_code'))
+                    for app in apps_data if app.get('app_id')]
+
+        existing_metrics: Dict[Tuple[str, str, str], Dict] = {}
+
+        # 청크 단위로 조회 (SQLite 변수 제한 회피)
+        chunk_size = 300
+        for i in range(0, len(app_keys), chunk_size):
+            chunk = app_keys[i:i + chunk_size]
+            # 복합 키로 조회
+            conditions = " OR ".join(
+                ["(app_id = ? AND platform = ? AND country_code = ?)"] * len(chunk)
+            )
+            params = [val for key in chunk for val in key]
+
+            cursor.execute(f"""
+                SELECT app_id, platform, country_code,
+                       rating, rating_count, reviews_count,
+                       installs_min, installs_exact,
+                       chart_position, score, price, version, is_featured
+                FROM app_metrics_history
+                WHERE ({conditions})
+                  AND recorded_date = (
+                      SELECT MAX(recorded_date) FROM app_metrics_history h2
+                      WHERE h2.app_id = app_metrics_history.app_id
+                        AND h2.platform = app_metrics_history.platform
+                        AND h2.country_code = app_metrics_history.country_code
+                  )
+            """, params)
+
+            for row in cursor.fetchall():
+                key = (row['app_id'], row['platform'], row['country_code'])
+                existing_metrics[key] = dict(row)
+
+        # 2. 변경된 앱만 필터링
+        apps_to_save = []
         for app in apps_data:
+            if not app.get('app_id'):
+                continue
+
+            key = (app.get('app_id'), app.get('platform'), app.get('country_code'))
+            existing = existing_metrics.get(key)
+
+            # 새 메트릭 구성
+            new_metrics = {
+                'rating': app.get('rating'),
+                'rating_count': app.get('rating_count'),
+                'reviews_count': app.get('reviews_count'),
+                'installs_min': app.get('installs_min'),
+                'installs_exact': app.get('installs_exact'),
+                'chart_position': app.get('chart_position'),
+                'score': app.get('score'),
+                'price': app.get('price'),
+                'version': app.get('version'),
+                'is_featured': app.get('is_featured'),
+            }
+
+            if _has_significant_metric_change(existing, new_metrics):
+                apps_to_save.append(app)
+            else:
+                skipped_count += 1
+
+        # 3. 변경된 앱만 저장
+        batch = []
+        for app in apps_to_save:
             batch.append((
                 app.get('app_id'),
                 app.get('platform'),
@@ -885,7 +956,7 @@ def save_app_metrics_batch(apps_data: List[Dict], recorded_date: str = None) -> 
                         version
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, batch)
-                success_count += len(batch)
+                saved_count += len(batch)
                 batch = []
 
         # 남은 배치 처리
@@ -903,19 +974,93 @@ def save_app_metrics_batch(apps_data: List[Dict], recorded_date: str = None) -> 
                     version
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, batch)
-            success_count += len(batch)
+            saved_count += len(batch)
 
         conn.commit()
-        log_step("메트릭 저장", f"배치 저장 완료: {success_count}개 앱", "메트릭 저장")
+        log_step("메트릭 저장", f"Delta 저장: {saved_count}개 변경, {skipped_count}개 스킵", "메트릭 저장")
 
     except sqlite3.Error as e:
         log_step("메트릭 저장", f"[오류] 배치 저장 실패: {e}", "메트릭 저장")
-        fail_count = len(apps_data) - success_count
         conn.rollback()
     finally:
         conn.close()
 
-    return success_count, fail_count
+    return saved_count, skipped_count
+
+
+def cleanup_old_metrics(retention_days: int = None) -> int:
+    """
+    오래된 메트릭 데이터 삭제
+
+    Args:
+        retention_days: 보관 기간 (기본값: METRICS_RETENTION_DAYS)
+
+    Returns:
+        삭제된 레코드 수
+    """
+    if retention_days is None:
+        retention_days = METRICS_RETENTION_DAYS
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            DELETE FROM app_metrics_history
+            WHERE recorded_date < date('now', ?)
+        """, (f'-{retention_days} days',))
+
+        deleted_count = cursor.rowcount
+        conn.commit()
+
+        if deleted_count > 0:
+            log_step("메트릭 정리", f"{retention_days}일 이전 데이터 {deleted_count}개 삭제", "메트릭 정리")
+
+        return deleted_count
+
+    except sqlite3.Error as e:
+        log_step("메트릭 정리", f"[오류] 정리 실패: {e}", "메트릭 정리")
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
+
+def get_metrics_storage_stats() -> Dict:
+    """
+    메트릭 저장소 통계 조회
+
+    Returns:
+        저장소 통계 딕셔너리
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_records,
+                COUNT(DISTINCT app_id || platform || country_code) as unique_apps,
+                COUNT(DISTINCT recorded_date) as days_recorded,
+                MIN(recorded_date) as oldest_date,
+                MAX(recorded_date) as newest_date
+            FROM app_metrics_history
+        """)
+        stats = dict(cursor.fetchone())
+
+        # 일별 평균 레코드 수
+        if stats['days_recorded'] and stats['days_recorded'] > 0:
+            stats['avg_records_per_day'] = round(stats['total_records'] / stats['days_recorded'], 1)
+        else:
+            stats['avg_records_per_day'] = 0
+
+        return stats
+
+    except sqlite3.Error as e:
+        log_step("메트릭 통계", f"[오류] 통계 조회 실패: {e}", "메트릭 통계")
+        return {}
+    finally:
+        conn.close()
 
 
 def get_app_metrics_timeseries(
