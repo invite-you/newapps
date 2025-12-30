@@ -24,7 +24,8 @@ from database.sitemap_db import (
     get_connection as get_sitemap_connection,
     prioritize_for_retry,
     upsert_failed_app_detail,
-    clear_failed_app_detail
+    clear_failed_app_detail,
+    save_app_metrics_batch
 )
 
 EXISTING_APP_ID_BATCH_SIZE = 899  # 플랫폼 파라미터까지 포함해 변수 개수를 900 이하로 유지
@@ -717,6 +718,11 @@ def fetch_google_play_new_apps(limit: int = 100, country_code: str = 'us') -> Di
     # 저장 (기존 데이터와 병합, 변경 없으면 스킵)
     saved, skipped = save_apps_to_db(apps_data, merge_existing=True)
 
+    # 시계열 분석용 메트릭 저장
+    if apps_data:
+        metrics_saved, metrics_failed = save_app_metrics_batch(apps_data)
+        log_step("Google Play", f"메트릭 저장: {metrics_saved}개", "Google Play 상세정보")
+
     log_step("Google Play", f"완료: 저장={saved}, 스킵={skipped}, 실패={failed}", "Google Play 상세정보")
 
     return {
@@ -778,6 +784,11 @@ def fetch_app_store_new_apps(limit: int = 500, country_code: str = 'us') -> Dict
     # 저장 (기존 데이터와 병합, 변경 없으면 스킵)
     saved, skipped = save_apps_to_db(apps_data, merge_existing=True)
     failed = len(failed_ids)
+
+    # 시계열 분석용 메트릭 저장
+    if apps_data:
+        metrics_saved, metrics_failed = save_app_metrics_batch(apps_data)
+        log_step("App Store", f"메트릭 저장: {metrics_saved}개", "App Store 상세정보")
 
     log_step("App Store", f"완료: 저장={saved}, 스킵={skipped}, 실패={failed}", "App Store 상세정보")
 
