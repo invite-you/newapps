@@ -211,8 +211,8 @@ def detect_localized_languages(lang_titles: Dict[str, Optional[str]]) -> List[st
 
     if len(unique_titles) == 1:
         # 모든 title이 동일 = 원본 언어 1개만 반환
-        # 우선순위: ko > en > 나머지
-        for priority_lang in ['ko', 'en', 'es', 'ja', 'zh']:
+        # 우선순위: en > ko > 나머지
+        for priority_lang in ['en', 'ko', 'es', 'ja', 'zh']:
             if priority_lang in valid_titles:
                 return [priority_lang]
         return [list(valid_titles.keys())[0]]
@@ -224,10 +224,10 @@ def detect_localized_languages(lang_titles: Dict[str, Optional[str]]) -> List[st
     # 가장 많이 등장하는 title = 원본 (기본 언어)
     base_title = title_counts.most_common(1)[0][0]
 
-    # 원본 언어 1개 선택 (우선순위: ko > en > 나머지)
+    # 원본 언어 1개 선택 (우선순위: en > ko > 나머지)
     base_langs = [lang for lang, title in valid_titles.items() if title == base_title]
     base_lang = None
-    for priority_lang in ['ko', 'en', 'es', 'ja', 'zh']:
+    for priority_lang in ['en', 'ko', 'es', 'ja', 'zh']:
         if priority_lang in base_langs:
             base_lang = priority_lang
             break
