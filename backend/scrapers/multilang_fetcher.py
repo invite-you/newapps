@@ -180,23 +180,22 @@ def fetch_app_store_multilang(app_id: str) -> Dict[str, Any]:
 
 def detect_localized_languages(lang_titles: Dict[str, Optional[str]]) -> List[str]:
     """
-    title 기준으로 개발자가 직접 현지화한 언어 판별
+    title 기준으로 개발자가 설정한 고유 언어 판별
 
     규칙:
-    - 모든 title이 동일하면 → 빈 리스트 (현지화 안 됨)
-    - 가장 많이 등장하는 title = 원본 (기본 언어)
-    - 원본과 다른 title을 가진 언어만 = 현지화됨
+    - 모든 title이 동일하면 → 원본 언어 1개만 포함
+    - title이 다르면 → 원본 언어 + 현지화된 언어 모두 포함
 
     Args:
         lang_titles: {'ko': '카카오톡', 'en': 'KakaoTalk', 'ja': 'カカオトーク', ...}
 
     Returns:
-        현지화된 언어 목록: ['ko', 'en', 'ja'] 또는 [] (현지화 안 됨)
+        개발자가 설정한 고유 언어 목록
 
     Examples:
         - 카카오톡 (모두 다름): ['en', 'es', 'ja', 'ko', 'zh']
-        - TMAP (모두 동일): []
-        - 쿠팡 (en만 다름): ['en']
+        - TMAP (모두 동일): ['ko'] (원본 언어 1개)
+        - 쿠팡 (en만 다름): ['en', 'ko'] (원본 + 현지화)
     """
     if not lang_titles:
         return []
@@ -211,8 +210,12 @@ def detect_localized_languages(lang_titles: Dict[str, Optional[str]]) -> List[st
     unique_titles = set(valid_titles.values())
 
     if len(unique_titles) == 1:
-        # 모든 title이 동일 = 개발자가 현지화하지 않음
-        return []
+        # 모든 title이 동일 = 원본 언어 1개만 반환
+        # 우선순위: ko > en > 나머지
+        for priority_lang in ['ko', 'en', 'es', 'ja', 'zh']:
+            if priority_lang in valid_titles:
+                return [priority_lang]
+        return [list(valid_titles.keys())[0]]
 
     # 각 title이 몇 번 등장하는지 카운트
     from collections import Counter
@@ -221,10 +224,21 @@ def detect_localized_languages(lang_titles: Dict[str, Optional[str]]) -> List[st
     # 가장 많이 등장하는 title = 원본 (기본 언어)
     base_title = title_counts.most_common(1)[0][0]
 
-    # 원본과 다른 title을 가진 언어만 = 현지화됨
+    # 원본 언어 1개 선택 (우선순위: ko > en > 나머지)
+    base_langs = [lang for lang, title in valid_titles.items() if title == base_title]
+    base_lang = None
+    for priority_lang in ['ko', 'en', 'es', 'ja', 'zh']:
+        if priority_lang in base_langs:
+            base_lang = priority_lang
+            break
+    if not base_lang:
+        base_lang = base_langs[0]
+
+    # 현지화된 언어들 (원본과 다른 title)
     localized = [lang for lang, title in valid_titles.items() if title != base_title]
 
-    return sorted(localized)
+    # 원본 + 현지화된 언어 반환
+    return sorted([base_lang] + localized)
 
 
 def update_app_multilang(app_id: str, platform: str, country_code: str) -> bool:
