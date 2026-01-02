@@ -6,7 +6,7 @@ import sys
 import os
 import time
 import json
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -39,17 +39,17 @@ class PlayStoreDetailsCollector:
         if self.verbose:
             print(f"[PlayStore Details] {message}")
 
-    def get_app_languages(self, app_id: str) -> Set[str]:
-        """sitemap에서 앱의 언어 목록을 가져옵니다."""
+    def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
+        """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
         conn = get_sitemap_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT language FROM app_localizations
+            SELECT DISTINCT language, country FROM app_localizations
             WHERE app_id = ? AND platform = ?
         """, (app_id, PLATFORM))
-        languages = {row['language'] for row in cursor.fetchall()}
+        pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
         conn.close()
-        return languages if languages else {'en'}
+        return pairs if pairs else [('en', 'us')]
 
     def fetch_app_info(self, app_id: str, lang: str = 'en', country: str = 'us') -> Optional[Dict]:
         """google-play-scraper로 앱 정보를 가져옵니다."""
@@ -126,12 +126,31 @@ class PlayStoreDetailsCollector:
             self.stats['apps_skipped_failed'] += 1
             return False
 
-        # 앱의 언어 목록 가져오기
-        languages = self.get_app_languages(app_id)
+        # sitemap에서 (language, country) 쌍 가져오기
+        pairs = self.get_app_language_country_pairs(app_id)
+        if not pairs:
+            pairs = [('en', 'us')]
 
-        # 영어로 기본 정보 수집
-        primary_lang = 'en' if 'en' in languages else list(languages)[0]
-        data = self.fetch_app_info(app_id, lang=primary_lang)
+        # 기본 정보 수집용 (language, country) 결정
+        primary_pair = None
+        for lang, country in pairs:
+            if lang == 'en':
+                primary_pair = (lang, country)
+                break
+        if not primary_pair:
+            primary_pair = pairs[0]
+
+        primary_lang, primary_country = primary_pair
+        data = self.fetch_app_info(app_id, lang=primary_lang, country=primary_country)
+
+        if not data:
+            # 다른 쌍으로 재시도
+            for lang, country in pairs:
+                if (lang, country) != primary_pair:
+                    data = self.fetch_app_info(app_id, lang=lang, country=country)
+                    if data:
+                        break
+                    time.sleep(REQUEST_DELAY)
 
         if not data:
             mark_app_failed(app_id, PLATFORM, 'not_found')
@@ -150,22 +169,29 @@ class PlayStoreDetailsCollector:
         metrics = self.parse_app_metrics(data, app_id)
         insert_app_metrics(metrics)
 
-        # 다국어 데이터 수집
-        collected_langs = set()
+        # 다국어 데이터 수집 - sitemap의 (language, country) 쌍 사용
+        languages_collected = set()
+        fetched_pairs = {primary_pair: data}  # 이미 가져온 데이터 캐시
 
-        # 최대 10개 언어
-        for lang in list(languages)[:10]:
-            if lang in collected_langs:
+        for lang, country in pairs:
+            if len(languages_collected) >= 10:  # 최대 10개 언어
+                break
+
+            if lang in languages_collected:
                 continue
 
-            lang_data = self.fetch_app_info(app_id, lang=lang) if lang != primary_lang else data
+            # 해당 쌍의 데이터 가져오기 (캐시 활용)
+            if (lang, country) in fetched_pairs:
+                pair_data = fetched_pairs[(lang, country)]
+            else:
+                pair_data = self.fetch_app_info(app_id, lang=lang, country=country)
+                fetched_pairs[(lang, country)] = pair_data
+                time.sleep(REQUEST_DELAY)
 
-            if lang_data:
-                localized = self.parse_app_localized(lang_data, app_id, lang)
+            if pair_data:
+                localized = self.parse_app_localized(pair_data, app_id, lang)
                 insert_app_localized(localized)
-                collected_langs.add(lang)
-
-            time.sleep(REQUEST_DELAY)
+                languages_collected.add(lang)
 
         # 수집 상태 업데이트
         update_collection_status(app_id, PLATFORM, details_collected=True)

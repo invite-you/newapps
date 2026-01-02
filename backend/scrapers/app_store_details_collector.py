@@ -38,29 +38,17 @@ class AppStoreDetailsCollector:
         if self.verbose:
             print(f"[AppStore Details] {message}")
 
-    def get_app_languages(self, app_id: str) -> Set[str]:
-        """sitemap에서 앱의 언어 목록을 가져옵니다."""
+    def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
+        """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
         conn = get_sitemap_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT language FROM app_localizations
+            SELECT DISTINCT language, country FROM app_localizations
             WHERE app_id = ? AND platform = ?
         """, (app_id, PLATFORM))
-        languages = {row['language'] for row in cursor.fetchall()}
+        pairs = [(row['language'], row['country'].upper()) for row in cursor.fetchall()]
         conn.close()
-        return languages
-
-    def get_app_countries(self, app_id: str) -> Set[str]:
-        """sitemap에서 앱의 국가 목록을 가져옵니다."""
-        conn = get_sitemap_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT country FROM app_localizations
-            WHERE app_id = ? AND platform = ?
-        """, (app_id, PLATFORM))
-        countries = {row['country'].upper() for row in cursor.fetchall()}
-        conn.close()
-        return countries
+        return pairs
 
     def fetch_app_info(self, app_id: str, country: str = 'US') -> Optional[Dict]:
         """iTunes Lookup API로 앱 정보를 가져옵니다."""
@@ -143,13 +131,16 @@ class AppStoreDetailsCollector:
             self.stats['apps_skipped_failed'] += 1
             return False
 
-        # 앱의 국가 목록 가져오기
-        countries = self.get_app_countries(app_id)
-        if not countries:
-            countries = {'US'}  # 기본값
+        # 앱의 (language, country) 쌍 가져오기
+        pairs = self.get_app_language_country_pairs(app_id)
+        if not pairs:
+            pairs = [('en', 'US')]  # 기본값
+
+        # 국가 목록 추출
+        countries = list({country for _, country in pairs})
 
         # 첫 번째 국가로 기본 정보 수집
-        primary_country = 'US' if 'US' in countries else list(countries)[0]
+        primary_country = 'US' if 'US' in countries else countries[0]
         data = self.fetch_app_info(app_id, primary_country)
 
         if not data:
@@ -178,46 +169,35 @@ class AppStoreDetailsCollector:
         metrics = self.parse_app_metrics(data, app_id)
         insert_app_metrics(metrics)
 
-        # 다국어 데이터 수집 (언어별로 다른 국가에서 수집)
+        # 다국어 데이터 수집 - sitemap의 (language, country) 쌍 사용
         languages_collected = set()
+        fetched_countries = {primary_country: data}  # 이미 가져온 데이터 캐시
 
-        # 국가별로 데이터 수집하여 언어 추출
-        for country in countries:
+        for language, country in pairs:
             if len(languages_collected) >= 10:  # 최대 10개 언어
                 break
 
-            country_data = self.fetch_app_info(app_id, country) if country != primary_country else data
+            if language in languages_collected:
+                continue
+
+            # 해당 국가의 데이터 가져오기 (캐시 활용)
+            if country in fetched_countries:
+                country_data = fetched_countries[country]
+            else:
+                country_data = self.fetch_app_info(app_id, country)
+                fetched_countries[country] = country_data
+                time.sleep(REQUEST_DELAY)
 
             if country_data:
-                # 언어 추론 (국가 코드 기반)
-                lang = self._country_to_language(country)
-                if lang and lang not in languages_collected:
-                    localized = self.parse_app_localized(country_data, app_id, lang)
-                    insert_app_localized(localized)
-                    languages_collected.add(lang)
-
-            time.sleep(REQUEST_DELAY)
+                localized = self.parse_app_localized(country_data, app_id, language)
+                insert_app_localized(localized)
+                languages_collected.add(language)
 
         # 수집 상태 업데이트
         update_collection_status(app_id, PLATFORM, details_collected=True)
         self.stats['apps_processed'] += 1
 
         return True
-
-    def _country_to_language(self, country: str) -> str:
-        """국가 코드를 주요 언어 코드로 변환합니다."""
-        country_lang_map = {
-            'KR': 'ko', 'US': 'en', 'GB': 'en', 'JP': 'ja', 'CN': 'zh',
-            'TW': 'zh', 'DE': 'de', 'FR': 'fr', 'ES': 'es', 'IT': 'it',
-            'BR': 'pt', 'PT': 'pt', 'RU': 'ru', 'IN': 'en', 'AU': 'en',
-            'CA': 'en', 'MX': 'es', 'NL': 'nl', 'SE': 'sv', 'NO': 'nb',
-            'DK': 'da', 'FI': 'fi', 'PL': 'pl', 'TR': 'tr', 'TH': 'th',
-            'VN': 'vi', 'ID': 'id', 'MY': 'ms', 'PH': 'en', 'SG': 'en',
-            'HK': 'zh', 'AE': 'ar', 'SA': 'ar', 'EG': 'ar', 'IL': 'he',
-            'ZA': 'en', 'NG': 'en', 'UA': 'uk', 'CZ': 'cs', 'HU': 'hu',
-            'RO': 'ro', 'GR': 'el', 'AT': 'de', 'CH': 'de', 'BE': 'nl'
-        }
-        return country_lang_map.get(country.upper(), 'en')
 
     def collect_batch(self, app_ids: List[str]) -> Dict[str, Any]:
         """배치로 앱 상세정보를 수집합니다."""

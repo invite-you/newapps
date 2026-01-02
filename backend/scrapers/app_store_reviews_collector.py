@@ -39,17 +39,17 @@ class AppStoreReviewsCollector:
         if self.verbose:
             print(f"[AppStore Reviews] {message}")
 
-    def get_app_countries(self, app_id: str) -> List[str]:
-        """sitemap에서 앱의 국가 목록을 가져옵니다."""
+    def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
+        """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
         conn = get_sitemap_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT country FROM app_localizations
+            SELECT DISTINCT language, country FROM app_localizations
             WHERE app_id = ? AND platform = ?
         """, (app_id, PLATFORM))
-        countries = [row['country'].lower() for row in cursor.fetchall()]
+        pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
         conn.close()
-        return countries if countries else ['us']
+        return pairs if pairs else [('en', 'us')]
 
     def fetch_reviews_page(self, app_id: str, country: str, page: int) -> List[Dict]:
         """RSS에서 리뷰 페이지를 가져옵니다."""
@@ -121,8 +121,10 @@ class AppStoreReviewsCollector:
         # 이미 수집된 리뷰 ID 세트
         existing_ids = get_all_review_ids(app_id, PLATFORM)
 
-        # 국가 목록
-        countries = self.get_app_countries(app_id)
+        # sitemap에서 (language, country) 쌍 가져오기
+        pairs = self.get_app_language_country_pairs(app_id)
+        # RSS는 country만 사용하므로 고유한 국가 목록 추출
+        countries = list({country for _, country in pairs})
 
         # 수집할 수 있는 리뷰 수 계산
         if initial_done:

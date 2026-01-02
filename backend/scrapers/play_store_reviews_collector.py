@@ -40,29 +40,17 @@ class PlayStoreReviewsCollector:
         if self.verbose:
             print(f"[PlayStore Reviews] {message}")
 
-    def get_app_countries(self, app_id: str) -> List[str]:
-        """sitemap에서 앱의 국가 목록을 가져옵니다."""
+    def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
+        """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
         conn = get_sitemap_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT country FROM app_localizations
+            SELECT DISTINCT language, country FROM app_localizations
             WHERE app_id = ? AND platform = ?
         """, (app_id, PLATFORM))
-        countries = [row['country'].lower() for row in cursor.fetchall()]
+        pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
         conn.close()
-        return countries if countries else ['us']
-
-    def get_app_languages(self, app_id: str) -> List[str]:
-        """sitemap에서 앱의 언어 목록을 가져옵니다."""
-        conn = get_sitemap_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT language FROM app_localizations
-            WHERE app_id = ? AND platform = ?
-        """, (app_id, PLATFORM))
-        languages = [row['language'] for row in cursor.fetchall()]
-        conn.close()
-        return languages if languages else ['en']
+        return pairs if pairs else [('en', 'us')]
 
     def fetch_reviews(self, app_id: str, lang: str = 'en', country: str = 'us',
                       count: int = BATCH_SIZE, continuation_token: str = None) -> tuple:
@@ -121,19 +109,10 @@ class PlayStoreReviewsCollector:
         # 이미 수집된 리뷰 ID 세트
         existing_ids = get_all_review_ids(app_id, PLATFORM)
 
-        # 국가/언어 목록
-        countries = self.get_app_countries(app_id)
-        languages = self.get_app_languages(app_id)
-
-        # 국가-언어 쌍 생성
-        pairs = []
-        for country in countries:
-            # 해당 국가에 맞는 언어 찾기
-            lang = self._get_language_for_country(country, languages)
-            pairs.append((country, lang))
-
+        # sitemap에서 (language, country) 쌍 가져오기
+        pairs = self.get_app_language_country_pairs(app_id)
         if not pairs:
-            pairs = [('us', 'en')]
+            pairs = [('en', 'us')]
 
         # 수집할 수 있는 리뷰 수 계산
         if initial_done:
@@ -148,8 +127,8 @@ class PlayStoreReviewsCollector:
         collected_total = 0
         hit_existing = False
 
-        # 각 국가/언어에서 순차적으로 수집
-        for country, lang in pairs:
+        # 각 (language, country) 쌍에서 순차적으로 수집
+        for lang, country in pairs:
             if collected_total >= remaining or hit_existing:
                 break
 
@@ -201,19 +180,6 @@ class PlayStoreReviewsCollector:
         self.log(f"App {app_id}: collected {collected_total} reviews (total: {new_total})")
 
         return collected_total
-
-    def _get_language_for_country(self, country: str, available_langs: List[str]) -> str:
-        """국가에 맞는 언어를 반환합니다."""
-        country_lang_map = {
-            'kr': 'ko', 'us': 'en', 'gb': 'en', 'jp': 'ja', 'cn': 'zh',
-            'tw': 'zh', 'de': 'de', 'fr': 'fr', 'es': 'es', 'it': 'it',
-            'br': 'pt', 'pt': 'pt', 'ru': 'ru', 'in': 'en', 'au': 'en',
-            'ca': 'en', 'mx': 'es', 'nl': 'nl', 'se': 'sv', 'no': 'nb',
-            'dk': 'da', 'fi': 'fi', 'pl': 'pl', 'tr': 'tr', 'th': 'th',
-            'vn': 'vi', 'id': 'id', 'my': 'ms', 'ph': 'en', 'sg': 'en'
-        }
-        preferred = country_lang_map.get(country.lower(), 'en')
-        return preferred if preferred in available_langs else 'en'
 
     def collect_batch(self, app_ids: List[str]) -> Dict[str, Any]:
         """배치로 리뷰를 수집합니다."""
