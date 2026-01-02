@@ -20,7 +20,7 @@ from database.sitemap_apps_db import get_connection as get_sitemap_connection
 PLATFORM = 'app_store'
 RSS_BASE_URL = 'https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json'
 REQUEST_DELAY = 0.01  # 10ms
-MAX_REVIEWS_TOTAL = 10000  # 앱당 최대 리뷰 수
+MAX_REVIEWS_TOTAL = 20000  # 앱당 최대 리뷰 수
 MAX_PAGES_PER_COUNTRY = 10  # 국가당 최대 페이지 (약 500건)
 
 
@@ -106,8 +106,58 @@ class AppStoreReviewsCollector:
         except Exception:
             return None
 
+    def collect_reviews_for_country(self, app_id: str, country: str, quota: int,
+                                      existing_ids: Set[str], stop_on_existing: bool) -> tuple:
+        """
+        특정 국가에서 리뷰를 수집합니다.
+        Returns: (collected_count, hit_existing, has_more)
+        """
+        collected = 0
+        hit_existing = False
+        has_more = False
+
+        for page in range(1, MAX_PAGES_PER_COUNTRY + 1):
+            if collected >= quota:
+                has_more = True  # 할당량 도달, 더 있을 수 있음
+                break
+
+            reviews = self.fetch_reviews_page(app_id, country, page)
+            if not reviews:
+                break  # 더 이상 리뷰 없음
+
+            new_reviews = []
+            for review in reviews:
+                if review['review_id'] in existing_ids:
+                    if stop_on_existing:
+                        hit_existing = True
+                        break
+                    continue  # 중복 건너뛰기
+
+                new_reviews.append(review)
+                existing_ids.add(review['review_id'])
+
+                if collected + len(new_reviews) >= quota:
+                    break
+
+            if new_reviews:
+                to_save = new_reviews[:quota - collected]
+                inserted = insert_reviews_batch(to_save)
+                collected += inserted
+                self.stats['reviews_collected'] += inserted
+
+            if hit_existing:
+                break
+
+            # 마지막 페이지까지 왔는데 할당량 미달이면 더 없음
+            if page == MAX_PAGES_PER_COUNTRY and collected < quota:
+                has_more = False
+
+            time.sleep(REQUEST_DELAY)
+
+        return collected, hit_existing, has_more
+
     def collect_reviews_for_app(self, app_id: str) -> int:
-        """단일 앱의 리뷰를 수집합니다."""
+        """단일 앱의 리뷰를 수집합니다. 국가별 균등 분배 + 잔여 분배."""
         # 실패한 앱인지 확인
         if is_failed_app(app_id, PLATFORM):
             self.stats['apps_skipped'] += 1
@@ -128,50 +178,58 @@ class AppStoreReviewsCollector:
 
         # 수집할 수 있는 리뷰 수 계산
         if initial_done:
-            # 추가 수집: 제한 없이 새 리뷰만
-            remaining = MAX_REVIEWS_TOTAL  # 실질적으로 제한 없음
+            remaining = MAX_REVIEWS_TOTAL
         else:
-            # 최초 수집: 최대 10000건
             remaining = MAX_REVIEWS_TOTAL - current_count
 
         if remaining <= 0:
             self.stats['apps_skipped'] += 1
             return 0
 
+        # 국가별 할당량 계산
+        per_country_quota = remaining // len(countries)
+        if per_country_quota < 1:
+            per_country_quota = 1
+
         collected_total = 0
-        hit_existing = False
+        hit_existing_any = False
+        countries_with_more = []  # 추가 수집 가능한 국가
 
-        # 각 국가에서 순차적으로 수집 (전체 합산 도달 시 중단)
+        # === 1차: 국가별 균등 분배 ===
         for country in countries:
-            if collected_total >= remaining or hit_existing:
-                break
+            collected, hit_existing, has_more = self.collect_reviews_for_country(
+                app_id, country, per_country_quota, existing_ids,
+                stop_on_existing=initial_done  # 추가 수집시에만 기존 리뷰에서 중단
+            )
+            collected_total += collected
 
-            for page in range(1, MAX_PAGES_PER_COUNTRY + 1):
-                if collected_total >= remaining or hit_existing:
+            if hit_existing:
+                hit_existing_any = True
+
+            if has_more and not hit_existing:
+                countries_with_more.append(country)
+
+        # === 2차: 잔여 분배 (리뷰가 더 있는 국가에서 추가 수집) ===
+        remaining_after_first = remaining - collected_total
+
+        if remaining_after_first > 0 and countries_with_more and not hit_existing_any:
+            extra_per_country = remaining_after_first // len(countries_with_more)
+            if extra_per_country < 1:
+                extra_per_country = remaining_after_first
+
+            for country in countries_with_more:
+                if collected_total >= remaining:
                     break
 
-                reviews = self.fetch_reviews_page(app_id, country, page)
-                if not reviews:
+                extra_quota = min(extra_per_country, remaining - collected_total)
+                collected, hit_existing, _ = self.collect_reviews_for_country(
+                    app_id, country, extra_quota, existing_ids,
+                    stop_on_existing=initial_done
+                )
+                collected_total += collected
+
+                if hit_existing:
                     break
-
-                # 새 리뷰만 필터링
-                new_reviews = []
-                for review in reviews:
-                    if review['review_id'] in existing_ids:
-                        # 이미 수집된 리뷰 발견 - 중단
-                        hit_existing = True
-                        break
-                    new_reviews.append(review)
-                    existing_ids.add(review['review_id'])
-
-                if new_reviews:
-                    # 남은 개수만큼만 저장
-                    to_save = new_reviews[:remaining - collected_total]
-                    inserted = insert_reviews_batch(to_save)
-                    collected_total += inserted
-                    self.stats['reviews_collected'] += inserted
-
-                time.sleep(REQUEST_DELAY)
 
         # 수집 상태 업데이트
         new_total = current_count + collected_total
@@ -179,7 +237,7 @@ class AppStoreReviewsCollector:
             app_id, PLATFORM,
             reviews_collected=True,
             reviews_count=new_total,
-            initial_review_done=(not initial_done and (collected_total > 0 or hit_existing))
+            initial_review_done=(not initial_done and (collected_total > 0 or hit_existing_any))
         )
 
         self.stats['apps_processed'] += 1
