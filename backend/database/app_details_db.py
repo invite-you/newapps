@@ -95,7 +95,7 @@ def init_database():
         )
     """)
 
-    # app_reviews: 리뷰 (최대 10000건, 이후 누적)
+    # app_reviews: 리뷰 (실행당 최대 20000건 수집, 이후 누적)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,7 +140,7 @@ def init_database():
             details_collected_at TEXT,          -- 상세정보 마지막 수집 시각
             reviews_collected_at TEXT,          -- 리뷰 마지막 수집 시각
             reviews_total_count INTEGER DEFAULT 0,  -- 현재 수집된 총 리뷰 수
-            initial_review_done INTEGER DEFAULT 0,  -- 최초 10000건 수집 완료 여부
+            initial_review_done INTEGER DEFAULT 0,  -- 최초 수집 완료 여부 (이후 중복 리뷰 발견 시 중단)
             UNIQUE(app_id, platform)
         )
     """)
