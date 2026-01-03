@@ -1,0 +1,559 @@
+"""
+App Details Database
+앱 상세정보, 다국어 정보, 수치 데이터, 리뷰를 저장하는 DB
+변경 시에만 누적 저장 (이력 관리)
+"""
+import sqlite3
+import os
+import json
+from datetime import datetime
+from typing import Optional, List, Dict, Any, Tuple
+
+DATABASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_PATH = os.path.join(DATABASE_DIR, 'app_details.db')
+
+# 비교 제외 필드
+EXCLUDE_COMPARE_FIELDS = {'id', 'recorded_at'}
+
+
+def get_connection() -> sqlite3.Connection:
+    """DB 연결을 반환합니다."""
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_database():
+    """DB 테이블을 초기화합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # apps: 앱 메타데이터 (변경 시에만 누적)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS apps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            platform TEXT NOT NULL,             -- 'app_store' or 'play_store'
+            bundle_id TEXT,
+            version TEXT,
+            developer TEXT,
+            developer_id TEXT,
+            developer_email TEXT,
+            developer_website TEXT,
+            icon_url TEXT,
+            header_image TEXT,
+            screenshots TEXT,                   -- JSON array
+            price REAL,
+            currency TEXT,
+            free INTEGER,                       -- boolean
+            has_iap INTEGER,                    -- boolean
+            category_id TEXT,
+            genre_id TEXT,
+            content_rating TEXT,
+            content_rating_description TEXT,
+            min_os_version TEXT,
+            file_size INTEGER,
+            supported_devices TEXT,             -- JSON array
+            release_date TEXT,
+            updated_date TEXT,
+            privacy_policy_url TEXT,
+            recorded_at TEXT NOT NULL
+        )
+    """)
+
+    # apps_localized: 다국어 텍스트 (변경 시에만 누적)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS apps_localized (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            language TEXT NOT NULL,
+            title TEXT,
+            summary TEXT,
+            description TEXT,
+            release_notes TEXT,
+            genre_name TEXT,
+            recorded_at TEXT NOT NULL
+        )
+    """)
+
+    # apps_metrics: 수치 데이터 (변경 시에만 누적)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS apps_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            score REAL,
+            ratings INTEGER,
+            reviews_count INTEGER,
+            installs TEXT,                      -- "100,000+" 형태
+            installs_exact INTEGER,             -- 정확한 수치 (Play Store)
+            histogram TEXT,                     -- JSON array [1점, 2점, 3점, 4점, 5점]
+            recorded_at TEXT NOT NULL
+        )
+    """)
+
+    # app_reviews: 리뷰 (실행당 최대 20000건 수집, 이후 누적)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            review_id TEXT NOT NULL,            -- 외부 리뷰 ID
+            country TEXT,
+            language TEXT,
+            user_name TEXT,
+            user_image TEXT,
+            score INTEGER,
+            title TEXT,                         -- App Store만
+            content TEXT,
+            thumbs_up_count INTEGER,
+            app_version TEXT,
+            reviewed_at TEXT,
+            reply_content TEXT,
+            replied_at TEXT,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(app_id, platform, review_id)
+        )
+    """)
+
+    # failed_apps: 영구 실패 앱 (재시도 안 함)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS failed_apps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            reason TEXT,                        -- not_found, removed, etc.
+            failed_at TEXT NOT NULL,
+            UNIQUE(app_id, platform)
+        )
+    """)
+
+    # collection_status: 수집 상태 추적
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS collection_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            details_collected_at TEXT,          -- 상세정보 마지막 수집 시각
+            reviews_collected_at TEXT,          -- 리뷰 마지막 수집 시각
+            reviews_total_count INTEGER DEFAULT 0,  -- 현재 수집된 총 리뷰 수
+            initial_review_done INTEGER DEFAULT 0,  -- 최초 수집 완료 여부 (이후 중복 리뷰 발견 시 중단)
+            UNIQUE(app_id, platform)
+        )
+    """)
+
+    # 인덱스 생성
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_app_id ON apps(app_id, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_recorded_at ON apps(recorded_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_localized_app_id ON apps_localized(app_id, platform, language)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_metrics_app_id ON apps_metrics(app_id, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_app_id ON app_reviews(app_id, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_review_id ON app_reviews(review_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_reviewed_at ON app_reviews(reviewed_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_apps_app_id ON failed_apps(app_id, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_status_app_id ON collection_status(app_id, platform)")
+
+    conn.commit()
+    conn.close()
+    print(f"Database initialized at {DATABASE_PATH}")
+
+
+def normalize_json_field(value: Any) -> str:
+    """JSON 필드를 정렬하여 문자열로 변환합니다."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+    if isinstance(value, list):
+        # 리스트 정렬 (순서 무관 비교)
+        try:
+            sorted_list = sorted(value, key=lambda x: json.dumps(x, sort_keys=True) if isinstance(x, dict) else str(x))
+            return json.dumps(sorted_list, sort_keys=True, ensure_ascii=False)
+        except TypeError:
+            return json.dumps(value, sort_keys=True, ensure_ascii=False)
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def compare_records(existing: Dict, new_data: Dict, exclude_fields: set = None) -> bool:
+    """두 레코드를 비교합니다. 동일하면 True, 다르면 False."""
+    if exclude_fields is None:
+        exclude_fields = EXCLUDE_COMPARE_FIELDS
+
+    for key, new_value in new_data.items():
+        if key in exclude_fields:
+            continue
+
+        existing_value = existing.get(key)
+
+        # JSON 필드 정규화
+        if key in ('screenshots', 'supported_devices', 'histogram'):
+            existing_value = normalize_json_field(existing_value)
+            new_value = normalize_json_field(new_value)
+
+        # None과 빈 문자열 동일 처리
+        if existing_value in (None, '', 'null') and new_value in (None, '', 'null'):
+            continue
+
+        if str(existing_value) != str(new_value):
+            return False
+
+    return True
+
+
+def get_latest_app(app_id: str, platform: str) -> Optional[Dict]:
+    """앱의 최신 메타데이터를 반환합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM apps
+        WHERE app_id = ? AND platform = ?
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """, (app_id, platform))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def insert_app(data: Dict) -> Tuple[bool, int]:
+    """앱 메타데이터를 삽입합니다. 변경이 있을 때만 삽입.
+    Returns: (is_new_record, record_id)
+    """
+    app_id = data['app_id']
+    platform = data['platform']
+
+    # 최신 레코드와 비교
+    existing = get_latest_app(app_id, platform)
+    if existing and compare_records(existing, data):
+        return False, existing['id']
+
+    # 새 레코드 삽입
+    conn = get_connection()
+    cursor = conn.cursor()
+    data['recorded_at'] = datetime.now().isoformat()
+
+    columns = ', '.join(data.keys())
+    placeholders = ', '.join(['?' for _ in data])
+    cursor.execute(f"INSERT INTO apps ({columns}) VALUES ({placeholders})", list(data.values()))
+
+    record_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return True, record_id
+
+
+def get_latest_app_localized(app_id: str, platform: str, language: str) -> Optional[Dict]:
+    """앱의 최신 다국어 데이터를 반환합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM apps_localized
+        WHERE app_id = ? AND platform = ? AND language = ?
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """, (app_id, platform, language))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def insert_app_localized(data: Dict) -> Tuple[bool, int]:
+    """앱 다국어 데이터를 삽입합니다. 변경이 있을 때만 삽입."""
+    app_id = data['app_id']
+    platform = data['platform']
+    language = data['language']
+
+    existing = get_latest_app_localized(app_id, platform, language)
+    if existing and compare_records(existing, data):
+        return False, existing['id']
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    data['recorded_at'] = datetime.now().isoformat()
+
+    columns = ', '.join(data.keys())
+    placeholders = ', '.join(['?' for _ in data])
+    cursor.execute(f"INSERT INTO apps_localized ({columns}) VALUES ({placeholders})", list(data.values()))
+
+    record_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return True, record_id
+
+
+def get_latest_app_metrics(app_id: str, platform: str) -> Optional[Dict]:
+    """앱의 최신 수치 데이터를 반환합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM apps_metrics
+        WHERE app_id = ? AND platform = ?
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """, (app_id, platform))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def insert_app_metrics(data: Dict) -> Tuple[bool, int]:
+    """앱 수치 데이터를 삽입합니다. 변경이 있을 때만 삽입."""
+    app_id = data['app_id']
+    platform = data['platform']
+
+    existing = get_latest_app_metrics(app_id, platform)
+    if existing and compare_records(existing, data):
+        return False, existing['id']
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    data['recorded_at'] = datetime.now().isoformat()
+
+    columns = ', '.join(data.keys())
+    placeholders = ', '.join(['?' for _ in data])
+    cursor.execute(f"INSERT INTO apps_metrics ({columns}) VALUES ({placeholders})", list(data.values()))
+
+    record_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return True, record_id
+
+
+def review_exists(app_id: str, platform: str, review_id: str) -> bool:
+    """리뷰가 이미 존재하는지 확인합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 1 FROM app_reviews
+        WHERE app_id = ? AND platform = ? AND review_id = ?
+    """, (app_id, platform, review_id))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+
+def insert_review(data: Dict) -> bool:
+    """리뷰를 삽입합니다. 이미 존재하면 False 반환."""
+    if review_exists(data['app_id'], data['platform'], data['review_id']):
+        return False
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    data['recorded_at'] = datetime.now().isoformat()
+
+    columns = ', '.join(data.keys())
+    placeholders = ', '.join(['?' for _ in data])
+
+    try:
+        cursor.execute(f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders})", list(data.values()))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def insert_reviews_batch(reviews: List[Dict]) -> int:
+    """리뷰를 배치로 삽입합니다. 삽입된 개수 반환."""
+    if not reviews:
+        return 0
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    inserted = 0
+
+    for data in reviews:
+        data['recorded_at'] = now
+        columns = ', '.join(data.keys())
+        placeholders = ', '.join(['?' for _ in data])
+
+        try:
+            cursor.execute(f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders})", list(data.values()))
+            inserted += 1
+        except sqlite3.IntegrityError:
+            pass  # 중복 리뷰
+
+    conn.commit()
+    conn.close()
+    return inserted
+
+
+def is_failed_app(app_id: str, platform: str) -> bool:
+    """영구 실패 앱인지 확인합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 1 FROM failed_apps WHERE app_id = ? AND platform = ?
+    """, (app_id, platform))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+
+def mark_app_failed(app_id: str, platform: str, reason: str):
+    """앱을 영구 실패로 표시합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+
+    cursor.execute("""
+        INSERT OR REPLACE INTO failed_apps (app_id, platform, reason, failed_at)
+        VALUES (?, ?, ?, ?)
+    """, (app_id, platform, reason, now))
+
+    conn.commit()
+    conn.close()
+
+
+def get_collection_status(app_id: str, platform: str) -> Optional[Dict]:
+    """수집 상태를 반환합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM collection_status WHERE app_id = ? AND platform = ?
+    """, (app_id, platform))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_collection_status(app_id: str, platform: str,
+                              details_collected: bool = False,
+                              reviews_collected: bool = False,
+                              reviews_count: int = None,
+                              initial_review_done: bool = None):
+    """수집 상태를 업데이트합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+
+    # 기존 상태 확인
+    cursor.execute("""
+        SELECT * FROM collection_status WHERE app_id = ? AND platform = ?
+    """, (app_id, platform))
+    existing = cursor.fetchone()
+
+    if existing:
+        updates = []
+        params = []
+
+        if details_collected:
+            updates.append("details_collected_at = ?")
+            params.append(now)
+
+        if reviews_collected:
+            updates.append("reviews_collected_at = ?")
+            params.append(now)
+
+        if reviews_count is not None:
+            updates.append("reviews_total_count = ?")
+            params.append(reviews_count)
+
+        if initial_review_done is not None:
+            updates.append("initial_review_done = ?")
+            params.append(1 if initial_review_done else 0)
+
+        if updates:
+            params.extend([app_id, platform])
+            cursor.execute(f"""
+                UPDATE collection_status SET {', '.join(updates)}
+                WHERE app_id = ? AND platform = ?
+            """, params)
+    else:
+        cursor.execute("""
+            INSERT INTO collection_status (app_id, platform, details_collected_at, reviews_collected_at, reviews_total_count, initial_review_done)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            app_id, platform,
+            now if details_collected else None,
+            now if reviews_collected else None,
+            reviews_count or 0,
+            1 if initial_review_done else 0
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_review_count(app_id: str, platform: str) -> int:
+    """앱의 수집된 리뷰 수를 반환합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT COUNT(*) as count FROM app_reviews WHERE app_id = ? AND platform = ?
+    """, (app_id, platform))
+    count = cursor.fetchone()['count']
+    conn.close()
+    return count
+
+
+def get_latest_review_id(app_id: str, platform: str) -> Optional[str]:
+    """가장 최근에 수집된 리뷰의 review_id를 반환합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT review_id FROM app_reviews
+        WHERE app_id = ? AND platform = ?
+        ORDER BY reviewed_at DESC
+        LIMIT 1
+    """, (app_id, platform))
+    row = cursor.fetchone()
+    conn.close()
+    return row['review_id'] if row else None
+
+
+def get_all_review_ids(app_id: str, platform: str) -> set:
+    """앱의 모든 리뷰 ID를 반환합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT review_id FROM app_reviews WHERE app_id = ? AND platform = ?
+    """, (app_id, platform))
+    ids = {row['review_id'] for row in cursor.fetchall()}
+    conn.close()
+    return ids
+
+
+def get_stats() -> Dict[str, Any]:
+    """DB 통계를 반환합니다."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    stats = {}
+
+    # 각 테이블 레코드 수
+    for table in ['apps', 'apps_localized', 'apps_metrics', 'app_reviews', 'failed_apps', 'collection_status']:
+        cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
+        stats[table] = cursor.fetchone()['count']
+
+    # 플랫폼별 앱 수 (unique)
+    cursor.execute("""
+        SELECT platform, COUNT(DISTINCT app_id) as count FROM apps GROUP BY platform
+    """)
+    stats['apps_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
+
+    # 플랫폼별 리뷰 수
+    cursor.execute("""
+        SELECT platform, COUNT(*) as count FROM app_reviews GROUP BY platform
+    """)
+    stats['reviews_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
+
+    conn.close()
+    return stats
+
+
+if __name__ == '__main__':
+    init_database()
+    print("Database schema created successfully.")
+    stats = get_stats()
+    print(f"Stats: {stats}")
