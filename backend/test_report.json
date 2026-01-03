@@ -1,0 +1,164 @@
+{
+  "elapsed_seconds": 39.988424,
+  "iterations": 2,
+  "sitemap": {
+    "app_store": {
+      "index_urls": 786,
+      "entries_in_first_file": 8510,
+      "sample_hreflangs": 1,
+      "success": true,
+      "collection_stats": {
+        "sitemap_files_processed": 2,
+        "sitemap_files_skipped": 0,
+        "new_localizations": 15990,
+        "total_localizations": 639215,
+        "errors": 0
+      }
+    },
+    "play_store": {
+      "index_urls": 50000,
+      "entries_in_first_file": 398,
+      "sample_hreflangs": 400,
+      "success": true,
+      "collection_stats": {
+        "sitemap_files_processed": 2,
+        "sitemap_files_skipped": 0,
+        "new_localizations": 16448,
+        "total_localizations": 16489,
+        "skipped_non_apps": 76388,
+        "errors": 0
+      }
+    },
+    "db_stats": {
+      "total_localizations": 32438,
+      "platform_stats": {
+        "app_store": {
+          "apps": 2862,
+          "localizations": 15990
+        },
+        "play_store": {
+          "apps": 74,
+          "localizations": 16448
+        }
+      },
+      "sitemap_file_counts": {
+        "app_store": 2,
+        "play_store": 2
+      }
+    }
+  },
+  "details": {
+    "app_store": {
+      "apps_processed": 5,
+      "apps_skipped_failed": 0,
+      "apps_not_found": 0,
+      "new_records": 5,
+      "unchanged_records": 0,
+      "errors": 0
+    },
+    "play_store": {
+      "apps_processed": 3,
+      "apps_skipped_failed": 0,
+      "apps_not_found": 2,
+      "new_records": 3,
+      "unchanged_records": 0,
+      "errors": 0
+    },
+    "db_stats": {
+      "apps": 8,
+      "apps_localized": 25,
+      "apps_metrics": 8,
+      "app_reviews": 0,
+      "failed_apps": 2,
+      "collection_status": 8,
+      "apps_by_platform": {
+        "app_store": 5,
+        "play_store": 3
+      },
+      "reviews_by_platform": {}
+    }
+  },
+  "reviews": {
+    "app_store": {
+      "apps_processed": 3,
+      "apps_skipped": 0,
+      "reviews_collected": 1,
+      "reviews_duplicates": 0,
+      "errors": 0
+    },
+    "play_store": {
+      "apps_processed": 3,
+      "apps_skipped": 0,
+      "reviews_collected": 0,
+      "reviews_duplicates": 0,
+      "errors": 0
+    },
+    "db_stats": {
+      "apps": 8,
+      "apps_localized": 25,
+      "apps_metrics": 8,
+      "app_reviews": 1,
+      "failed_apps": 2,
+      "collection_status": 8,
+      "apps_by_platform": {
+        "app_store": 5,
+        "play_store": 3
+      },
+      "reviews_by_platform": {
+        "app_store": 1
+      }
+    }
+  },
+  "new_app_discovery": {
+    "before": {
+      "total_localizations": 32438,
+      "platform_stats": {
+        "app_store": {
+          "apps": 2862,
+          "localizations": 15990
+        },
+        "play_store": {
+          "apps": 74,
+          "localizations": 16448
+        }
+      },
+      "sitemap_file_counts": {
+        "app_store": 2,
+        "play_store": 2
+      }
+    },
+    "after": {
+      "total_localizations": 32440,
+      "platform_stats": {
+        "app_store": {
+          "apps": 2863,
+          "localizations": 15991
+        },
+        "play_store": {
+          "apps": 75,
+          "localizations": 16449
+        }
+      },
+      "sitemap_file_counts": {
+        "app_store": 2,
+        "play_store": 2
+      }
+    },
+    "new_apps_added": 2,
+    "duplicate_check": true
+  },
+  "time_series": {
+    "app_history_count": 3,
+    "metrics_history_count": 2,
+    "duplicate_prevention": false,
+    "change_detection": true
+  },
+  "db_integrity": {
+    "issues": [
+      "apps without status: 1"
+    ],
+    "passed": false
+  },
+  "encoding": {},
+  "errors": []
+}
