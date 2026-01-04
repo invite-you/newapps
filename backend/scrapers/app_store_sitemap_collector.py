@@ -1,9 +1,12 @@
 """
 App Store Sitemap Collector
 App Store sitemap에서 앱 로컬라이제이션 정보를 수집합니다.
+
+최적화: 언어당 최적의 국가 1개만 저장하여 DB 용량 절감
 """
 import sys
 import os
+from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -15,6 +18,7 @@ from scrapers.sitemap_utils import (
 from database.sitemap_apps_db import (
     get_sitemap_file_hash, update_sitemap_file, upsert_app_localizations_batch
 )
+from config.language_country_priority import get_best_country_for_language
 
 PLATFORM = 'app_store'
 
@@ -33,6 +37,8 @@ class AppStoreSitemapCollector:
             'sitemap_files_skipped': 0,
             'new_localizations': 0,
             'total_localizations': 0,
+            'raw_localizations': 0,  # 필터링 전 원본 수
+            'filtered_out': 0,       # 필터링으로 제외된 수
             'errors': 0
         }
 
@@ -51,6 +57,43 @@ class AppStoreSitemapCollector:
         sitemap_urls = parse_sitemap_index(content)
         self.log(f"Found {len(sitemap_urls)} sitemap files in index")
         return sitemap_urls
+
+    def _filter_best_country_per_language(self, raw_localizations: List[Dict]) -> List[Dict]:
+        """각 앱의 각 언어에 대해 최적의 국가 1개만 선택합니다.
+
+        예: 영어 116개 국가 → 영어 1개 국가 (US 우선)
+        이를 통해 DB 용량을 약 50% 절감합니다.
+        """
+        # 앱별 → 언어별 → 국가 목록으로 그룹화
+        # app_id -> language -> [(country, localization_data), ...]
+        app_lang_countries = defaultdict(lambda: defaultdict(list))
+
+        for loc in raw_localizations:
+            app_id = loc['app_id']
+            language = loc['language']
+            country = loc['country']
+            app_lang_countries[app_id][language].append((country, loc))
+
+        # 각 언어당 최적의 국가 1개만 선택
+        filtered = []
+        for app_id, lang_data in app_lang_countries.items():
+            for language, country_list in lang_data.items():
+                # 해당 언어에서 사용 가능한 국가 목록
+                available_countries = [c for c, _ in country_list]
+
+                # 최적의 국가 선택 (language_country_priority 기반)
+                best_country = get_best_country_for_language(language, available_countries)
+
+                # 해당 국가의 로컬라이제이션 데이터 찾기
+                for country, loc_data in country_list:
+                    if country.upper() == best_country.upper():
+                        filtered.append(loc_data)
+                        break
+                else:
+                    # 못 찾으면 첫 번째 국가 사용
+                    filtered.append(country_list[0][1])
+
+        return filtered
 
     def process_sitemap_file(self, sitemap_url: str) -> int:
         """개별 sitemap 파일을 처리합니다. 새로 추가된 로컬라이제이션 수를 반환."""
@@ -78,8 +121,8 @@ class AppStoreSitemapCollector:
             self.log(f"No entries found in: {filename}")
             return 0
 
-        # 로컬라이제이션 정보 추출
-        localizations = []
+        # 1단계: 모든 로컬라이제이션 정보 추출 (필터링 전)
+        raw_localizations = []
         for entry in url_entries:
             for hreflang_info in entry.get('hreflangs', []):
                 hreflang = hreflang_info.get('hreflang', '')
@@ -98,14 +141,18 @@ class AppStoreSitemapCollector:
                 if not language or not country:
                     continue
 
-                localizations.append({
+                raw_localizations.append({
                     'platform': PLATFORM,
                     'app_id': app_id,
                     'language': language,
                     'country': country,
-                    'href': href,
+                    'href': '',  # href 제거 (불필요, URL 재구성 가능)
                     'source_file': filename
                 })
+
+        # 2단계: 언어당 최적 국가 1개만 필터링
+        localizations = self._filter_best_country_per_language(raw_localizations)
+        filtered_out = len(raw_localizations) - len(localizations)
 
         # DB에 저장
         new_count = upsert_app_localizations_batch(localizations)
@@ -116,8 +163,10 @@ class AppStoreSitemapCollector:
         self.stats['sitemap_files_processed'] += 1
         self.stats['new_localizations'] += new_count
         self.stats['total_localizations'] += len(localizations)
+        self.stats['raw_localizations'] += len(raw_localizations)
+        self.stats['filtered_out'] += filtered_out
 
-        self.log(f"Processed {filename}: {len(localizations)} localizations ({new_count} new)")
+        self.log(f"Processed {filename}: {len(raw_localizations)} raw -> {len(localizations)} filtered ({new_count} new)")
         return new_count
 
     def collect_all(self) -> Dict[str, Any]:
