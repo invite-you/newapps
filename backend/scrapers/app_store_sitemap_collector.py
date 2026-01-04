@@ -146,7 +146,6 @@ class AppStoreSitemapCollector:
                     'app_id': app_id,
                     'language': language,
                     'country': country,
-                    'href': '',  # href 제거 (불필요, URL 재구성 가능)
                     'source_file': filename
                 })
 
