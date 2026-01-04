@@ -1,0 +1,332 @@
+{
+  "test_date": "2026-01-04T05:01:23.089689",
+  "review_count_target": 100,
+  "results": [
+    {
+      "app": {
+        "id": "333903271",
+        "name": "Twitter/X",
+        "country": "us"
+      },
+      "rss": {
+        "count": 0,
+        "time_seconds": 1.086540699005127,
+        "requests": 1,
+        "errors": 1
+      },
+      "scraper": {
+        "count": 0,
+        "time_seconds": 9.228310585021973,
+        "errors": 0
+      },
+      "field_comparison": {
+        "review_id": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "user_name": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "user_image": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "score": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "title": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "content": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "thumbs_up_count": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "app_version": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "reviewed_at": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "developer_reply": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "developer_reply_date": {
+          "rss": "❌",
+          "scraper": "❌"
+        }
+      }
+    },
+    {
+      "app": {
+        "id": "310633997",
+        "name": "WhatsApp",
+        "country": "us"
+      },
+      "rss": {
+        "count": 100,
+        "time_seconds": 1.1885881423950195,
+        "requests": 3,
+        "errors": 0
+      },
+      "scraper": {
+        "count": 0,
+        "time_seconds": 1.0024909973144531,
+        "errors": 0
+      },
+      "field_comparison": {
+        "review_id": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "user_name": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "user_image": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "score": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "title": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "content": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "thumbs_up_count": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "app_version": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "reviewed_at": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "developer_reply": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "developer_reply_date": {
+          "rss": "❌",
+          "scraper": "❌"
+        }
+      }
+    },
+    {
+      "app": {
+        "id": "284882215",
+        "name": "Facebook",
+        "country": "us"
+      },
+      "rss": {
+        "count": 100,
+        "time_seconds": 1.6028141975402832,
+        "requests": 3,
+        "errors": 0
+      },
+      "scraper": {
+        "count": 0,
+        "time_seconds": 0.4576406478881836,
+        "errors": 0
+      },
+      "field_comparison": {
+        "review_id": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "user_name": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "user_image": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "score": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "title": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "content": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "thumbs_up_count": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "app_version": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "reviewed_at": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "developer_reply": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "developer_reply_date": {
+          "rss": "❌",
+          "scraper": "❌"
+        }
+      }
+    },
+    {
+      "app": {
+        "id": "389801252",
+        "name": "Instagram",
+        "country": "us"
+      },
+      "rss": {
+        "count": 100,
+        "time_seconds": 1.815300464630127,
+        "requests": 3,
+        "errors": 0
+      },
+      "scraper": {
+        "count": 0,
+        "time_seconds": 0.7569215297698975,
+        "errors": 0
+      },
+      "field_comparison": {
+        "review_id": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "user_name": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "user_image": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "score": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "title": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "content": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "thumbs_up_count": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "app_version": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "reviewed_at": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "developer_reply": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "developer_reply_date": {
+          "rss": "❌",
+          "scraper": "❌"
+        }
+      }
+    },
+    {
+      "app": {
+        "id": "544007664",
+        "name": "YouTube",
+        "country": "us"
+      },
+      "rss": {
+        "count": 100,
+        "time_seconds": 1.0736000537872314,
+        "requests": 3,
+        "errors": 0
+      },
+      "scraper": {
+        "count": 0,
+        "time_seconds": 0.8313510417938232,
+        "errors": 0
+      },
+      "field_comparison": {
+        "review_id": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "user_name": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "user_image": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "score": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "title": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "content": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "thumbs_up_count": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "app_version": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "reviewed_at": {
+          "rss": "✅",
+          "scraper": "❌"
+        },
+        "developer_reply": {
+          "rss": "❌",
+          "scraper": "❌"
+        },
+        "developer_reply_date": {
+          "rss": "❌",
+          "scraper": "❌"
+        }
+      }
+    }
+  ],
+  "summary": {
+    "total_rss_time": 6.766843557357788,
+    "total_scraper_time": 12.27671480178833,
+    "total_rss_reviews": 400,
+    "total_scraper_reviews": 0
+  }
+}
