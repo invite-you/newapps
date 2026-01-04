@@ -15,7 +15,8 @@ from google_play_scraper.exceptions import NotFoundError
 
 from database.app_details_db import (
     init_database, insert_app, insert_app_localized, insert_app_metrics,
-    is_failed_app, mark_app_failed, update_collection_status
+    is_failed_app, mark_app_failed, update_collection_status,
+    get_apps_needing_update, ABANDONED_THRESHOLD_DAYS
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
 from config.language_country_priority import (
@@ -242,19 +243,35 @@ class PlayStoreDetailsCollector:
 
 
 def get_apps_to_collect(limit: int = 1000) -> List[str]:
-    """수집할 앱 ID 목록을 가져옵니다 (최근 발견 순)."""
+    """수집할 앱 ID 목록을 가져옵니다.
+
+    수집 우선순위:
+    1. 신규 앱 (한 번도 수집되지 않은 앱) - 즉시 수집
+    2. 활성 앱 (2년 이내 업데이트) - 매일 수집 (24시간 경과 시)
+    3. 버려진 앱 (2년 이상 업데이트 안 됨) - 7일에 1번 수집
+
+    기준 출처:
+    - Pixalate: 2년 이상 업데이트 안 됨 = Abandoned
+    - Google Play: 2년 이상 업데이트 안 됨 = 검색 제외/제거
+    - Apple: 3년 이상 + 다운로드 극소 = 제거 대상
+    """
     from database.app_details_db import get_connection as get_details_connection
 
-    # 1. 이미 수집된 앱 ID 가져오기
+    # 1. 기존에 수집된 앱 중 업데이트가 필요한 앱 가져오기
+    apps_needing_update, skip_ids = get_apps_needing_update(PLATFORM, limit)
+
+    # 2. 신규 앱 (아직 수집되지 않은 앱) 가져오기
     details_conn = get_details_connection()
     cursor = details_conn.cursor()
 
+    # 이미 수집된 모든 앱 ID
     cursor.execute("""
         SELECT app_id FROM collection_status
         WHERE platform = 'play_store' AND details_collected_at IS NOT NULL
     """)
     collected_ids = {row['app_id'] for row in cursor.fetchall()}
 
+    # 실패한 앱 ID
     cursor.execute("""
         SELECT app_id FROM failed_apps WHERE platform = 'play_store'
     """)
@@ -262,9 +279,10 @@ def get_apps_to_collect(limit: int = 1000) -> List[str]:
 
     details_conn.close()
 
-    exclude_ids = collected_ids | failed_ids
+    # 신규 앱은 collected_ids에 없는 앱
+    exclude_from_new = collected_ids | failed_ids
 
-    # 2. sitemap에서 수집할 앱 목록 가져오기
+    # 3. sitemap에서 신규 앱 목록 가져오기
     sitemap_conn = get_sitemap_connection()
     cursor = sitemap_conn.cursor()
 
@@ -275,15 +293,36 @@ def get_apps_to_collect(limit: int = 1000) -> List[str]:
         ORDER BY first_seen_at DESC
     """)
 
-    app_ids = []
+    new_app_ids = []
     for row in cursor.fetchall():
-        if row['app_id'] not in exclude_ids:
-            app_ids.append(row['app_id'])
-            if len(app_ids) >= limit:
-                break
+        if row['app_id'] not in exclude_from_new:
+            new_app_ids.append(row['app_id'])
 
     sitemap_conn.close()
-    return app_ids
+
+    # 4. 신규 앱 + 업데이트 필요 앱 합치기 (신규 앱 우선)
+    # 중복 제거하면서 순서 유지
+    result = []
+    seen = set()
+
+    # 신규 앱 먼저
+    for app_id in new_app_ids:
+        if app_id not in seen:
+            result.append(app_id)
+            seen.add(app_id)
+            if len(result) >= limit:
+                break
+
+    # 업데이트 필요한 기존 앱
+    if len(result) < limit:
+        for app_id in apps_needing_update:
+            if app_id not in seen:
+                result.append(app_id)
+                seen.add(app_id)
+                if len(result) >= limit:
+                    break
+
+    return result
 
 
 def main():

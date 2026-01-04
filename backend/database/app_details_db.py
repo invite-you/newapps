@@ -543,6 +543,151 @@ def get_all_review_ids(app_id: str, platform: str) -> set:
     return ids
 
 
+# ============================================================
+# 버려진 앱 기준 (업계 표준 및 공식 정책 기반)
+# - Pixalate: 2년 이상 업데이트 안 됨 = Abandoned
+# - Google Play: 2년 이상 업데이트 안 됨 = 검색 제외/제거
+# - Apple: 3년 이상 + 다운로드 극소 = 제거 대상
+# 보수적으로 2년 기준 채택
+# ============================================================
+ABANDONED_THRESHOLD_DAYS = 730  # 2년 = 730일
+
+
+def is_abandoned_app(app_id: str, platform: str) -> bool:
+    """앱이 버려진 앱인지 확인합니다.
+
+    기준: 마지막 업데이트(updated_date)가 2년 이상 경과한 앱
+         업데이트 이력이 없으면 릴리즈 날짜(release_date) 기준
+
+    Returns:
+        True: 버려진 앱 (2년 이상 업데이트 안 됨)
+        False: 활성 앱 또는 정보 없음
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT updated_date, release_date FROM apps
+        WHERE app_id = ? AND platform = ?
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """, (app_id, platform))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return False  # 정보 없으면 활성으로 간주 (새로 수집할 앱)
+
+    # updated_date 우선, 없으면 release_date 사용
+    date_str = row['updated_date'] or row['release_date']
+    if not date_str:
+        return False  # 날짜 정보 없으면 활성으로 간주
+
+    try:
+        # 날짜 형식: "2024-01-15T10:30:00Z" 또는 "2024-01-15"
+        if 'T' in date_str:
+            ref_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        else:
+            ref_date = datetime.fromisoformat(date_str)
+
+        # timezone-naive로 변환하여 비교
+        if ref_date.tzinfo is not None:
+            ref_date = ref_date.replace(tzinfo=None)
+
+        days_since = (datetime.now() - ref_date).days
+        return days_since >= ABANDONED_THRESHOLD_DAYS
+    except (ValueError, TypeError):
+        return False  # 파싱 실패 시 활성으로 간주
+
+
+def get_apps_needing_update(platform: str, limit: int = 1000) -> Tuple[List[str], set]:
+    """업데이트가 필요한 앱 ID 목록을 반환합니다.
+
+    수집 주기:
+    - 신규 앱 (수집 이력 없음): 즉시 수집
+    - 활성 앱 (2년 이내 업데이트): 매일 수집
+    - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
+
+    Returns:
+        (수집이 필요한 앱 ID 리스트, 제외된 앱 ID set)
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 실패한 앱 목록 (SQL에서 제외하고, 반환값에도 포함)
+    cursor.execute("""
+        SELECT app_id FROM failed_apps WHERE platform = ?
+    """, (platform,))
+    failed_ids = {row['app_id'] for row in cursor.fetchall()}
+
+    # 이미 수집된 앱 중 업데이트 주기가 지난 앱 확인
+    # failed_apps는 SQL 단계에서 제외하여 불필요한 처리 방지
+    cursor.execute("""
+        SELECT cs.app_id, cs.details_collected_at, a.updated_date, a.release_date
+        FROM collection_status cs
+        LEFT JOIN (
+            SELECT app_id, platform, updated_date, release_date,
+                   ROW_NUMBER() OVER (PARTITION BY app_id, platform ORDER BY recorded_at DESC) as rn
+            FROM apps
+        ) a ON cs.app_id = a.app_id AND cs.platform = a.platform AND a.rn = 1
+        WHERE cs.platform = ?
+          AND cs.details_collected_at IS NOT NULL
+          AND cs.app_id NOT IN (SELECT app_id FROM failed_apps WHERE platform = ?)
+    """, (platform, platform))
+
+    needs_update = []
+    skip_ids = set()
+
+    for row in cursor.fetchall():
+        app_id = row['app_id']
+        collected_at_str = row['details_collected_at']
+        # updated_date 우선, 없으면 release_date 사용
+        ref_date_str = row['updated_date'] or row['release_date']
+
+        try:
+            collected_at = datetime.fromisoformat(collected_at_str)
+            hours_since_collection = (datetime.now() - collected_at).total_seconds() / 3600
+
+            # 버려진 앱 여부 판단
+            is_abandoned = False
+            if ref_date_str:
+                try:
+                    if 'T' in ref_date_str:
+                        ref_date = datetime.fromisoformat(ref_date_str.replace('Z', '+00:00'))
+                    else:
+                        ref_date = datetime.fromisoformat(ref_date_str)
+                    if ref_date.tzinfo is not None:
+                        ref_date = ref_date.replace(tzinfo=None)
+                    days_since = (datetime.now() - ref_date).days
+                    is_abandoned = days_since >= ABANDONED_THRESHOLD_DAYS
+                except (ValueError, TypeError):
+                    pass
+
+            # 수집 주기 결정
+            if is_abandoned:
+                # 버려진 앱: 7일(168시간)에 1번
+                if hours_since_collection >= 168:
+                    needs_update.append(app_id)
+                else:
+                    skip_ids.add(app_id)
+            else:
+                # 활성 앱: 매일(24시간)에 1번
+                if hours_since_collection >= 24:
+                    needs_update.append(app_id)
+                else:
+                    skip_ids.add(app_id)
+        except (ValueError, TypeError):
+            # 파싱 실패 시 재수집 대상
+            needs_update.append(app_id)
+
+    conn.close()
+
+    # 아직 수집 안 된 신규 앱은 별도로 처리해야 함
+    # 이 함수는 기존에 수집된 앱 중 업데이트 필요한 것만 반환
+    return needs_update[:limit], skip_ids | failed_ids
+
+
 def get_stats() -> Dict[str, Any]:
     """DB 통계를 반환합니다."""
     conn = get_connection()
