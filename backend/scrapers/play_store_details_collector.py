@@ -87,6 +87,7 @@ class PlayStoreDetailsCollector:
             'has_iap': 1 if data.get('offersIAP') else 0,
             'category_id': data.get('genreId'),
             'genre_id': data.get('genreId'),
+            'genre_name': data.get('genre'),
             'content_rating': data.get('contentRating'),
             'content_rating_description': data.get('contentRatingDescription'),
             'min_os_version': None,  # Play Store API에서 직접 제공 안 함
@@ -106,8 +107,7 @@ class PlayStoreDetailsCollector:
             'title': data.get('title'),
             'summary': data.get('summary'),
             'description': data.get('description'),
-            'release_notes': data.get('recentChanges'),
-            'genre_name': data.get('genre')
+            'release_notes': data.get('recentChanges')
         }
 
     def parse_app_metrics(self, data: Dict, app_id: str) -> Dict:
@@ -185,10 +185,16 @@ class PlayStoreDetailsCollector:
         insert_app_metrics(metrics)
 
         # 다국어 데이터 수집 - 우선순위 기반 최적화된 쌍 사용
-        # 이제 각 언어별로 최적의 국가가 이미 선택됨
-        # (예: 프랑스어는 FR, 스페인어는 MX, 포르투갈어는 BR)
+        # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
         languages_collected = set()
         fetched_pairs = {primary_pair: data}  # 이미 가져온 데이터 캐시
+
+        # 기준 언어 데이터 먼저 저장
+        base_localized = self.parse_app_localized(data, app_id, primary_pair[0])
+        base_title = base_localized.get('title')
+        base_description = base_localized.get('description')
+        insert_app_localized(base_localized)
+        languages_collected.add(primary_pair[0])
 
         for lang, country in optimized_pairs:
             if lang in languages_collected:
@@ -204,7 +210,9 @@ class PlayStoreDetailsCollector:
 
             if pair_data:
                 localized = self.parse_app_localized(pair_data, app_id, lang)
-                insert_app_localized(localized)
+                # 중복 체크: title과 description이 기준 언어와 다를 때만 저장
+                if localized.get('title') != base_title or localized.get('description') != base_description:
+                    insert_app_localized(localized)
                 languages_collected.add(lang)
 
         # 수집 상태 업데이트
