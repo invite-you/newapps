@@ -18,6 +18,11 @@ from database.app_details_db import (
     is_failed_app, mark_app_failed, update_collection_status
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from config.language_country_priority import (
+    select_best_pairs_for_collection,
+    get_primary_country,
+    PRIORITY_LANGUAGES
+)
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
@@ -131,24 +136,34 @@ class PlayStoreDetailsCollector:
         if not pairs:
             pairs = [('en', 'us')]
 
-        # 기본 정보 수집용 (language, country) 결정
+        # 우선순위에 따라 최적의 (language, country) 쌍 선택
+        # 각 언어당 가장 적합한 국가를 선택 (예: fr-FR > fr-CA)
+        optimized_pairs = select_best_pairs_for_collection(pairs, max_languages=10)
+
+        # 기본 정보 수집용 쌍 결정 (영어 US 우선)
         primary_pair = None
-        for lang, country in pairs:
-            if lang == 'en':
+        for lang, country in optimized_pairs:
+            if lang == 'en' and country.upper() == 'US':
                 primary_pair = (lang, country)
                 break
         if not primary_pair:
-            primary_pair = pairs[0]
+            for lang, country in optimized_pairs:
+                if lang == 'en':
+                    primary_pair = (lang, country)
+                    break
+        if not primary_pair:
+            primary_pair = optimized_pairs[0] if optimized_pairs else ('en', 'us')
 
         primary_lang, primary_country = primary_pair
-        data = self.fetch_app_info(app_id, lang=primary_lang, country=primary_country)
+        data = self.fetch_app_info(app_id, lang=primary_lang, country=primary_country.lower())
 
         if not data:
-            # 다른 쌍으로 재시도
-            for lang, country in pairs:
+            # 다른 쌍으로 재시도 (우선순위 순서대로)
+            for lang, country in optimized_pairs:
                 if (lang, country) != primary_pair:
-                    data = self.fetch_app_info(app_id, lang=lang, country=country)
+                    data = self.fetch_app_info(app_id, lang=lang, country=country.lower())
                     if data:
+                        primary_pair = (lang, country)
                         break
                     time.sleep(REQUEST_DELAY)
 
@@ -169,14 +184,13 @@ class PlayStoreDetailsCollector:
         metrics = self.parse_app_metrics(data, app_id)
         insert_app_metrics(metrics)
 
-        # 다국어 데이터 수집 - sitemap의 (language, country) 쌍 사용
+        # 다국어 데이터 수집 - 우선순위 기반 최적화된 쌍 사용
+        # 이제 각 언어별로 최적의 국가가 이미 선택됨
+        # (예: 프랑스어는 FR, 스페인어는 MX, 포르투갈어는 BR)
         languages_collected = set()
         fetched_pairs = {primary_pair: data}  # 이미 가져온 데이터 캐시
 
-        for lang, country in pairs:
-            if len(languages_collected) >= 10:  # 최대 10개 언어
-                break
-
+        for lang, country in optimized_pairs:
             if lang in languages_collected:
                 continue
 
@@ -184,7 +198,7 @@ class PlayStoreDetailsCollector:
             if (lang, country) in fetched_pairs:
                 pair_data = fetched_pairs[(lang, country)]
             else:
-                pair_data = self.fetch_app_info(app_id, lang=lang, country=country)
+                pair_data = self.fetch_app_info(app_id, lang=lang, country=country.lower())
                 fetched_pairs[(lang, country)] = pair_data
                 time.sleep(REQUEST_DELAY)
 
