@@ -1,6 +1,8 @@
 """
 Sitemap Apps Database
 앱 스토어 sitemap에서 수집한 앱 로컬라이제이션 정보를 저장하는 DB
+
+최적화: href 필드 제거 (불필요 - URL은 app_id/country로 재구성 가능)
 """
 import sqlite3
 import os
@@ -40,6 +42,7 @@ def init_database():
     """)
 
     # app_localizations: 앱 ID + language + country 별 정보 저장
+    # 최적화: href 필드 제거 (URL은 platform/country/app_id로 재구성 가능)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_localizations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,7 +50,6 @@ def init_database():
             app_id TEXT NOT NULL,             -- 앱 ID (App Store: 숫자, Play Store: 패키지명)
             language TEXT NOT NULL,           -- 언어 코드 (ko, en, ja 등)
             country TEXT NOT NULL,            -- 국가 코드 (kr, us, jp 등)
-            href TEXT NOT NULL,               -- 해당 로컬라이제이션의 URL
             source_file TEXT NOT NULL,        -- 수집된 sitemap 파일명
             first_seen_at TEXT DEFAULT (datetime('now')),  -- 처음 발견 시각
             last_seen_at TEXT DEFAULT (datetime('now')),   -- 마지막 발견 시각
@@ -99,7 +101,7 @@ def update_sitemap_file(platform: str, file_url: str, md5_hash: str, app_count: 
 
 
 def upsert_app_localization(platform: str, app_id: str, language: str, country: str,
-                            href: str, source_file: str) -> bool:
+                            source_file: str) -> bool:
     """앱 로컬라이제이션 정보를 추가하거나 업데이트합니다. 새로 추가된 경우 True 반환."""
     conn = get_connection()
     cursor = conn.cursor()
@@ -116,16 +118,16 @@ def upsert_app_localization(platform: str, app_id: str, language: str, country: 
         # 기존 레코드 업데이트
         cursor.execute("""
             UPDATE app_localizations
-            SET href = ?, source_file = ?, last_seen_at = ?
+            SET source_file = ?, last_seen_at = ?
             WHERE platform = ? AND app_id = ? AND language = ? AND country = ?
-        """, (href, source_file, now, platform, app_id, language, country))
+        """, (source_file, now, platform, app_id, language, country))
         is_new = False
     else:
         # 새 레코드 추가
         cursor.execute("""
-            INSERT INTO app_localizations (platform, app_id, language, country, href, source_file, first_seen_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (platform, app_id, language, country, href, source_file, now, now))
+            INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (platform, app_id, language, country, source_file, now, now))
         is_new = True
 
     conn.commit()
@@ -154,16 +156,16 @@ def upsert_app_localizations_batch(localizations: List[Dict[str, Any]]) -> int:
         if existing:
             cursor.execute("""
                 UPDATE app_localizations
-                SET href = ?, source_file = ?, last_seen_at = ?
+                SET source_file = ?, last_seen_at = ?
                 WHERE platform = ? AND app_id = ? AND language = ? AND country = ?
-            """, (loc['href'], loc['source_file'], now,
+            """, (loc['source_file'], now,
                   loc['platform'], loc['app_id'], loc['language'], loc['country']))
         else:
             cursor.execute("""
-                INSERT INTO app_localizations (platform, app_id, language, country, href, source_file, first_seen_at, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (loc['platform'], loc['app_id'], loc['language'], loc['country'],
-                  loc['href'], loc['source_file'], now, now))
+                  loc['source_file'], now, now))
             new_count += 1
 
     conn.commit()
