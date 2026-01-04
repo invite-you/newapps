@@ -74,6 +74,32 @@ class AppStoreDetailsCollector:
 
     def parse_app_metadata(self, data: Dict, app_id: str) -> Dict:
         """API 응답을 apps 테이블 형식으로 변환합니다."""
+        features = data.get('features') or []
+        has_iap_feature = False
+        if isinstance(features, list):
+            has_iap_feature = any(
+                isinstance(feature, str) and feature.lower() == 'in-app purchases'
+                for feature in features
+            )
+
+        in_app_purchases = data.get('inAppPurchases')
+        if isinstance(in_app_purchases, list):
+            has_in_app_purchases_value = len(in_app_purchases) > 0
+        else:
+            has_in_app_purchases_value = bool(in_app_purchases)
+
+        has_in_app_purchases_flag = data.get('hasInAppPurchases')
+        if isinstance(has_in_app_purchases_flag, list):
+            has_in_app_purchases_flag_value = len(has_in_app_purchases_flag) > 0
+        else:
+            has_in_app_purchases_flag_value = bool(has_in_app_purchases_flag)
+
+        has_iap = 1 if any([
+            has_iap_feature,
+            has_in_app_purchases_value,
+            has_in_app_purchases_flag_value
+        ]) else 0
+
         return {
             'app_id': app_id,
             'platform': PLATFORM,
@@ -89,7 +115,7 @@ class AppStoreDetailsCollector:
             'price': data.get('price', 0),
             'currency': data.get('currency'),
             'free': 1 if data.get('price', 0) == 0 else 0,
-            'has_iap': 1 if data.get('isGameCenterEnabled') else 0,  # 근사값
+            'has_iap': has_iap,
             'category_id': str(data.get('primaryGenreId', '')),
             'genre_id': str(data.get('primaryGenreId', '')),
             'content_rating': data.get('contentAdvisoryRating'),
