@@ -18,6 +18,7 @@ from database.app_details_db import (
     is_failed_app
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from utils.timestamp import normalize_timestamp
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
@@ -89,9 +90,9 @@ class PlayStoreReviewsCollector:
             'content': data.get('content', ''),
             'thumbs_up_count': data.get('thumbsUpCount', 0),
             'app_version': data.get('reviewCreatedVersion'),
-            'reviewed_at': reviewed_at.isoformat() if reviewed_at else None,
+            'reviewed_at': normalize_timestamp(reviewed_at),
             'reply_content': data.get('replyContent'),
-            'replied_at': replied_at.isoformat() if replied_at else None
+            'replied_at': normalize_timestamp(replied_at)
         }
 
     def collect_reviews_for_pair(self, app_id: str, lang: str, country: str, quota: int,

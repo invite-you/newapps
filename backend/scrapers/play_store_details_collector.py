@@ -23,6 +23,7 @@ from config.language_country_priority import (
     get_primary_country,
     PRIORITY_LANGUAGES
 )
+from utils.timestamp import normalize_timestamp
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
@@ -93,8 +94,8 @@ class PlayStoreDetailsCollector:
             'min_os_version': None,  # Play Store API에서 직접 제공 안 함
             'file_size': None,
             'supported_devices': None,
-            'release_date': data.get('released'),
-            'updated_date': data.get('lastUpdatedOn'),
+            'release_date': normalize_timestamp(data.get('released')),
+            'updated_date': normalize_timestamp(data.get('lastUpdatedOn')),
             'privacy_policy_url': data.get('privacyPolicy')
         }
 
