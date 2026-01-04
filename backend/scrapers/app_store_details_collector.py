@@ -16,6 +16,11 @@ from database.app_details_db import (
     is_failed_app, mark_app_failed, update_collection_status
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from config.language_country_priority import (
+    select_best_pairs_for_collection,
+    get_primary_country,
+    PRIORITY_LANGUAGES
+)
 
 PLATFORM = 'app_store'
 API_BASE_URL = 'https://itunes.apple.com/lookup'
@@ -136,19 +141,30 @@ class AppStoreDetailsCollector:
         if not pairs:
             pairs = [('en', 'US')]  # 기본값
 
-        # 국가 목록 추출
-        countries = list({country for _, country in pairs})
+        # 우선순위에 따라 최적의 (language, country) 쌍 선택
+        # 각 언어당 가장 적합한 국가를 선택 (예: fr-FR > fr-CA)
+        optimized_pairs = select_best_pairs_for_collection(pairs, max_languages=10)
 
-        # 첫 번째 국가로 기본 정보 수집
-        primary_country = 'US' if 'US' in countries else countries[0]
+        # 기본 정보 수집용 국가 결정 (US 우선)
+        primary_country = 'US'
+        for lang, country in optimized_pairs:
+            if country.upper() == 'US':
+                primary_country = 'US'
+                break
+        else:
+            # US가 없으면 첫 번째 최적화된 쌍의 국가 사용
+            if optimized_pairs:
+                primary_country = optimized_pairs[0][1].upper()
+
         data = self.fetch_app_info(app_id, primary_country)
 
         if not data:
-            # 다른 국가로 재시도
-            for country in countries:
-                if country != primary_country:
-                    data = self.fetch_app_info(app_id, country)
+            # 다른 국가로 재시도 (우선순위 순서대로)
+            for lang, country in optimized_pairs:
+                if country.upper() != primary_country:
+                    data = self.fetch_app_info(app_id, country.upper())
                     if data:
+                        primary_country = country.upper()
                         break
                     time.sleep(REQUEST_DELAY)
 
@@ -169,23 +185,24 @@ class AppStoreDetailsCollector:
         metrics = self.parse_app_metrics(data, app_id)
         insert_app_metrics(metrics)
 
-        # 다국어 데이터 수집 - sitemap의 (language, country) 쌍 사용
+        # 다국어 데이터 수집 - 우선순위 기반 최적화된 쌍 사용
+        # 이제 각 언어별로 최적의 국가가 이미 선택됨
+        # (예: 프랑스어는 FR, 스페인어는 MX, 포르투갈어는 BR)
         languages_collected = set()
         fetched_countries = {primary_country: data}  # 이미 가져온 데이터 캐시
 
-        for language, country in pairs:
-            if len(languages_collected) >= 10:  # 최대 10개 언어
-                break
-
+        for language, country in optimized_pairs:
             if language in languages_collected:
                 continue
 
+            country_upper = country.upper()
+
             # 해당 국가의 데이터 가져오기 (캐시 활용)
-            if country in fetched_countries:
-                country_data = fetched_countries[country]
+            if country_upper in fetched_countries:
+                country_data = fetched_countries[country_upper]
             else:
-                country_data = self.fetch_app_info(app_id, country)
-                fetched_countries[country] = country_data
+                country_data = self.fetch_app_info(app_id, country_upper)
+                fetched_countries[country_upper] = country_data
                 time.sleep(REQUEST_DELAY)
 
             if country_data:

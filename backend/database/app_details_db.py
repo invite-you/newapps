@@ -182,6 +182,16 @@ def normalize_json_field(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def normalize_value_for_comparison(value):
+    """비교를 위해 값을 정규화합니다."""
+    if value is None:
+        return None
+    # 숫자 타입은 float로 통일하여 비교 (0 == 0.0)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value
+
+
 def compare_records(existing: Dict, new_data: Dict, exclude_fields: set = None) -> bool:
     """두 레코드를 비교합니다. 동일하면 True, 다르면 False."""
     if exclude_fields is None:
@@ -202,7 +212,15 @@ def compare_records(existing: Dict, new_data: Dict, exclude_fields: set = None) 
         if existing_value in (None, '', 'null') and new_value in (None, '', 'null'):
             continue
 
-        if str(existing_value) != str(new_value):
+        # 숫자 타입 정규화 (int/float 간 비교 문제 해결)
+        existing_normalized = normalize_value_for_comparison(existing_value)
+        new_normalized = normalize_value_for_comparison(new_value)
+
+        # 둘 다 숫자면 직접 비교, 아니면 문자열 비교
+        if isinstance(existing_normalized, float) and isinstance(new_normalized, float):
+            if existing_normalized != new_normalized:
+                return False
+        elif str(existing_value) != str(new_value):
             return False
 
     return True

@@ -1,0 +1,61 @@
+{
+  "iterations": 37,
+  "sitemap": {
+    "app_store": {
+      "files_processed": 1,
+      "files_skipped": 3,
+      "new_localizations": 8558,
+      "errors": 0
+    },
+    "play_store": {
+      "files_processed": 1,
+      "files_skipped": 3,
+      "new_localizations": 9448,
+      "errors": 0
+    }
+  },
+  "details": {
+    "app_store": {
+      "processed": 99,
+      "success": 99,
+      "not_found": 12,
+      "skipped": 0,
+      "errors": 0
+    },
+    "play_store": {
+      "processed": 38,
+      "success": 38,
+      "not_found": 14,
+      "skipped": 0,
+      "errors": 0
+    }
+  },
+  "reviews": {
+    "app_store": {
+      "apps_processed": 23,
+      "reviews_collected": 779,
+      "errors": 14
+    },
+    "play_store": {
+      "apps_processed": 37,
+      "reviews_collected": 329,
+      "errors": 0
+    }
+  },
+  "time_series": {
+    "unchanged_skipped": 0,
+    "changed_recorded": 137
+  },
+  "new_app_discovery": {
+    "total_new_apps": 24,
+    "by_platform": {
+      "app_store": 0,
+      "play_store": 0
+    }
+  },
+  "encoding": {
+    "korean_samples": 17,
+    "encoding_errors": 0
+  },
+  "errors": []
+}
