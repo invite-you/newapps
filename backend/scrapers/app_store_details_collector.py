@@ -100,6 +100,9 @@ class AppStoreDetailsCollector:
             has_in_app_purchases_flag_value
         ]) else 0
 
+        genres = data.get('genres', [])
+        genre_name = genres[0] if genres else data.get('primaryGenreName')
+
         return {
             'app_id': app_id,
             'platform': PLATFORM,
@@ -118,6 +121,7 @@ class AppStoreDetailsCollector:
             'has_iap': has_iap,
             'category_id': str(data.get('primaryGenreId', '')),
             'genre_id': str(data.get('primaryGenreId', '')),
+            'genre_name': genre_name,
             'content_rating': data.get('contentAdvisoryRating'),
             'content_rating_description': data.get('trackContentRating'),
             'min_os_version': data.get('minimumOsVersion'),
@@ -130,7 +134,6 @@ class AppStoreDetailsCollector:
 
     def parse_app_localized(self, data: Dict, app_id: str, language: str) -> Dict:
         """API 응답을 apps_localized 테이블 형식으로 변환합니다."""
-        genres = data.get('genres', [])
         return {
             'app_id': app_id,
             'platform': PLATFORM,
@@ -138,8 +141,7 @@ class AppStoreDetailsCollector:
             'title': data.get('trackName'),
             'summary': None,  # App Store에는 summary 없음
             'description': data.get('description'),
-            'release_notes': data.get('releaseNotes'),
-            'genre_name': genres[0] if genres else data.get('primaryGenreName')
+            'release_notes': data.get('releaseNotes')
         }
 
     def parse_app_metrics(self, data: Dict, app_id: str) -> Dict:
@@ -212,10 +214,16 @@ class AppStoreDetailsCollector:
         insert_app_metrics(metrics)
 
         # 다국어 데이터 수집 - 우선순위 기반 최적화된 쌍 사용
-        # 이제 각 언어별로 최적의 국가가 이미 선택됨
-        # (예: 프랑스어는 FR, 스페인어는 MX, 포르투갈어는 BR)
+        # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
         languages_collected = set()
         fetched_countries = {primary_country: data}  # 이미 가져온 데이터 캐시
+
+        # 기준 언어 데이터 먼저 저장
+        base_localized = self.parse_app_localized(data, app_id, optimized_pairs[0][0] if optimized_pairs else 'en')
+        base_title = base_localized.get('title')
+        base_description = base_localized.get('description')
+        insert_app_localized(base_localized)
+        languages_collected.add(base_localized['language'])
 
         for language, country in optimized_pairs:
             if language in languages_collected:
@@ -233,7 +241,9 @@ class AppStoreDetailsCollector:
 
             if country_data:
                 localized = self.parse_app_localized(country_data, app_id, language)
-                insert_app_localized(localized)
+                # 중복 체크: title과 description이 기준 언어와 다를 때만 저장
+                if localized.get('title') != base_title or localized.get('description') != base_description:
+                    insert_app_localized(localized)
                 languages_collected.add(language)
 
         # 수집 상태 업데이트

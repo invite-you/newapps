@@ -51,6 +51,7 @@ def init_database():
             has_iap INTEGER,                    -- boolean
             category_id TEXT,
             genre_id TEXT,
+            genre_name TEXT,                    -- 장르명 (현지화)
             content_rating TEXT,
             content_rating_description TEXT,
             min_os_version TEXT,
@@ -64,6 +65,7 @@ def init_database():
     """)
 
     # apps_localized: 다국어 텍스트 (변경 시에만 누적)
+    # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apps_localized (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +76,6 @@ def init_database():
             summary TEXT,
             description TEXT,
             release_notes TEXT,
-            genre_name TEXT,
             recorded_at TEXT NOT NULL
         )
     """)
