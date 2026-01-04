@@ -7,6 +7,7 @@ import os
 import time
 import requests
 import json
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,6 +27,32 @@ from config.language_country_priority import (
 PLATFORM = 'app_store'
 API_BASE_URL = 'https://itunes.apple.com/lookup'
 REQUEST_DELAY = 0.01  # 10ms
+
+
+def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
+    """날짜 문자열을 ISO 8601 형식 (YYYY-MM-DDTHH:MM:SS.ffffff)으로 변환합니다.
+
+    App Store API 날짜 형식: "2024-01-15T10:30:00Z"
+    목표 형식: "2024-01-15T10:30:00.000000"
+    """
+    if not date_str:
+        return None
+
+    try:
+        # Z로 끝나는 UTC 시간 형식 처리
+        if date_str.endswith('Z'):
+            dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            # timezone-naive로 변환
+            dt = dt.replace(tzinfo=None)
+        else:
+            dt = datetime.fromisoformat(date_str)
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+
+        # microseconds가 없으면 추가
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        return date_str  # 파싱 실패 시 원본 반환
 
 
 class AppStoreDetailsCollector:
@@ -128,8 +155,8 @@ class AppStoreDetailsCollector:
             'min_os_version': data.get('minimumOsVersion'),
             'file_size': int(data.get('fileSizeBytes', 0)) if data.get('fileSizeBytes') else None,
             'supported_devices': json.dumps(data.get('supportedDevices', [])[:20], ensure_ascii=False),  # 최대 20개
-            'release_date': data.get('releaseDate'),
-            'updated_date': data.get('currentVersionReleaseDate'),
+            'release_date': normalize_date_format(data.get('releaseDate')),
+            'updated_date': normalize_date_format(data.get('currentVersionReleaseDate')),
             'privacy_policy_url': None
         }
 

@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import json
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +28,47 @@ from config.language_country_priority import (
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
+
+
+def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
+    """날짜 문자열을 ISO 8601 형식 (YYYY-MM-DDTHH:MM:SS.ffffff)으로 변환합니다.
+
+    Play Store 날짜 형식: "Mar 15, 2024" 또는 "2024-03-15"
+    목표 형식: "2024-03-15T00:00:00.000000"
+    """
+    if not date_str:
+        return None
+
+    # 이미 ISO 형식이면 그대로 반환 (단, microseconds 추가)
+    if 'T' in date_str:
+        try:
+            if date_str.endswith('Z'):
+                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                dt = dt.replace(tzinfo=None)
+            else:
+                dt = datetime.fromisoformat(date_str)
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+            return dt.isoformat()
+        except (ValueError, TypeError):
+            pass
+
+    # "Mar 15, 2024" 형식 파싱
+    try:
+        dt = datetime.strptime(date_str, "%b %d, %Y")
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        pass
+
+    # "2024-03-15" 형식 파싱
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        pass
+
+    # 파싱 실패 시 원본 반환
+    return date_str
 
 
 class PlayStoreDetailsCollector:
@@ -94,8 +136,8 @@ class PlayStoreDetailsCollector:
             'min_os_version': None,  # Play Store API에서 직접 제공 안 함
             'file_size': None,
             'supported_devices': None,
-            'release_date': data.get('released'),
-            'updated_date': data.get('lastUpdatedOn'),
+            'release_date': normalize_date_format(data.get('released')),
+            'updated_date': normalize_date_format(data.get('lastUpdatedOn')),
             'privacy_policy_url': data.get('privacyPolicy')
         }
 
