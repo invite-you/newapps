@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import requests
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,6 +22,25 @@ PLATFORM = 'app_store'
 RSS_BASE_URL = 'https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json'
 REQUEST_DELAY = 0.01  # 10ms
 MAX_REVIEWS_TOTAL = 20000  # 실행당 최대 수집 리뷰 수 (무한루프 방지)
+
+
+def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
+    """날짜 문자열을 ISO 8601 형식 (YYYY-MM-DDTHH:MM:SS.ffffff)으로 변환합니다.
+
+    Apple RSS 날짜 형식: "2024-01-15T10:30:00-07:00"
+    목표 형식: "2024-01-15T10:30:00" (timezone 제거)
+    """
+    if not date_str:
+        return None
+
+    try:
+        # ISO 형식 파싱 (timezone 포함)
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        # timezone-naive로 변환
+        dt = dt.replace(tzinfo=None)
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        return date_str  # 파싱 실패 시 원본 반환
 
 
 class AppStoreReviewsCollector:
@@ -103,7 +123,7 @@ class AppStoreReviewsCollector:
                 'content': entry.get('content', {}).get('label', ''),
                 'thumbs_up_count': int(entry.get('im:voteCount', {}).get('label', 0)),
                 'app_version': entry.get('im:version', {}).get('label', ''),
-                'reviewed_at': entry.get('updated', {}).get('label', ''),
+                'reviewed_at': normalize_date_format(entry.get('updated', {}).get('label', '')),
                 'reply_content': None,
                 'replied_at': None
             }
