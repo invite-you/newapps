@@ -62,6 +62,11 @@ class AppStoreReviewsCollector:
             data = response.json()
             entries = data.get('feed', {}).get('entry', [])
 
+            if isinstance(entries, dict):
+                entries = [entries]
+            elif not isinstance(entries, list):
+                return []
+
             # 첫 번째는 앱 정보, 나머지가 리뷰
             if len(entries) <= 1:
                 return []
