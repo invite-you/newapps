@@ -62,6 +62,10 @@ class AppStoreReviewsCollector:
             data = response.json()
             entries = data.get('feed', {}).get('entry', [])
 
+            # entry가 딕셔너리인 경우 리스트로 변환 (단일 entry일 때 발생)
+            if isinstance(entries, dict):
+                entries = [entries]
+
             # 첫 번째는 앱 정보, 나머지가 리뷰
             if len(entries) <= 1:
                 return []
