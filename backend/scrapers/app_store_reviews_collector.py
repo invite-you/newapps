@@ -16,6 +16,7 @@ from database.app_details_db import (
     is_failed_app
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from scrapers.timestamp_utils import normalize_timestamp
 
 PLATFORM = 'app_store'
 RSS_BASE_URL = 'https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json'
@@ -98,7 +99,7 @@ class AppStoreReviewsCollector:
                 'content': entry.get('content', {}).get('label', ''),
                 'thumbs_up_count': int(entry.get('im:voteCount', {}).get('label', 0)),
                 'app_version': entry.get('im:version', {}).get('label', ''),
-                'reviewed_at': entry.get('updated', {}).get('label', ''),
+                'reviewed_at': normalize_timestamp(entry.get('updated', {}).get('label', '')),
                 'reply_content': None,
                 'replied_at': None
             }

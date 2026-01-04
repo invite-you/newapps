@@ -21,6 +21,7 @@ from config.language_country_priority import (
     get_primary_country,
     PRIORITY_LANGUAGES
 )
+from scrapers.timestamp_utils import normalize_timestamp
 
 PLATFORM = 'app_store'
 API_BASE_URL = 'https://itunes.apple.com/lookup'
@@ -127,8 +128,8 @@ class AppStoreDetailsCollector:
             'min_os_version': data.get('minimumOsVersion'),
             'file_size': int(data.get('fileSizeBytes', 0)) if data.get('fileSizeBytes') else None,
             'supported_devices': json.dumps(data.get('supportedDevices', [])[:20], ensure_ascii=False),  # 최대 20개
-            'release_date': data.get('releaseDate'),
-            'updated_date': data.get('currentVersionReleaseDate'),
+            'release_date': normalize_timestamp(data.get('releaseDate')),
+            'updated_date': normalize_timestamp(data.get('currentVersionReleaseDate')),
             'privacy_policy_url': None
         }
 
