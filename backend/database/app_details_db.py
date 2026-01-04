@@ -616,7 +616,7 @@ def is_abandoned_app(app_id: str, platform: str) -> bool:
     # updated_date 우선, 없으면 release_date 사용
     date_str = row['updated_date'] or row['release_date']
     if not date_str:
-        return False  # 날짜 정보 없으면 활성으로 간주
+        return True  # 날짜 정보 둘 다 없으면 버려진 앱으로 간주
 
     try:
         # 날짜 형식: "2024-01-15T10:30:00Z" 또는 "2024-01-15"
@@ -684,7 +684,8 @@ def get_apps_needing_update(platform: str, limit: int = 1000) -> Tuple[List[str]
             hours_since_collection = (datetime.now() - collected_at).total_seconds() / 3600
 
             # 버려진 앱 여부 판단
-            is_abandoned = False
+            # 날짜 정보가 둘 다 없으면 버려진 앱으로 간주
+            is_abandoned = True if not ref_date_str else False
             if ref_date_str:
                 try:
                     if 'T' in ref_date_str:
