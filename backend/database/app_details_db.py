@@ -605,19 +605,19 @@ def get_apps_needing_update(platform: str, limit: int = 1000) -> Tuple[List[str]
     - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
 
     Returns:
-        수집이 필요한 앱 ID 리스트
+        (수집이 필요한 앱 ID 리스트, 제외된 앱 ID set)
     """
     conn = get_connection()
     cursor = conn.cursor()
 
-    # 실패한 앱 목록
+    # 실패한 앱 목록 (SQL에서 제외하고, 반환값에도 포함)
     cursor.execute("""
         SELECT app_id FROM failed_apps WHERE platform = ?
     """, (platform,))
     failed_ids = {row['app_id'] for row in cursor.fetchall()}
 
     # 이미 수집된 앱 중 업데이트 주기가 지난 앱 확인
-    # collection_status에서 details_collected_at을 기준으로 판단
+    # failed_apps는 SQL 단계에서 제외하여 불필요한 처리 방지
     cursor.execute("""
         SELECT cs.app_id, cs.details_collected_at, a.updated_date
         FROM collection_status cs
@@ -626,8 +626,10 @@ def get_apps_needing_update(platform: str, limit: int = 1000) -> Tuple[List[str]
                    ROW_NUMBER() OVER (PARTITION BY app_id, platform ORDER BY recorded_at DESC) as rn
             FROM apps
         ) a ON cs.app_id = a.app_id AND cs.platform = a.platform AND a.rn = 1
-        WHERE cs.platform = ? AND cs.details_collected_at IS NOT NULL
-    """, (platform,))
+        WHERE cs.platform = ?
+          AND cs.details_collected_at IS NOT NULL
+          AND cs.app_id NOT IN (SELECT app_id FROM failed_apps WHERE platform = ?)
+    """, (platform, platform))
 
     needs_update = []
     skip_ids = set()
@@ -636,10 +638,6 @@ def get_apps_needing_update(platform: str, limit: int = 1000) -> Tuple[List[str]
         app_id = row['app_id']
         collected_at_str = row['details_collected_at']
         updated_date_str = row['updated_date']
-
-        if app_id in failed_ids:
-            skip_ids.add(app_id)
-            continue
 
         try:
             collected_at = datetime.fromisoformat(collected_at_str)
