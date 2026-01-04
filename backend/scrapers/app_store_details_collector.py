@@ -273,48 +273,56 @@ class AppStoreDetailsCollector:
 
 
 def get_apps_to_collect(limit: int = 1000) -> List[str]:
-    """수집할 앱 ID 목록을 가져옵니다 (최근 발견 순)."""
+    """수집할 앱 ID 목록을 가져옵니다.
+
+    모든 앱에서 상세정보를 수집합니다. 이미 수집된 앱도 재수집 대상입니다.
+    변경된 값만 DB에 저장되므로 (compare_records 함수), 매번 실행해도 안전합니다.
+    오래된 수집 순으로 정렬하여 가장 오래 업데이트 안 된 앱부터 재수집합니다.
+    """
     from database.app_details_db import get_connection as get_details_connection
 
-    # 1. 이미 수집된 앱 ID 가져오기 (app_details.db)
+    # 1. 실패한 앱 ID 가져오기 (failed_apps만 제외)
     details_conn = get_details_connection()
     cursor = details_conn.cursor()
-
-    cursor.execute("""
-        SELECT app_id FROM collection_status
-        WHERE platform = 'app_store' AND details_collected_at IS NOT NULL
-    """)
-    collected_ids = {row['app_id'] for row in cursor.fetchall()}
 
     cursor.execute("""
         SELECT app_id FROM failed_apps WHERE platform = 'app_store'
     """)
     failed_ids = {row['app_id'] for row in cursor.fetchall()}
 
+    # 수집 상태 정보 가져오기 (마지막 수집 시각 기준 정렬용)
+    cursor.execute("""
+        SELECT app_id, details_collected_at FROM collection_status
+        WHERE platform = 'app_store'
+    """)
+    collected_status = {row['app_id']: row['details_collected_at'] for row in cursor.fetchall()}
     details_conn.close()
-
-    exclude_ids = collected_ids | failed_ids
 
     # 2. sitemap에서 수집할 앱 목록 가져오기 (sitemap_apps.db)
     sitemap_conn = get_sitemap_connection()
     cursor = sitemap_conn.cursor()
 
     cursor.execute("""
-        SELECT DISTINCT app_id
+        SELECT DISTINCT app_id, first_seen_at
         FROM app_localizations
         WHERE platform = 'app_store'
-        ORDER BY first_seen_at DESC
     """)
 
-    app_ids = []
+    all_apps = []
     for row in cursor.fetchall():
-        if row['app_id'] not in exclude_ids:
-            app_ids.append(row['app_id'])
-            if len(app_ids) >= limit:
-                break
+        app_id = row['app_id']
+        if app_id in failed_ids:
+            continue
+        # 수집 시각 (없으면 None으로 가장 먼저 수집)
+        collected_at = collected_status.get(app_id)
+        all_apps.append((app_id, collected_at, row['first_seen_at']))
 
     sitemap_conn.close()
-    return app_ids
+
+    # 정렬: 수집 안 된 앱 먼저 (None), 그다음 오래된 수집 순
+    all_apps.sort(key=lambda x: (x[1] is not None, x[1] or '', x[2] or ''))
+
+    return [app[0] for app in all_apps[:limit]]
 
 
 def main():

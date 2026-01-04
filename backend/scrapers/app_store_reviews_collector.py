@@ -294,19 +294,23 @@ class AppStoreReviewsCollector:
 
 
 def get_apps_for_review_collection(limit: int = 1000) -> List[str]:
-    """리뷰 수집할 앱 ID 목록을 가져옵니다."""
+    """리뷰 수집할 앱 ID 목록을 가져옵니다.
+
+    상세정보가 수집된 모든 앱에서 리뷰를 수집합니다.
+    리뷰 수집 시 중복은 review_id로 자동 필터링되므로,
+    initial_review_done 여부와 관계없이 모든 앱을 재수집 대상으로 포함합니다.
+    """
     from database.app_details_db import get_connection as get_details_connection
 
-    # 상세정보가 수집된 앱 중 리뷰 수집이 안 된 것들
     details_conn = get_details_connection()
     cursor = details_conn.cursor()
 
+    # 상세정보가 수집된 모든 앱에서 리뷰 수집 (재수집 허용)
     cursor.execute("""
         SELECT app_id FROM collection_status
         WHERE platform = 'app_store'
           AND details_collected_at IS NOT NULL
-          AND (reviews_collected_at IS NULL OR initial_review_done = 0)
-        ORDER BY details_collected_at DESC
+        ORDER BY reviews_collected_at ASC NULLS FIRST, details_collected_at DESC
         LIMIT ?
     """, (limit,))
 
