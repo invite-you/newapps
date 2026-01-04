@@ -142,34 +142,70 @@ def upsert_app_localizations_batch(localizations: List[Dict[str, Any]]) -> int:
 
     conn = get_connection()
     cursor = conn.cursor()
+    # WAL 모드와 함께 사용해도 되는 최소 동기화 설정. 대량 적재 시 쓰기 지연을 줄이기 위함.
+    cursor.execute("PRAGMA synchronous=OFF")
+
     now = datetime.now().isoformat()
-    new_count = 0
 
+    # (platform, app_id, language, country) 키 기준으로 중복 제거
+    aggregated = {}
     for loc in localizations:
-        # 기존 레코드 확인
+        key = (loc['platform'], loc['app_id'], loc['language'], loc['country'])
+        aggregated[key] = loc
+
+    try:
         cursor.execute("""
-            SELECT id FROM app_localizations
-            WHERE platform = ? AND app_id = ? AND language = ? AND country = ?
-        """, (loc['platform'], loc['app_id'], loc['language'], loc['country']))
-        existing = cursor.fetchone()
+            CREATE TEMP TABLE IF NOT EXISTS temp_app_localizations (
+                platform TEXT NOT NULL,
+                app_id TEXT NOT NULL,
+                language TEXT NOT NULL,
+                country TEXT NOT NULL,
+                PRIMARY KEY(platform, app_id, language, country)
+            )
+        """)
+        cursor.execute("DELETE FROM temp_app_localizations")
 
-        if existing:
-            cursor.execute("""
-                UPDATE app_localizations
-                SET source_file = ?, last_seen_at = ?
-                WHERE platform = ? AND app_id = ? AND language = ? AND country = ?
-            """, (loc['source_file'], now,
-                  loc['platform'], loc['app_id'], loc['language'], loc['country']))
-        else:
-            cursor.execute("""
-                INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (loc['platform'], loc['app_id'], loc['language'], loc['country'],
-                  loc['source_file'], now, now))
-            new_count += 1
+        cursor.executemany("""
+            INSERT INTO temp_app_localizations (platform, app_id, language, country)
+            VALUES (?, ?, ?, ?)
+        """, [(k[0], k[1], k[2], k[3]) for k in aggregated.keys()])
 
-    conn.commit()
-    conn.close()
+        # 새로 추가될 키 개수 계산
+        cursor.execute("""
+            SELECT COUNT(*) as new_count
+            FROM temp_app_localizations t
+            LEFT JOIN app_localizations a
+                ON a.platform = t.platform
+                AND a.app_id = t.app_id
+                AND a.language = t.language
+                AND a.country = t.country
+            WHERE a.id IS NULL
+        """)
+        new_count = cursor.fetchone()["new_count"]
+
+        cursor.executemany("""
+            INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, app_id, language, country) DO UPDATE SET
+                source_file = excluded.source_file,
+                last_seen_at = excluded.last_seen_at
+        """, [
+            (
+                loc['platform'],
+                loc['app_id'],
+                loc['language'],
+                loc['country'],
+                loc['source_file'],
+                now,
+                now
+            )
+            for loc in aggregated.values()
+        ])
+
+        conn.commit()
+    finally:
+        conn.close()
+
     return new_count
 
 
