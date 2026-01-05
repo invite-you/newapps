@@ -16,6 +16,40 @@ DATABASE_PATH = os.path.join(DATABASE_DIR, 'app_details.db')
 EXCLUDE_COMPARE_FIELDS = {'id', 'recorded_at'}
 
 
+def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
+    """날짜 문자열을 ISO 8601 형식 (YYYY-MM-DDTHH:MM:SS)으로 정규화합니다.
+
+    지원 형식:
+    - ISO 8601: "2024-01-15T10:30:00Z", "2024-01-15T10:30:00-07:00"
+    - 날짜만: "2024-01-15"
+    - 영문: "Mar 15, 2024"
+    """
+    if not date_str:
+        return None
+
+    # ISO 형식 (T 포함)
+    if 'T' in date_str:
+        try:
+            dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            return dt.replace(tzinfo=None).isoformat()
+        except (ValueError, TypeError):
+            pass
+
+    # "Mar 15, 2024" 형식
+    try:
+        return datetime.strptime(date_str, "%b %d, %Y").isoformat()
+    except (ValueError, TypeError):
+        pass
+
+    # "2024-03-15" 형식
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").isoformat()
+    except (ValueError, TypeError):
+        pass
+
+    return date_str
+
+
 def get_connection() -> sqlite3.Connection:
     """DB 연결을 반환합니다."""
     conn = sqlite3.connect(DATABASE_PATH, timeout=30)
