@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.app_details_db import (
     init_database, insert_app, insert_app_localized, insert_app_metrics,
     is_failed_app, mark_app_failed, update_collection_status,
-    get_apps_needing_update, ABANDONED_THRESHOLD_DAYS
+    get_apps_needing_update, ABANDONED_THRESHOLD_DAYS, normalize_date_format
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
 from config.language_country_priority import (
@@ -128,8 +128,8 @@ class AppStoreDetailsCollector:
             'min_os_version': data.get('minimumOsVersion'),
             'file_size': int(data.get('fileSizeBytes', 0)) if data.get('fileSizeBytes') else None,
             'supported_devices': json.dumps(data.get('supportedDevices', [])[:20], ensure_ascii=False),  # 최대 20개
-            'release_date': data.get('releaseDate'),
-            'updated_date': data.get('currentVersionReleaseDate'),
+            'release_date': normalize_date_format(data.get('releaseDate')),
+            'updated_date': normalize_date_format(data.get('currentVersionReleaseDate')),
             'privacy_policy_url': None
         }
 

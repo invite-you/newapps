@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.app_details_db import (
     init_database, insert_reviews_batch, get_all_review_ids,
     get_collection_status, update_collection_status, get_review_count,
-    is_failed_app
+    is_failed_app, normalize_date_format
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
 
@@ -103,7 +103,7 @@ class AppStoreReviewsCollector:
                 'content': entry.get('content', {}).get('label', ''),
                 'thumbs_up_count': int(entry.get('im:voteCount', {}).get('label', 0)),
                 'app_version': entry.get('im:version', {}).get('label', ''),
-                'reviewed_at': entry.get('updated', {}).get('label', ''),
+                'reviewed_at': normalize_date_format(entry.get('updated', {}).get('label', '')),
                 'reply_content': None,
                 'replied_at': None
             }

@@ -16,7 +16,7 @@ from google_play_scraper.exceptions import NotFoundError
 from database.app_details_db import (
     init_database, insert_app, insert_app_localized, insert_app_metrics,
     is_failed_app, mark_app_failed, update_collection_status,
-    get_apps_needing_update, ABANDONED_THRESHOLD_DAYS
+    get_apps_needing_update, ABANDONED_THRESHOLD_DAYS, normalize_date_format
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
 from config.language_country_priority import (
@@ -94,8 +94,8 @@ class PlayStoreDetailsCollector:
             'min_os_version': None,  # Play Store API에서 직접 제공 안 함
             'file_size': None,
             'supported_devices': None,
-            'release_date': data.get('released'),
-            'updated_date': data.get('lastUpdatedOn'),
+            'release_date': normalize_date_format(data.get('released')),
+            'updated_date': normalize_date_format(data.get('lastUpdatedOn')),
             'privacy_policy_url': data.get('privacyPolicy')
         }
 
