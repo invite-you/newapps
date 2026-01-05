@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.app_details_db import (
     init_database, insert_reviews_batch, get_all_review_ids,
     get_collection_status, update_collection_status, get_review_count,
-    is_failed_app, normalize_date_format
+    is_failed_app, get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
 
@@ -294,25 +294,37 @@ class AppStoreReviewsCollector:
 
 
 def get_apps_for_review_collection(limit: int = 1000) -> List[str]:
-    """리뷰 수집할 앱 ID 목록을 가져옵니다."""
+    """리뷰 수집할 앱 ID 목록을 가져옵니다.
+
+    수집 정책:
+    - 상세정보가 수집된 앱만 대상
+    - 활성 앱: 매번 수집 (crontab으로 매일 실행)
+    - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
+    - 실패한 앱: 제외
+    """
     from database.app_details_db import get_connection as get_details_connection
 
-    # 상세정보가 수집된 앱 중 리뷰 수집이 안 된 것들
+    # 제외할 앱 ID: 실패한 앱 + 7일 이내 수집된 버려진 앱
+    exclude_ids = get_failed_app_ids(PLATFORM) | get_abandoned_apps_to_skip(PLATFORM, 'reviews_collected_at')
+
+    # 상세정보가 수집된 앱 목록
     details_conn = get_details_connection()
     cursor = details_conn.cursor()
-
     cursor.execute("""
         SELECT app_id FROM collection_status
-        WHERE platform = 'app_store'
-          AND details_collected_at IS NOT NULL
-          AND (reviews_collected_at IS NULL OR initial_review_done = 0)
+        WHERE platform = 'app_store' AND details_collected_at IS NOT NULL
         ORDER BY details_collected_at DESC
-        LIMIT ?
-    """, (limit,))
+    """)
 
-    app_ids = [row['app_id'] for row in cursor.fetchall()]
+    result = []
+    for row in cursor.fetchall():
+        if row['app_id'] not in exclude_ids:
+            result.append(row['app_id'])
+            if len(result) >= limit:
+                break
+
     details_conn.close()
-    return app_ids
+    return result
 
 
 def main():
