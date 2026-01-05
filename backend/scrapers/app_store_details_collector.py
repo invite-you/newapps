@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.app_details_db import (
     init_database, insert_app, insert_app_localized, insert_app_metrics,
     is_failed_app, mark_app_failed, update_collection_status,
-    get_apps_needing_update, ABANDONED_THRESHOLD_DAYS, normalize_date_format
+    get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
 from config.language_country_priority import (
@@ -276,83 +276,31 @@ class AppStoreDetailsCollector:
 def get_apps_to_collect(limit: int = 1000) -> List[str]:
     """수집할 앱 ID 목록을 가져옵니다.
 
-    수집 우선순위:
-    1. 신규 앱 (한 번도 수집되지 않은 앱) - 즉시 수집
-    2. 활성 앱 (2년 이내 업데이트) - 매일 수집 (24시간 경과 시)
-    3. 버려진 앱 (2년 이상 업데이트 안 됨) - 7일에 1번 수집
-
-    기준 출처:
-    - Pixalate: 2년 이상 업데이트 안 됨 = Abandoned
-    - Google Play: 2년 이상 업데이트 안 됨 = 검색 제외/제거
-    - Apple: 3년 이상 + 다운로드 극소 = 제거 대상
+    수집 정책:
+    - 활성 앱: 매번 수집 (crontab으로 매일 실행)
+    - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
+    - 실패한 앱: 제외
     """
-    from database.app_details_db import get_connection as get_details_connection
+    # 제외할 앱 ID: 실패한 앱 + 7일 이내 수집된 버려진 앱
+    exclude_ids = get_failed_app_ids(PLATFORM) | get_abandoned_apps_to_skip(PLATFORM, 'details_collected_at')
 
-    # 1. 기존에 수집된 앱 중 업데이트가 필요한 앱 가져오기
-    apps_needing_update, skip_ids = get_apps_needing_update(PLATFORM, limit)
-
-    # 2. 신규 앱 (아직 수집되지 않은 앱) 가져오기
-    details_conn = get_details_connection()
-    cursor = details_conn.cursor()
-
-    # 이미 수집된 모든 앱 ID
-    cursor.execute("""
-        SELECT app_id FROM collection_status
-        WHERE platform = 'app_store' AND details_collected_at IS NOT NULL
-    """)
-    collected_ids = {row['app_id'] for row in cursor.fetchall()}
-
-    # 실패한 앱 ID
-    cursor.execute("""
-        SELECT app_id FROM failed_apps WHERE platform = 'app_store'
-    """)
-    failed_ids = {row['app_id'] for row in cursor.fetchall()}
-
-    details_conn.close()
-
-    # 신규 앱은 collected_ids에 없는 앱
-    exclude_from_new = collected_ids | failed_ids
-
-    # 3. sitemap에서 신규 앱 목록 가져오기
+    # sitemap에서 앱 목록 가져오기 (최근 발견 순)
     sitemap_conn = get_sitemap_connection()
     cursor = sitemap_conn.cursor()
-
     cursor.execute("""
-        SELECT DISTINCT app_id
-        FROM app_localizations
+        SELECT DISTINCT app_id FROM app_localizations
         WHERE platform = 'app_store'
         ORDER BY first_seen_at DESC
     """)
 
-    new_app_ids = []
-    for row in cursor.fetchall():
-        if row['app_id'] not in exclude_from_new:
-            new_app_ids.append(row['app_id'])
-
-    sitemap_conn.close()
-
-    # 4. 신규 앱 + 업데이트 필요 앱 합치기 (신규 앱 우선)
-    # 중복 제거하면서 순서 유지
     result = []
-    seen = set()
-
-    # 신규 앱 먼저
-    for app_id in new_app_ids:
-        if app_id not in seen:
-            result.append(app_id)
-            seen.add(app_id)
+    for row in cursor.fetchall():
+        if row['app_id'] not in exclude_ids:
+            result.append(row['app_id'])
             if len(result) >= limit:
                 break
 
-    # 업데이트 필요한 기존 앱
-    if len(result) < limit:
-        for app_id in apps_needing_update:
-            if app_id not in seen:
-                result.append(app_id)
-                seen.add(app_id)
-                if len(result) >= limit:
-                    break
-
+    sitemap_conn.close()
     return result
 
 
