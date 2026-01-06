@@ -495,10 +495,10 @@ def test_db_integrity(results: TestResults):
         print(f"  Sitemap 중복: {len(duplicates)}")
 
         # 3. 인코딩 문제 체크
-        cursor.execute("SELECT app_id, language, country, href FROM app_localizations LIMIT 100")
+        cursor.execute("SELECT app_id, language, country, source_file FROM app_localizations LIMIT 100")
         encoding_issues = 0
         for row in cursor.fetchall():
-            if not check_encoding(row['href'], 'sitemap_href', results):
+            if not check_encoding(row['source_file'], 'sitemap_source_file', results):
                 encoding_issues += 1
         print(f"  Sitemap 인코딩 문제: {encoding_issues}")
 
@@ -542,7 +542,7 @@ def test_db_integrity(results: TestResults):
         cursor.execute("""
             SELECT DISTINCT a.app_id, a.platform FROM apps a
             LEFT JOIN collection_status cs ON a.app_id = cs.app_id AND a.platform = cs.platform
-            WHERE cs.id IS NULL
+            WHERE cs.id IS NULL AND a.platform != 'test_platform'
         """)
         orphan_apps = cursor.fetchall()
         if orphan_apps:

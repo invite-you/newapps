@@ -24,6 +24,7 @@ newapps/
 └── backend/
     ├── collect_sitemaps.py      # Sitemap 수집 메인 스크립트
     ├── collect_app_details.py   # 상세정보/리뷰 수집 메인 스크립트
+    ├── collect_full_pipeline.py # 전체 sitemap + 상세정보/리뷰 + 테스트 통합 실행
     ├── requirements.txt         # Python 의존성
     ├── test_comprehensive.py    # 종합 테스트 스크립트
     │
@@ -120,6 +121,25 @@ python collect_app_details.py --stats
 ```bash
 cd backend
 python test_comprehensive.py
+```
+
+### 4. 통합 실행 (전체 수집 + 테스트)
+
+Sitemap 전체 수집 후, 모든 앱 상세정보/리뷰를 최대치로 수집합니다. 테스트는 기본적으로 생략됩니다.
+
+```bash
+cd backend
+python collect_full_pipeline.py
+```
+
+옵션:
+
+```bash
+# 앱 수 제한 (기본: 무제한)
+python collect_full_pipeline.py --limit 100
+
+# 테스트 실행
+python collect_full_pipeline.py --run-tests
 ```
 
 ## 데이터베이스 스키마
