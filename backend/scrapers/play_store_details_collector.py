@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import json
+import traceback
 from typing import List, Dict, Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,14 +25,18 @@ from config.language_country_priority import (
     get_primary_country,
     PRIORITY_LANGUAGES
 )
+from utils.logger import get_collection_logger
+from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
 
 
 class PlayStoreDetailsCollector:
-    def __init__(self, verbose: bool = True):
+    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None):
         self.verbose = verbose
+        self.logger = get_collection_logger('PlayStoreDetails', verbose)
+        self.error_tracker = error_tracker or ErrorTracker('play_store_details')
         self.stats = {
             'apps_processed': 0,
             'apps_skipped_failed': 0,
@@ -43,7 +48,7 @@ class PlayStoreDetailsCollector:
 
     def log(self, message: str):
         if self.verbose:
-            print(f"[PlayStore Details] {message}")
+            self.logger.info(message)
 
     def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
         """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
@@ -235,11 +240,23 @@ class PlayStoreDetailsCollector:
             except Exception as e:
                 self.log(f"Error processing app {app_id}: {e}")
                 self.stats['errors'] += 1
+                # 상세 에러 추적
+                self.error_tracker.add_error(
+                    platform=PLATFORM,
+                    step=ErrorStep.COLLECT_APP,
+                    error=e,
+                    app_id=app_id,
+                    include_traceback=True
+                )
 
             time.sleep(REQUEST_DELAY)
 
         self.log(f"Batch collection completed. Stats: {self.stats}")
         return self.stats
+
+    def get_error_tracker(self) -> ErrorTracker:
+        """에러 트래커 반환"""
+        return self.error_tracker
 
 
 def get_apps_to_collect(limit: int = 1000) -> List[str]:
