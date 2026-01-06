@@ -7,7 +7,7 @@ import os
 import time
 import requests
 import json
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -56,8 +56,14 @@ class AppStoreDetailsCollector:
         conn.close()
         return pairs
 
-    def fetch_app_info(self, app_id: str, country: str = 'US') -> Optional[Dict]:
-        """iTunes Lookup API로 앱 정보를 가져옵니다."""
+    def fetch_app_info(self, app_id: str, country: str = 'US') -> Tuple[Optional[Dict], Optional[str]]:
+        """iTunes Lookup API로 앱 정보를 가져옵니다.
+
+        Returns:
+            Tuple of (data, error_reason)
+            - data: 앱 정보 또는 None
+            - error_reason: 실패 시 사유 (not_found, timeout, network_error, rate_limited, server_error, api_error)
+        """
         url = f"{API_BASE_URL}?id={app_id}&country={country}"
 
         try:
@@ -66,12 +72,32 @@ class AppStoreDetailsCollector:
             data = response.json()
 
             if data.get('resultCount', 0) > 0:
-                return data['results'][0]
-            return None
+                return (data['results'][0], None)
+            return (None, 'not_found')
 
+        except requests.exceptions.Timeout:
+            self.log(f"Timeout fetching app {app_id}")
+            return (None, 'timeout')
+        except requests.exceptions.ConnectionError as e:
+            self.log(f"Network error fetching app {app_id}: {e}")
+            return (None, 'network_error')
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response else 0
+            if status_code == 429:
+                self.log(f"Rate limited fetching app {app_id}")
+                return (None, 'rate_limited')
+            elif status_code >= 500:
+                self.log(f"Server error ({status_code}) fetching app {app_id}")
+                return (None, f'server_error:{status_code}')
+            else:
+                self.log(f"HTTP error ({status_code}) fetching app {app_id}: {e}")
+                return (None, f'http_error:{status_code}')
+        except requests.exceptions.JSONDecodeError as e:
+            self.log(f"Invalid JSON response for app {app_id}: {e}")
+            return (None, 'invalid_response')
         except requests.exceptions.RequestException as e:
-            self.log(f"Error fetching app {app_id}: {e}")
-            return None
+            self.log(f"Request error fetching app {app_id}: {e}")
+            return (None, f'request_error:{type(e).__name__}')
 
     def parse_app_metadata(self, data: Dict, app_id: str) -> Dict:
         """API 응답을 apps 테이블 형식으로 변환합니다."""
@@ -185,20 +211,24 @@ class AppStoreDetailsCollector:
             if optimized_pairs:
                 primary_country = optimized_pairs[0][1].upper()
 
-        data = self.fetch_app_info(app_id, primary_country)
+        data, last_error = self.fetch_app_info(app_id, primary_country)
 
         if not data:
             # 다른 국가로 재시도 (우선순위 순서대로)
             for lang, country in optimized_pairs:
                 if country.upper() != primary_country:
-                    data = self.fetch_app_info(app_id, country.upper())
+                    data, error = self.fetch_app_info(app_id, country.upper())
                     if data:
                         primary_country = country.upper()
+                        last_error = None
                         break
+                    last_error = error  # 마지막 에러 사유 유지
                     time.sleep(REQUEST_DELAY)
 
         if not data:
-            mark_app_failed(app_id, PLATFORM, 'not_found')
+            # 상세한 에러 사유로 기록
+            reason = last_error or 'unknown'
+            mark_app_failed(app_id, PLATFORM, reason)
             self.stats['apps_not_found'] += 1
             return False
 
@@ -236,7 +266,7 @@ class AppStoreDetailsCollector:
             if country_upper in fetched_countries:
                 country_data = fetched_countries[country_upper]
             else:
-                country_data = self.fetch_app_info(app_id, country_upper)
+                country_data, _ = self.fetch_app_info(app_id, country_upper)
                 fetched_countries[country_upper] = country_data
                 time.sleep(REQUEST_DELAY)
 

@@ -6,12 +6,13 @@ import sys
 import os
 import time
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from google_play_scraper import app
 from google_play_scraper.exceptions import NotFoundError
+from requests.exceptions import Timeout, ConnectionError as RequestsConnectionError
 
 from database.app_details_db import (
     init_database, insert_app, insert_app_localized, insert_app_metrics,
@@ -57,16 +58,38 @@ class PlayStoreDetailsCollector:
         conn.close()
         return pairs if pairs else [('en', 'us')]
 
-    def fetch_app_info(self, app_id: str, lang: str = 'en', country: str = 'us') -> Optional[Dict]:
-        """google-play-scraper로 앱 정보를 가져옵니다."""
+    def fetch_app_info(self, app_id: str, lang: str = 'en', country: str = 'us') -> Tuple[Optional[Dict], Optional[str]]:
+        """google-play-scraper로 앱 정보를 가져옵니다.
+
+        Returns:
+            Tuple of (data, error_reason)
+            - data: 앱 정보 또는 None
+            - error_reason: 실패 시 사유 (not_found, timeout, network_error, rate_limited, server_error, scraper_error)
+        """
         try:
             result = app(app_id, lang=lang, country=country)
-            return result
+            return (result, None)
         except NotFoundError:
-            return None
+            return (None, 'not_found')
+        except Timeout:
+            self.log(f"Timeout fetching app {app_id}")
+            return (None, 'timeout')
+        except RequestsConnectionError as e:
+            self.log(f"Network error fetching app {app_id}: {e}")
+            return (None, 'network_error')
         except Exception as e:
-            self.log(f"Error fetching app {app_id}: {e}")
-            return None
+            error_str = str(e).lower()
+            # rate limit 감지
+            if '429' in error_str or 'too many' in error_str or 'rate' in error_str:
+                self.log(f"Rate limited fetching app {app_id}: {e}")
+                return (None, 'rate_limited')
+            # 서버 오류 감지
+            if any(code in error_str for code in ['500', '502', '503', '504']):
+                self.log(f"Server error fetching app {app_id}: {e}")
+                return (None, 'server_error')
+            # 기타 스크래퍼 오류
+            self.log(f"Scraper error fetching app {app_id}: {e}")
+            return (None, f'scraper_error:{type(e).__name__}')
 
     def parse_app_metadata(self, data: Dict, app_id: str) -> Dict:
         """API 응답을 apps 테이블 형식으로 변환합니다."""
@@ -156,20 +179,24 @@ class PlayStoreDetailsCollector:
             primary_pair = optimized_pairs[0] if optimized_pairs else ('en', 'us')
 
         primary_lang, primary_country = primary_pair
-        data = self.fetch_app_info(app_id, lang=primary_lang, country=primary_country.lower())
+        data, last_error = self.fetch_app_info(app_id, lang=primary_lang, country=primary_country.lower())
 
         if not data:
             # 다른 쌍으로 재시도 (우선순위 순서대로)
             for lang, country in optimized_pairs:
                 if (lang, country) != primary_pair:
-                    data = self.fetch_app_info(app_id, lang=lang, country=country.lower())
+                    data, error = self.fetch_app_info(app_id, lang=lang, country=country.lower())
                     if data:
                         primary_pair = (lang, country)
+                        last_error = None
                         break
+                    last_error = error  # 마지막 에러 사유 유지
                     time.sleep(REQUEST_DELAY)
 
         if not data:
-            mark_app_failed(app_id, PLATFORM, 'not_found')
+            # 상세한 에러 사유로 기록
+            reason = last_error or 'unknown'
+            mark_app_failed(app_id, PLATFORM, reason)
             self.stats['apps_not_found'] += 1
             return False
 
@@ -205,7 +232,7 @@ class PlayStoreDetailsCollector:
             if (lang, country) in fetched_pairs:
                 pair_data = fetched_pairs[(lang, country)]
             else:
-                pair_data = self.fetch_app_info(app_id, lang=lang, country=country.lower())
+                pair_data, _ = self.fetch_app_info(app_id, lang=lang, country=country.lower())
                 fetched_pairs[(lang, country)] = pair_data
                 time.sleep(REQUEST_DELAY)
 
