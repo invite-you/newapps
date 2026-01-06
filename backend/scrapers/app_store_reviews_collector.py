@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import requests
+import traceback
 from typing import List, Dict, Any, Optional, Set
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,6 +17,8 @@ from database.app_details_db import (
     is_failed_app, get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from utils.logger import get_collection_logger
+from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'app_store'
 RSS_BASE_URL = 'https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json'
@@ -24,8 +27,10 @@ MAX_REVIEWS_TOTAL = 20000  # 실행당 최대 수집 리뷰 수 (무한루프 �
 
 
 class AppStoreReviewsCollector:
-    def __init__(self, verbose: bool = True):
+    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None):
         self.verbose = verbose
+        self.logger = get_collection_logger('AppStoreReviews', verbose)
+        self.error_tracker = error_tracker or ErrorTracker('app_store_reviews')
         self.stats = {
             'apps_processed': 0,
             'apps_skipped': 0,
@@ -36,7 +41,7 @@ class AppStoreReviewsCollector:
 
     def log(self, message: str):
         if self.verbose:
-            print(f"[AppStore Reviews] {message}")
+            self.logger.info(message)
 
     def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
         """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
@@ -281,6 +286,14 @@ class AppStoreReviewsCollector:
             except Exception as e:
                 self.log(f"  [{app_id}] 오류 발생: {e}")
                 self.stats['errors'] += 1
+                # 상세 에러 추적
+                self.error_tracker.add_error(
+                    platform=PLATFORM,
+                    step=ErrorStep.COLLECT_REVIEW,
+                    error=e,
+                    app_id=app_id,
+                    include_traceback=True
+                )
 
             time.sleep(REQUEST_DELAY)
 
@@ -291,6 +304,10 @@ class AppStoreReviewsCollector:
                  f"수집: {self.stats['reviews_collected']}건 | "
                  f"오류: {self.stats['errors']}개")
         return self.stats
+
+    def get_error_tracker(self) -> ErrorTracker:
+        """에러 트래커 반환"""
+        return self.error_tracker
 
 
 def get_apps_for_review_collection(limit: int = 1000) -> List[str]:

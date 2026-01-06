@@ -6,6 +6,7 @@
 - 신규 앱 발견 테스트
 - 시계열 데이터 누적 테스트
 - 성공/실패 통계 수집
+- 상세 에러 추적 및 파일 로깅
 """
 import sys
 import os
@@ -18,6 +19,9 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from utils.logger import get_test_logger, LOG_DIR
+from utils.error_tracker import ErrorTracker, ErrorStep
+
 # 테스트 설정
 TEST_DURATION_MINUTES = 20  # 테스트 시간 (분)
 ITERATION_INTERVAL_SECONDS = 15  # 반복 간격 (초)
@@ -25,6 +29,8 @@ ITERATION_INTERVAL_SECONDS = 15  # 반복 간격 (초)
 class LongRunningTest:
     def __init__(self):
         self.start_time = datetime.now()
+        self.logger = get_test_logger('long_running_test')
+        self.error_tracker = ErrorTracker('long_running_test')
         self.stats = {
             'iterations': 0,
             'sitemap': {
@@ -51,20 +57,25 @@ class LongRunningTest:
                 'korean_samples': 0,
                 'encoding_errors': 0
             },
-            'errors': []
+            'errors': []  # 기존 호환성을 위해 유지
         }
 
     def log(self, message: str):
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        print(f"[{timestamp}] {message}")
+        """콘솔과 파일에 동시 로깅"""
+        self.logger.info(message)
 
-    def add_error(self, context: str, error: str):
+    def add_error(self, context: str, error: str, app_id: str = None):
+        """에러 기록 (상세 추적 포함)"""
+        # 기존 형식 유지 (호환성)
         self.stats['errors'].append({
             'time': datetime.now().isoformat(),
             'context': context,
-            'error': str(error)[:200]
+            'error': str(error)[:200],
+            'app_id': app_id
         })
-        self.log(f"ERROR [{context}]: {error}")
+        # 상세 에러 추적
+        self.error_tracker.add_error_simple(context, error, app_id)
+        self.logger.error(f"[{context}] {error}")
 
     def elapsed_minutes(self) -> float:
         return (datetime.now() - self.start_time).total_seconds() / 60
@@ -126,7 +137,8 @@ class LongRunningTest:
             from scrapers.app_store_details_collector import AppStoreDetailsCollector, get_apps_to_collect
             app_ids = get_apps_to_collect(limit=limit)
             if app_ids:
-                collector = AppStoreDetailsCollector(verbose=False)
+                # 에러 트래커 공유
+                collector = AppStoreDetailsCollector(verbose=False, error_tracker=self.error_tracker)
                 stats = collector.collect_batch(app_ids)
 
                 self.stats['details']['app_store']['processed'] += stats['apps_processed']
@@ -146,7 +158,8 @@ class LongRunningTest:
             from scrapers.play_store_details_collector import PlayStoreDetailsCollector, get_apps_to_collect
             app_ids = get_apps_to_collect(limit=limit)
             if app_ids:
-                collector = PlayStoreDetailsCollector(verbose=False)
+                # 에러 트래커 공유
+                collector = PlayStoreDetailsCollector(verbose=False, error_tracker=self.error_tracker)
                 stats = collector.collect_batch(app_ids)
 
                 self.stats['details']['play_store']['processed'] += stats['apps_processed']
@@ -171,7 +184,8 @@ class LongRunningTest:
             from scrapers.app_store_reviews_collector import AppStoreReviewsCollector, get_apps_for_review_collection
             app_ids = get_apps_for_review_collection(limit=limit)
             if app_ids:
-                collector = AppStoreReviewsCollector(verbose=False)
+                # 에러 트래커 공유
+                collector = AppStoreReviewsCollector(verbose=False, error_tracker=self.error_tracker)
                 stats = collector.collect_batch(app_ids)
 
                 self.stats['reviews']['app_store']['apps_processed'] += stats['apps_processed']
@@ -185,7 +199,8 @@ class LongRunningTest:
             from scrapers.play_store_reviews_collector import PlayStoreReviewsCollector, get_apps_for_review_collection
             app_ids = get_apps_for_review_collection(limit=limit)
             if app_ids:
-                collector = PlayStoreReviewsCollector(verbose=False)
+                # 에러 트래커 공유
+                collector = PlayStoreReviewsCollector(verbose=False, error_tracker=self.error_tracker)
                 stats = collector.collect_batch(app_ids)
 
                 self.stats['reviews']['play_store']['apps_processed'] += stats['apps_processed']
@@ -378,10 +393,20 @@ class LongRunningTest:
         print(f"  인코딩 에러: {enc['encoding_errors']}")
 
         print("\n[에러 요약]")
-        errors = self.stats['errors']
-        print(f"  총 에러: {len(errors)}건")
-        for err in errors[:10]:
-            print(f"    - [{err['context']}] {err['error'][:60]}")
+        error_summary = self.error_tracker.get_summary()
+        print(f"  총 에러: {error_summary['total_errors']}건")
+        print(f"  에러 발생 앱 수: {error_summary['unique_apps_with_errors']}개")
+
+        if error_summary['errors_by_step']:
+            print("\n  [단계별 에러]")
+            for step, count in sorted(error_summary['errors_by_step'].items(), key=lambda x: -x[1]):
+                print(f"    - {step}: {count}건")
+
+        print("\n  [최근 에러 (최대 10개)]")
+        for err in error_summary['recent_errors'][-10:]:
+            app_info = f"app={err['app_id']}" if err.get('app_id') else ""
+            print(f"    - [{err['platform']}:{err['step']}] {app_info}")
+            print(f"      {err['error_type']}: {err['error_message'][:60]}")
 
         # 전체 성공률 계산
         print("\n[전체 성공/실패 분석]")
@@ -437,11 +462,21 @@ class LongRunningTest:
         # 최종 리포트
         final_stats = self.generate_report()
 
+        # 상세 에러 정보를 stats에 추가
+        final_stats['error_details'] = self.error_tracker.get_summary()
+        final_stats['all_errors'] = self.error_tracker.get_all_errors()
+
         # JSON 저장
         report_path = os.path.join(os.path.dirname(__file__), 'long_test_report.json')
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(final_stats, f, ensure_ascii=False, indent=2, default=str)
         self.log(f"상세 리포트 저장: {report_path}")
+
+        # 에러 리포트 별도 저장 (상세 정보 포함)
+        error_report_path = self.error_tracker.save_to_file()
+        self.log(f"에러 리포트 저장: {error_report_path}")
+
+        self.log(f"로그 디렉토리: {LOG_DIR}")
 
         return final_stats
 
