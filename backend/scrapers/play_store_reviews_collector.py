@@ -5,6 +5,7 @@ google-play-scraper 라이브러리를 사용하여 앱 리뷰를 수집합니�
 import sys
 import os
 import time
+import traceback
 from typing import List, Dict, Any, Optional, Set
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,6 +19,8 @@ from database.app_details_db import (
     is_failed_app, get_failed_app_ids, get_abandoned_apps_to_skip
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from utils.logger import get_collection_logger
+from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
@@ -26,8 +29,10 @@ BATCH_SIZE = 100  # 한 번에 가져올 리뷰 수
 
 
 class PlayStoreReviewsCollector:
-    def __init__(self, verbose: bool = True):
+    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None):
         self.verbose = verbose
+        self.logger = get_collection_logger('PlayStoreReviews', verbose)
+        self.error_tracker = error_tracker or ErrorTracker('play_store_reviews')
         self.stats = {
             'apps_processed': 0,
             'apps_skipped': 0,
@@ -38,7 +43,7 @@ class PlayStoreReviewsCollector:
 
     def log(self, message: str):
         if self.verbose:
-            print(f"[PlayStore Reviews] {message}")
+            self.logger.info(message)
 
     def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
         """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
@@ -281,6 +286,14 @@ class PlayStoreReviewsCollector:
             except Exception as e:
                 self.log(f"  [{app_id}] 오류 발생: {e}")
                 self.stats['errors'] += 1
+                # 상세 에러 추적
+                self.error_tracker.add_error(
+                    platform=PLATFORM,
+                    step=ErrorStep.COLLECT_REVIEW,
+                    error=e,
+                    app_id=app_id,
+                    include_traceback=True
+                )
 
             time.sleep(REQUEST_DELAY)
 
@@ -291,6 +304,10 @@ class PlayStoreReviewsCollector:
                  f"수집: {self.stats['reviews_collected']}건 | "
                  f"오류: {self.stats['errors']}개")
         return self.stats
+
+    def get_error_tracker(self) -> ErrorTracker:
+        """에러 트래커 반환"""
+        return self.error_tracker
 
 
 def get_apps_for_review_collection(limit: int = 1000) -> List[str]:
