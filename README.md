@@ -45,26 +45,79 @@ newapps/
         └── play_store_reviews_collector.py  # Play Store 리뷰 수집
 ```
 
-## 설치
+## 설치 & 최초 실행 (아마존 우분투 기준)
 
-### 요구사항
+1) 시스템 패키지 설치
 
-- Python 3.9+
-- SQLite3 (기본 포함)
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip postgresql postgresql-contrib
+sudo systemctl enable --now postgresql
+```
 
-### 의존성 설치
+2) PostgreSQL 사용자/DB 생성
+
+```bash
+sudo -u postgres psql <<'SQL'
+CREATE USER app_details WITH PASSWORD 'app_details_password';
+CREATE USER sitemap_apps WITH PASSWORD 'sitemap_apps_password';
+CREATE DATABASE app_details OWNER app_details;
+CREATE DATABASE sitemap_apps OWNER sitemap_apps;
+GRANT ALL PRIVILEGES ON DATABASE app_details TO app_details;
+GRANT ALL PRIVILEGES ON DATABASE sitemap_apps TO sitemap_apps;
+SQL
+```
+
+3) 가상환경 및 의존성 설치
 
 ```bash
 cd backend
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-#### 주요 의존성
+4) DB 접속 환경변수 영구 설정
 
-| 패키지 | 버전 | 용도 |
-|--------|------|------|
-| requests | >=2.31.0 | HTTP 요청 |
-| google-play-scraper | >=1.2.4 | Play Store 데이터 수집 |
+```bash
+sudo tee /etc/newapps.env >/dev/null <<'ENV'
+APP_DETAILS_DB_HOST=localhost
+APP_DETAILS_DB_PORT=5432
+APP_DETAILS_DB_NAME=app_details
+APP_DETAILS_DB_USER=app_details
+APP_DETAILS_DB_PASSWORD=app_details_password
+
+SITEMAP_DB_HOST=localhost
+SITEMAP_DB_PORT=5432
+SITEMAP_DB_NAME=sitemap_apps
+SITEMAP_DB_USER=sitemap_apps
+SITEMAP_DB_PASSWORD=sitemap_apps_password
+ENV
+```
+
+5) 최초 실행
+
+```bash
+set -a
+source /etc/newapps.env
+set +a
+python collect_full_pipeline.py --limit 10
+```
+
+> 참고: 월별 파티션을 사용하지 않는 경우 `/etc/newapps.env`에 `APP_DETAILS_MONTHLY_PARTITION_CHECK=false`를 추가하여 비활성화할 수 있습니다.
+
+6) 매일 1회 자동 실행 (cron)
+
+```bash
+sudo tee /etc/cron.d/newapps >/dev/null <<'CRON'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+0 2 * * * ubuntu cd /workspace/newapps/backend && source /etc/newapps.env && /workspace/newapps/backend/.venv/bin/python collect_full_pipeline.py >> /var/log/newapps-cron.log 2>&1
+CRON
+```
+
+> 참고: `ubuntu` 사용자는 기본 계정이며 필요 시 실제 실행 사용자로 변경하세요.
 
 ## 사용법
 
@@ -144,7 +197,7 @@ python collect_full_pipeline.py --run-tests
 
 ## 데이터베이스 스키마
 
-### sitemap_apps.db
+### sitemap_apps (PostgreSQL)
 
 앱 로컬라이제이션 정보를 저장합니다.
 
@@ -171,7 +224,7 @@ python collect_full_pipeline.py --run-tests
 | first_seen_at | TEXT | 처음 발견 시각 |
 | last_seen_at | TEXT | 마지막 발견 시각 |
 
-### app_details.db
+### app_details (PostgreSQL)
 
 앱 상세정보, 수치 데이터, 리뷰를 저장합니다.
 
@@ -250,7 +303,7 @@ LANGUAGE_COUNTRY_PRIORITY = {
 │                     1. Sitemap 수집                              │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
 │  │ App Store    │    │ Play Store   │    │ sitemap_     │       │
-│  │ sitemap.xml  │───▶│ sitemap.xml  │───▶│ apps.db      │       │
+│  │ sitemap.xml  │───▶│ sitemap.xml  │───▶│ apps (PG)    │       │
 │  └──────────────┘    └──────────────┘    └──────────────┘       │
 │         │                    │                  │                │
 │         ▼                    ▼                  ▼                │
@@ -262,7 +315,7 @@ LANGUAGE_COUNTRY_PRIORITY = {
 │                     2. 상세정보 수집                             │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
 │  │ iTunes API   │    │ Play Store   │    │ app_         │       │
-│  │ (lookup)     │───▶│ Scraper      │───▶│ details.db   │       │
+│  │ (lookup)     │───▶│ Scraper      │───▶│ details (PG) │       │
 │  └──────────────┘    └──────────────┘    └──────────────┘       │
 │         │                    │                  │                │
 │         ▼                    ▼                  ▼                │
