@@ -6,10 +6,38 @@ import sys
 import time
 from datetime import datetime
 
+import psycopg
+from psycopg import sql
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON_BIN = sys.executable
 DEFAULT_LIMIT = None
 DEFAULT_RUN_TESTS = False
+# psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
+DB_DSN = os.getenv("APP_DETAILS_DB_DSN")
+DB_HOST = os.getenv("APP_DETAILS_DB_HOST", "localhost")
+DB_PORT = int(os.getenv("APP_DETAILS_DB_PORT", "5432"))
+DB_NAME = os.getenv("APP_DETAILS_DB_NAME", "app_details")
+DB_USER = os.getenv("APP_DETAILS_DB_USER", "app_details")
+DB_PASSWORD = os.getenv("APP_DETAILS_DB_PASSWORD", "")
+PARTITION_CHECK_ENABLED = os.getenv("APP_DETAILS_MONTHLY_PARTITION_CHECK", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+)
+PARTITION_ENFORCE = os.getenv("APP_DETAILS_MONTHLY_PARTITION_ENFORCE", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+)
+PARTITION_PARENT_TABLE = os.getenv("APP_DETAILS_MONTHLY_PARTITION_PARENT", "app_reviews_monthly")
+PARTITION_SCHEMA = os.getenv("APP_DETAILS_MONTHLY_PARTITION_SCHEMA", "public")
+PARTITION_NAME_TEMPLATE = os.getenv(
+    "APP_DETAILS_MONTHLY_PARTITION_NAME",
+    "{parent}_p{yyyymm}",
+)
 
 
 def log_step_start(step_name: str) -> float:
@@ -40,6 +68,99 @@ def run_script(step_name: str, script_name: str, args: list) -> None:
         log_step_end(step_name, start_perf, status)
 
 
+def build_dsn() -> str:
+    """DB DSN을 반환합니다."""
+    if DB_DSN:
+        return DB_DSN
+    return (
+        f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
+        f"user={DB_USER} password={DB_PASSWORD}"
+    )
+
+
+def get_current_month_range() -> tuple[str, str, str]:
+    """현재 월 파티션 생성에 필요한 범위 정보를 반환합니다."""
+    month_start = datetime.now().date().replace(day=1)
+    if month_start.month == 12:
+        next_month = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        next_month = month_start.replace(month=month_start.month + 1)
+    partition_name = PARTITION_NAME_TEMPLATE.format(
+        parent=PARTITION_PARENT_TABLE,
+        yyyymm=month_start.strftime("%Y%m"),
+    )
+    return partition_name, month_start.isoformat(), next_month.isoformat()
+
+
+def ensure_current_month_partition() -> None:
+    step_name = "ENSURE_MONTHLY_PARTITION"
+    start_perf = log_step_start(step_name)
+    status = "OK"
+    conn = None
+    try:
+        if not PARTITION_CHECK_ENABLED:
+            print("[INFO] 월별 파티션 점검이 비활성화되어 건너뜁니다.")
+            return
+        if not PARTITION_PARENT_TABLE:
+            raise ValueError("월별 파티션 대상 테이블이 비어 있습니다.")
+
+        partition_name, range_start, range_end = get_current_month_range()
+        print(
+            "[INFO] 월별 파티션 확인 시작: "
+            f"schema={PARTITION_SCHEMA}, parent={PARTITION_PARENT_TABLE}, "
+            f"child={partition_name}, range=({range_start}~{range_end})"
+        )
+
+        conn = psycopg.connect(build_dsn())
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 1
+            FROM pg_class child
+            JOIN pg_inherits inh ON inh.inhrelid = child.oid
+            JOIN pg_class parent ON inh.inhparent = parent.oid
+            JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace
+            JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+            WHERE child.relname = %s
+              AND parent.relname = %s
+              AND child_ns.nspname = %s
+              AND parent_ns.nspname = %s
+            LIMIT 1
+            """,
+            (partition_name, PARTITION_PARENT_TABLE, PARTITION_SCHEMA, PARTITION_SCHEMA),
+        )
+        exists = cursor.fetchone() is not None
+
+        if exists:
+            print("[INFO] 월별 파티션이 이미 존재합니다.")
+            return
+
+        print("[INFO] 월별 파티션이 없어 생성합니다.")
+        create_sql = sql.SQL(
+            "CREATE TABLE {schema}.{child} "
+            "PARTITION OF {schema}.{parent} "
+            "FOR VALUES FROM (%s) TO (%s)"
+        ).format(
+            schema=sql.Identifier(PARTITION_SCHEMA),
+            child=sql.Identifier(partition_name),
+            parent=sql.Identifier(PARTITION_PARENT_TABLE),
+        )
+        cursor.execute(create_sql, (range_start, range_end))
+        conn.commit()
+        print("[INFO] 월별 파티션 생성 완료.")
+    except Exception as exc:
+        status = "FAIL"
+        print(f"[ERROR] 월별 파티션 점검/생성 실패: {exc}")
+        if PARTITION_ENFORCE:
+            print("[ERROR] 파티션 점검 실패로 파이프라인을 중단합니다.")
+            raise
+        print("[WARN] 파티션 점검 실패를 무시하고 파이프라인을 계속합니다.")
+    finally:
+        if conn is not None:
+            conn.close()
+        log_step_end(step_name, start_perf, status)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run full sitemap/details/reviews collection (tests optional)"
@@ -66,6 +187,8 @@ def main() -> int:
     print(f"Limit: {limit if limit is not None else 'unlimited'}")
     print(f"Run tests: {run_tests}")
     print()
+
+    ensure_current_month_partition()
 
     run_script("SITEMAP_COLLECTION_ALL", "collect_sitemaps.py", [])
     details_args = ["--limit", str(limit)] if limit is not None else []
