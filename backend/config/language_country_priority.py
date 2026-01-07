@@ -15,6 +15,7 @@
 9. 호주 (AU): ~$3B
 10. 브라질 (BR): ~$3B
 """
+from datetime import datetime
 
 # 언어별 우선 국가
 # key: 언어 코드 (ISO 639-1)
@@ -215,6 +216,8 @@ LANGUAGE_COUNTRY_PRIORITY = {
     # 스와힐리어: 탄자니아 > 케냐
     'sw': ['TZ', 'KE'],
 }
+
+SESSION_ID = None
 
 # 주요 언어 목록 (우선 수집 대상)
 # 글로벌 앱스토어 매출 상위 언어권
@@ -420,7 +423,12 @@ def select_best_pairs_for_collection(pairs: list, max_languages: int = 10) -> li
 if __name__ == '__main__':
     from utils.logger import get_timestamped_logger
 
-    logger = get_timestamped_logger("language_country_priority", file_prefix="language_country_priority")
+    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
+    logger = get_timestamped_logger(
+        "language_country_priority",
+        file_prefix="language_country_priority",
+        session_id=SESSION_ID,
+    )
 
     # 테스트 케이스
     logger.info("=== 언어별 최우선 국가 ===")

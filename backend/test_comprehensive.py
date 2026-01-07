@@ -19,11 +19,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.logger import get_test_logger
 
+SESSION_ID = None
+
 # 테스트 결과 저장용
 class TestResults:
-    def __init__(self):
+    def __init__(self, session_id: str):
+        self.session_id = session_id
         self.start_time = datetime.now()
-        self.logger = get_test_logger('comprehensive_test')
+        self.logger = get_test_logger('comprehensive_test', session_id=session_id)
         self.results = {
             'sitemap': {'app_store': {}, 'play_store': {}},
             'details': {'app_store': {}, 'play_store': {}},
@@ -193,7 +196,7 @@ def run_sitemap_collection(results: TestResults):
     # App Store - 첫 번째 sitemap 파일만 수집
     results.logger.info("\n[App Store 소량 수집]")
     try:
-        collector = AppStoreSitemapCollector(verbose=True)
+        collector = AppStoreSitemapCollector(verbose=True, session_id=results.session_id)
         content = fetch_url(APP_STORE_URLS[0], logger=results.logger)
         if content:
             sitemap_urls = parse_sitemap_index(content, logger=results.logger)
@@ -209,7 +212,7 @@ def run_sitemap_collection(results: TestResults):
     # Play Store - 첫 번째 sitemap 파일만 수집
     results.logger.info("\n[Play Store 소량 수집]")
     try:
-        collector = PlayStoreSitemapCollector(verbose=True)
+        collector = PlayStoreSitemapCollector(verbose=True, session_id=results.session_id)
         content = fetch_url(PLAY_STORE_URLS[0], logger=results.logger)
         if content:
             sitemap_urls = parse_sitemap_index(content, logger=results.logger)
@@ -246,7 +249,7 @@ def test_details_collection(results: TestResults, limit: int = 5):
         results.logger.info(f"  수집 대상: {len(app_ids)}개")
         if app_ids:
             results.logger.info(f"  앱 ID 샘플: {app_ids[:3]}")
-            collector = AppStoreDetailsCollector(verbose=True)
+            collector = AppStoreDetailsCollector(verbose=True, session_id=results.session_id)
             stats = collector.collect_batch(app_ids)
             results.results['details']['app_store'] = stats
     except Exception as e:
@@ -259,7 +262,7 @@ def test_details_collection(results: TestResults, limit: int = 5):
         results.logger.info(f"  수집 대상: {len(app_ids)}개")
         if app_ids:
             results.logger.info(f"  앱 ID 샘플: {app_ids[:3]}")
-            collector = PlayStoreDetailsCollector(verbose=True)
+            collector = PlayStoreDetailsCollector(verbose=True, session_id=results.session_id)
             stats = collector.collect_batch(app_ids)
             results.results['details']['play_store'] = stats
     except Exception as e:
@@ -289,7 +292,7 @@ def test_reviews_collection(results: TestResults, limit: int = 3):
         app_ids = get_app_store_review_apps(limit=limit)
         results.logger.info(f"  수집 대상: {len(app_ids)}개")
         if app_ids:
-            collector = AppStoreReviewsCollector(verbose=True)
+            collector = AppStoreReviewsCollector(verbose=True, session_id=results.session_id)
             stats = collector.collect_batch(app_ids)
             results.results['reviews']['app_store'] = stats
     except Exception as e:
@@ -301,7 +304,7 @@ def test_reviews_collection(results: TestResults, limit: int = 3):
         app_ids = get_play_store_review_apps(limit=limit)
         results.logger.info(f"  수집 대상: {len(app_ids)}개")
         if app_ids:
-            collector = PlayStoreReviewsCollector(verbose=True)
+            collector = PlayStoreReviewsCollector(verbose=True, session_id=results.session_id)
             stats = collector.collect_batch(app_ids)
             results.results['reviews']['play_store'] = stats
     except Exception as e:
@@ -580,7 +583,7 @@ def test_repeated_execution(results: TestResults, iterations: int = 3):
             from scrapers.app_store_details_collector import AppStoreDetailsCollector, get_apps_to_collect
             app_ids = get_apps_to_collect(limit=2)
             if app_ids:
-                collector = AppStoreDetailsCollector(verbose=False)
+                collector = AppStoreDetailsCollector(verbose=False, session_id=results.session_id)
                 stats = collector.collect_batch(app_ids)
                 all_stats.append({
                     'iteration': i + 1,
@@ -592,7 +595,7 @@ def test_repeated_execution(results: TestResults, iterations: int = 3):
             from scrapers.app_store_reviews_collector import AppStoreReviewsCollector, get_apps_for_review_collection
             review_apps = get_apps_for_review_collection(limit=1)
             if review_apps:
-                collector = AppStoreReviewsCollector(verbose=False)
+                collector = AppStoreReviewsCollector(verbose=False, session_id=results.session_id)
                 stats = collector.collect_batch(review_apps)
                 results.logger.info(f"    Reviews: {stats}")
 
@@ -720,7 +723,9 @@ def generate_final_report(results: TestResults):
 
 
 def main():
-    results = TestResults()
+    global SESSION_ID
+    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
+    results = TestResults(SESSION_ID)
     results.logger.info("=" * 70)
     results.logger.info("앱 발견 시스템 종합 테스트")
     results.logger.info(f"시작 시간: {datetime.now().isoformat()}")

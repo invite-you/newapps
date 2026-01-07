@@ -14,6 +14,7 @@ PYTHON_BIN = sys.executable
 DEFAULT_LIMIT = None
 DEFAULT_RUN_TESTS = False
 LOG_FILE_PREFIX = "collect_full_pipeline"
+SESSION_ID = None
 # psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
 DB_DSN = os.getenv("APP_DETAILS_DB_DSN")
 DB_HOST = os.getenv("APP_DETAILS_DB_HOST", "localhost")
@@ -189,6 +190,8 @@ def ensure_current_month_partition(logger) -> None:
 
 
 def main() -> int:
+    global SESSION_ID
+    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
     parser = argparse.ArgumentParser(
         description="Run full sitemap/details/reviews collection (tests optional)"
     )
@@ -205,7 +208,11 @@ def main() -> int:
     )
     args = parser.parse_args()
     from utils.logger import get_timestamped_logger
-    logger = get_timestamped_logger("collect_full_pipeline", file_prefix=LOG_FILE_PREFIX)
+    logger = get_timestamped_logger(
+        "collect_full_pipeline",
+        file_prefix=LOG_FILE_PREFIX,
+        session_id=SESSION_ID,
+    )
     start_ts = datetime.now().isoformat()
     start_perf = time.perf_counter()
     logger.info(f"[STEP START] collect_full_pipeline | {start_ts}")

@@ -24,14 +24,20 @@ from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
+SESSION_ID = None
 MAX_REVIEWS_TOTAL = 50000  # 실행당 최대 수집 리뷰 수 (무한루프 방지)
 BATCH_SIZE = 100  # 한 번에 가져올 리뷰 수
 
 
 class PlayStoreReviewsCollector:
-    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None):
+    def __init__(
+        self,
+        verbose: bool = True,
+        error_tracker: Optional[ErrorTracker] = None,
+        session_id: Optional[str] = None,
+    ):
         self.verbose = verbose
-        self.logger = get_collection_logger('PlayStoreReviews', verbose)
+        self.logger = get_collection_logger('PlayStoreReviews', verbose, session_id=session_id)
         self.error_tracker = error_tracker or ErrorTracker('play_store_reviews')
         self.stats = {
             'apps_processed': 0,
@@ -341,15 +347,21 @@ def get_apps_for_review_collection(limit: Optional[int] = None) -> List[str]:
 
 
 def main():
+    global SESSION_ID
+    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
     init_database()
 
     # 수집할 앱 목록
     app_ids = get_apps_for_review_collection(limit=10)
-    logger = get_timestamped_logger("play_store_reviews_main", file_prefix="play_store_reviews_main")
+    logger = get_timestamped_logger(
+        "play_store_reviews_main",
+        file_prefix="play_store_reviews_main",
+        session_id=SESSION_ID,
+    )
     logger.info(f"Found {len(app_ids)} apps for review collection")
 
     if app_ids:
-        collector = PlayStoreReviewsCollector(verbose=True)
+        collector = PlayStoreReviewsCollector(verbose=True, session_id=SESSION_ID)
         stats = collector.collect_batch(app_ids)
         logger.info(f"\nFinal Stats: {stats}")
 
