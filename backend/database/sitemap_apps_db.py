@@ -5,6 +5,7 @@ Sitemap Apps Database
 최적화: href 필드 제거 (불필요 - URL은 app_id/country로 재구성 가능)
 """
 import os
+import time
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -21,6 +22,8 @@ DB_USER = os.getenv("SITEMAP_DB_USER", "sitemap_apps")
 DB_PASSWORD = os.getenv("SITEMAP_DB_PASSWORD", "")
 LOG_FILE_PREFIX = "sitemap_apps_db"
 DB_LOGGER = get_timestamped_logger("sitemap_apps_db", file_prefix=LOG_FILE_PREFIX)
+DB_CONNECT_MAX_RETRIES = int(os.getenv("SITEMAP_DB_CONNECT_MAX_RETRIES", "5"))
+DB_CONNECT_RETRY_DELAY_SEC = float(os.getenv("SITEMAP_DB_CONNECT_RETRY_DELAY_SEC", "2.0"))
 
 
 def get_connection() -> psycopg.Connection:
@@ -29,8 +32,46 @@ def get_connection() -> psycopg.Connection:
         f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
         f"user={DB_USER} password={DB_PASSWORD}"
     )
-    conn = psycopg.connect(dsn, row_factory=dict_row)
-    return conn
+    last_exc = None
+    for attempt in range(1, DB_CONNECT_MAX_RETRIES + 1):
+        step_label = f"DB_CONNECT_ATTEMPT_{attempt}"
+        start_ts = datetime.now().isoformat()
+        start_monotonic = time.monotonic()
+        DB_LOGGER.info("[STEP START] %s | %s", step_label, start_ts)
+        try:
+            conn = psycopg.connect(dsn, row_factory=dict_row)
+            elapsed = time.monotonic() - start_monotonic
+            end_ts = datetime.now().isoformat()
+            DB_LOGGER.info(
+                "[STEP END] %s | %s | elapsed=%.2fs | status=SUCCESS",
+                step_label,
+                end_ts,
+                elapsed,
+            )
+            if attempt > 1:
+                DB_LOGGER.info("DB 연결 복구 완료: 시도 횟수=%s", attempt)
+            return conn
+        except psycopg.OperationalError as exc:
+            elapsed = time.monotonic() - start_monotonic
+            end_ts = datetime.now().isoformat()
+            DB_LOGGER.info(
+                "[STEP END] %s | %s | elapsed=%.2fs | status=FAIL",
+                step_label,
+                end_ts,
+                elapsed,
+            )
+            last_exc = exc
+            if "database system is starting up" in str(exc) and attempt < DB_CONNECT_MAX_RETRIES:
+                DB_LOGGER.warning(
+                    "DB 시작 대기 중: %s초 후 재시도 (%s/%s)",
+                    DB_CONNECT_RETRY_DELAY_SEC,
+                    attempt,
+                    DB_CONNECT_MAX_RETRIES,
+                )
+                time.sleep(DB_CONNECT_RETRY_DELAY_SEC)
+                continue
+            break
+    raise last_exc
 
 
 def init_database():
