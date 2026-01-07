@@ -3,14 +3,21 @@ App Details Database
 앱 상세정보, 다국어 정보, 수치 데이터, 리뷰를 저장하는 DB
 변경 시에만 누적 저장 (이력 관리)
 """
-import sqlite3
 import os
 import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
-DATABASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_PATH = os.path.join(DATABASE_DIR, 'app_details.db')
+import psycopg
+from psycopg.rows import dict_row
+
+# psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
+DB_DSN = os.getenv("APP_DETAILS_DB_DSN")
+DB_HOST = os.getenv("APP_DETAILS_DB_HOST", "localhost")
+DB_PORT = int(os.getenv("APP_DETAILS_DB_PORT", "5432"))
+DB_NAME = os.getenv("APP_DETAILS_DB_NAME", "app_details")
+DB_USER = os.getenv("APP_DETAILS_DB_USER", "app_details")
+DB_PASSWORD = os.getenv("APP_DETAILS_DB_PASSWORD", "")
 
 # 비교 제외 필드
 EXCLUDE_COMPARE_FIELDS = {'id', 'recorded_at'}
@@ -50,12 +57,13 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     return date_str
 
 
-def get_connection() -> sqlite3.Connection:
+def get_connection() -> psycopg.Connection:
     """DB 연결을 반환합니다."""
-    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    dsn = DB_DSN or (
+        f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
+        f"user={DB_USER} password={DB_PASSWORD}"
+    )
+    conn = psycopg.connect(dsn, row_factory=dict_row)
     return conn
 
 
@@ -67,7 +75,7 @@ def init_database():
     # apps: 앱 메타데이터 (변경 시에만 누적)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apps (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,             -- 'app_store' or 'play_store'
             bundle_id TEXT,
@@ -81,15 +89,15 @@ def init_database():
             screenshots TEXT,                   -- JSON array
             price REAL,
             currency TEXT,
-            free INTEGER,                       -- boolean
-            has_iap INTEGER,                    -- boolean
+            free BOOLEAN,
+            has_iap BOOLEAN,
             category_id TEXT,
             genre_id TEXT,
             genre_name TEXT,                    -- 장르명 (현지화)
             content_rating TEXT,
             content_rating_description TEXT,
             min_os_version TEXT,
-            file_size INTEGER,
+            file_size BIGINT,
             supported_devices TEXT,             -- JSON array
             release_date TEXT,
             updated_date TEXT,
@@ -102,7 +110,7 @@ def init_database():
     # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apps_localized (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             language TEXT NOT NULL,
@@ -117,7 +125,7 @@ def init_database():
     # apps_metrics: 수치 데이터 (변경 시에만 누적)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apps_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             score REAL,
@@ -133,7 +141,7 @@ def init_database():
     # app_reviews: 리뷰 (실행당 최대 20000건 수집, 이후 누적)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_reviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             review_id TEXT NOT NULL,            -- 외부 리뷰 ID
@@ -157,7 +165,7 @@ def init_database():
     # failed_apps: 영구 실패 앱 (재시도 안 함)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS failed_apps (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             reason TEXT,                        -- not_found, removed, etc.
@@ -169,7 +177,7 @@ def init_database():
     # collection_status: 수집 상태 추적
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS collection_status (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             details_collected_at TEXT,          -- 상세정보 마지막 수집 시각
@@ -179,6 +187,94 @@ def init_database():
             UNIQUE(app_id, platform)
         )
     """)
+
+    comment_sqls = [
+        "COMMENT ON TABLE apps IS '앱 스토어/플레이 스토어 메타데이터의 변경 이력을 누적 저장하는 테이블로, 수집 원본 응답을 기록해 추후 비교/분석에 사용한다.'",
+        "COMMENT ON COLUMN apps.id IS '내부 기본키로 각 수집 기록을 식별하며 조인/추적에 사용한다. BIGSERIAL 자동 생성이므로 NULL을 허용하지 않는다.'",
+        "COMMENT ON COLUMN apps.app_id IS '스토어에서 제공하는 앱 고유 식별자(앱스토어 numeric ID 또는 플레이스토어 패키지명)로 수집 응답에서 가져오며 모든 조회의 기준 키이므로 NULL 불가.'",
+        "COMMENT ON COLUMN apps.platform IS 'app_store 또는 play_store 구분값으로 수집 파이프라인의 소스 식별에 사용하며 필수 필드이므로 NULL 불가.'",
+        "COMMENT ON COLUMN apps.bundle_id IS '앱 번들/패키지 식별자(주로 iOS bundle id)로 원본 응답에 존재할 때만 사용하며 일부 스토어에서 미제공될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.version IS '스토어에 표시되는 앱 버전 문자열로 업데이트 이력 비교에 사용하며 원본에 없을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.developer IS '개발사/개발자명으로 스토어 응답에서 수집되어 화면 표시/필터링에 사용하며 미제공 가능성이 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.developer_id IS '스토어의 개발자 계정/퍼블리셔 식별자이며 개발자 기준 집계에 사용하지만 일부 스토어에서 제공되지 않아 NULL 허용.'",
+        "COMMENT ON COLUMN apps.developer_email IS '개발자 연락 이메일로 스토어 메타데이터에서 수집되며 연락처 표시/검증에 사용하나 미기재 가능성이 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.developer_website IS '개발자 공식 웹사이트 URL로 스토어 응답에서 수집되며 외부 링크 제공에 사용하고 선택 항목이라 NULL 허용.'",
+        "COMMENT ON COLUMN apps.icon_url IS '앱 아이콘 이미지 URL로 스토어 응답에서 수집되며 UI 표시용으로 사용하나 간혹 누락될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.header_image IS '앱 상단 헤더 이미지 URL(주로 플레이스토어)로 수집 응답에서 가져오며 없는 경우가 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.screenshots IS '스크린샷 URL 목록(JSON 배열)으로 원본 응답에서 수집하여 UI 갤러리 표시에 사용하며 미제공 시 NULL 허용.'",
+        "COMMENT ON COLUMN apps.price IS '현재 가격(숫자)으로 스토어 응답에서 수집하여 결제/가격 분석에 사용하며 무료만 제공되거나 누락될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.currency IS '가격 통화 코드로 스토어 응답에서 수집되며 가격 표시/환산에 사용하나 가격 정보가 없으면 NULL 허용.'",
+        "COMMENT ON COLUMN apps.free IS '무료 여부 플래그로 스토어 응답에서 추출하며 가격 분석에 사용하고 일부 응답에서 미제공될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.has_iap IS '인앱결제 존재 여부 플래그로 스토어 응답에서 수집해 과금 분석에 사용하지만 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.category_id IS '스토어 카테고리 ID로 원본 응답에서 수집되어 분류/필터링에 사용하며 스토어별 제공 방식 차이로 NULL 허용.'",
+        "COMMENT ON COLUMN apps.genre_id IS '장르 ID로 스토어 응답에서 수집되어 분류에 사용하며 미제공 가능성이 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.genre_name IS '현지화된 장르명 문자열로 스토어 응답에서 수집되어 UI 표시/검색에 사용하며 없을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.content_rating IS '연령 등급 코드로 스토어에서 제공되며 연령 제한 표시/정책 분석에 사용하지만 일부 앱은 미제공되어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.content_rating_description IS '연령 등급 설명 문구로 스토어 응답에서 수집되며 상세 표시/분석에 사용하고 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.min_os_version IS '지원 최소 OS 버전으로 스토어 메타데이터에서 수집되어 호환성 분석에 사용하나 누락될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.file_size IS '설치 파일 크기(바이트)로 스토어 응답에서 수집되어 용량 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.supported_devices IS '지원 기기 목록(JSON 배열)으로 스토어 응답에서 수집되며 호환성 표시/분석에 사용하고 미제공 시 NULL 허용.'",
+        "COMMENT ON COLUMN apps.release_date IS '최초 출시일로 스토어 응답에서 수집되어 연혁 분석에 사용하며 오래된 앱은 누락될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.updated_date IS '마지막 업데이트 일자로 스토어 응답에서 수집되어 버려진 앱 판단 등에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.privacy_policy_url IS '개인정보처리방침 URL로 스토어 응답에서 수집되어 법적 링크 제공에 사용하며 미기재 가능성이 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps.recorded_at IS '본 레코드를 수집/기록한 시각으로 변경 이력 정렬에 사용되며 시스템에서 항상 기록하므로 NULL 불가.'",
+        "COMMENT ON TABLE apps_localized IS '앱의 다국어 텍스트(제목/설명/릴리즈 노트) 변경 이력을 누적 저장하는 테이블로, 현지화 비교 및 UI 표시용으로 사용한다.'",
+        "COMMENT ON COLUMN apps_localized.id IS '내부 기본키로 다국어 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
+        "COMMENT ON COLUMN apps_localized.app_id IS '앱 고유 식별자로 원본 스토어 응답에서 수집되며 앱별 로컬라이즈 이력 조회에 필수이므로 NULL 불가.'",
+        "COMMENT ON COLUMN apps_localized.platform IS '스토어 구분값(app_store/play_store)으로 수집 소스를 명확히 하기 위해 사용하며 NULL 불가.'",
+        "COMMENT ON COLUMN apps_localized.language IS '언어 코드(예: en-US, ko-KR)로 스토어 응답에서 수집되어 언어별 표시/비교에 사용하며 NULL 불가.'",
+        "COMMENT ON COLUMN apps_localized.title IS '로컬라이즈된 앱 제목으로 스토어 응답에서 수집되어 UI 표시에 사용하고 일부 언어에서 누락될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_localized.summary IS '로컬라이즈된 요약 문구로 스토어 응답에서 수집되어 목록 표시에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_localized.description IS '로컬라이즈된 상세 설명으로 스토어 응답에서 수집되어 상세 페이지에 사용하고 일부 언어에서 누락될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_localized.release_notes IS '로컬라이즈된 릴리즈 노트로 스토어 응답에서 수집되어 업데이트 내용 표시에 사용하며 없는 경우가 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_localized.recorded_at IS '본 로컬라이즈 레코드의 수집 시각으로 이력 정렬에 사용되며 시스템에서 항상 기록하므로 NULL 불가.'",
+        "COMMENT ON TABLE apps_metrics IS '앱의 평점/리뷰 수 등 수치 지표의 변경 이력을 저장하는 테이블로, 시계열 분석과 품질 평가에 사용한다.'",
+        "COMMENT ON COLUMN apps_metrics.id IS '내부 기본키로 수치 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
+        "COMMENT ON COLUMN apps_metrics.app_id IS '앱 고유 식별자로 스토어 응답에서 수집되어 앱별 지표 조회에 필수이므로 NULL 불가.'",
+        "COMMENT ON COLUMN apps_metrics.platform IS '스토어 구분값으로 수집 소스 식별에 사용하며 NULL 불가.'",
+        "COMMENT ON COLUMN apps_metrics.score IS '평균 평점(예: 4.5)으로 스토어 응답에서 수집되어 품질 지표로 사용하고 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_metrics.ratings IS '평점 개수로 스토어 응답에서 수집되어 규모 파악에 사용하며 일부 응답에서 누락되어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_metrics.reviews_count IS '리뷰 총 개수로 스토어 응답에서 수집되어 수집 범위 판단에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_metrics.installs IS '설치 수 구간 문자열(예: \"100,000+\")로 플레이스토어에서 제공되며 마케팅 분석에 사용하고 앱스토어에는 없어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_metrics.installs_exact IS '설치 수 정확 값(플레이스토어 제공 시)으로 정밀 분석에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_metrics.histogram IS '별점 분포(JSON 배열 [1~5])로 스토어 응답에서 수집되어 평점 구조 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN apps_metrics.recorded_at IS '수치 데이터 수집 시각으로 변경 이력 분석에 사용되며 항상 기록하므로 NULL 불가.'",
+        "COMMENT ON TABLE app_reviews IS '앱 리뷰 원문을 누적 저장하는 테이블로, 정성 분석/모니터링 및 중복 수집 방지에 사용한다.'",
+        "COMMENT ON COLUMN app_reviews.id IS '내부 기본키로 리뷰 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
+        "COMMENT ON COLUMN app_reviews.app_id IS '앱 고유 식별자로 스토어 응답에서 수집되어 리뷰를 앱과 연결하는 핵심 키이므로 NULL 불가.'",
+        "COMMENT ON COLUMN app_reviews.platform IS '스토어 구분값으로 리뷰 출처를 구분하는 데 사용하며 NULL 불가.'",
+        "COMMENT ON COLUMN app_reviews.review_id IS '스토어가 부여한 리뷰 고유 ID로 중복 수집 방지에 사용하며 필수이므로 NULL 불가.'",
+        "COMMENT ON COLUMN app_reviews.country IS '리뷰 작성 국가 코드로 스토어 응답에서 수집되어 국가별 분석에 사용하고 일부 리뷰는 미제공되어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.language IS '리뷰 언어 코드로 스토어 응답에서 수집되어 언어별 분석에 사용하며 미제공 가능성이 있어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.user_name IS '리뷰 작성자 표시명으로 스토어 응답에서 수집되어 UI 표시/분석에 사용하나 익명화될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.user_image IS '리뷰 작성자 프로필 이미지 URL로 스토어 응답에서 수집되어 UI에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.score IS '리뷰 평점(정수)로 스토어 응답에서 수집되어 품질 분석에 사용하며 일부 리뷰에서 누락될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.title IS '리뷰 제목(App Store 전용)으로 스토어 응답에서 수집되어 표시/분석에 사용하고 Play Store에는 없어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.content IS '리뷰 본문 텍스트로 스토어 응답에서 수집되어 감성/키워드 분석에 사용하며 비어 있을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.thumbs_up_count IS '도움돼요/좋아요 수로 스토어 응답에서 수집되어 영향력 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.app_version IS '리뷰 작성 시점의 앱 버전으로 스토어 응답에서 수집되어 버전별 이슈 분석에 사용하며 누락될 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.reviewed_at IS '리뷰 작성 시각으로 스토어 응답에서 수집되어 시계열 분석에 사용하나 일부 리뷰는 누락되어 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.reply_content IS '개발자 답변 내용으로 스토어 응답에서 수집되어 대응 분석에 사용하며 답변이 없으면 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.replied_at IS '개발자 답변 시각으로 스토어 응답에서 수집되어 응답 속도 분석에 사용하고 답변이 없으면 NULL 허용.'",
+        "COMMENT ON COLUMN app_reviews.recorded_at IS '리뷰 레코드 수집 시각으로 중복 수집 관리에 사용되며 항상 기록하므로 NULL 불가.'",
+        "COMMENT ON TABLE failed_apps IS '수집 불가로 판단된 앱을 영구 실패 목록으로 관리하는 테이블로, 반복 수집 시도를 방지하는 데 사용한다.'",
+        "COMMENT ON COLUMN failed_apps.id IS '내부 기본키로 실패 레코드 식별에 사용하며 자동 생성이므로 NULL 불가.'",
+        "COMMENT ON COLUMN failed_apps.app_id IS '실패한 앱의 고유 식별자로 스토어 응답/오류에서 추출되며 재시도 차단에 사용하므로 NULL 불가.'",
+        "COMMENT ON COLUMN failed_apps.platform IS '스토어 구분값으로 실패 출처를 구분하며 NULL 불가.'",
+        "COMMENT ON COLUMN failed_apps.reason IS '실패 사유(예: not_found, removed)로 수집 로직에서 기록되어 진단/리포트에 사용하며 정보가 없을 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN failed_apps.failed_at IS '실패 판정 시각으로 수집 로직에서 기록되어 이력 관리에 사용하며 NULL 불가.'",
+        "COMMENT ON TABLE collection_status IS '앱별 상세/리뷰 수집 상태를 관리하는 테이블로, 수집 스케줄링과 중복 수집 방지에 사용한다.'",
+        "COMMENT ON COLUMN collection_status.id IS '내부 기본키로 상태 레코드 식별에 사용하며 자동 생성이므로 NULL 불가.'",
+        "COMMENT ON COLUMN collection_status.app_id IS '앱 고유 식별자로 상태를 앱에 매핑하기 위한 핵심 키이므로 NULL 불가.'",
+        "COMMENT ON COLUMN collection_status.platform IS '스토어 구분값으로 수집 상태의 출처를 구분하며 NULL 불가.'",
+        "COMMENT ON COLUMN collection_status.details_collected_at IS '상세정보 마지막 수집 시각으로 수집 스케줄 판단에 사용하며 아직 수집 전일 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN collection_status.reviews_collected_at IS '리뷰 마지막 수집 시각으로 수집 스케줄 판단에 사용하며 아직 수집 전일 수 있어 NULL 허용.'",
+        "COMMENT ON COLUMN collection_status.reviews_total_count IS '현재까지 수집된 리뷰 총수로 진행률 계산에 사용하며 초기에는 0으로 유지되므로 NULL 허용하지 않고 기본값을 둔다.'",
+        "COMMENT ON COLUMN collection_status.initial_review_done IS '최초 리뷰 수집 완료 여부(0/1)로 이후 중복 수집 중단 판단에 사용하며 기본값 0을 사용하므로 NULL 허용하지 않는다.'",
+    ]
+
+    for comment_sql in comment_sqls:
+        cursor.execute(comment_sql)
 
     # 인덱스 생성
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_app_id ON apps(app_id, platform)")
@@ -193,7 +289,7 @@ def init_database():
 
     conn.commit()
     conn.close()
-    print(f"Database initialized at {DATABASE_PATH}")
+    print("Database initialized.")
 
 
 def normalize_json_field(value: Any) -> str:
@@ -267,7 +363,7 @@ def get_latest_app(app_id: str, platform: str) -> Optional[Dict]:
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM apps
-        WHERE app_id = ? AND platform = ?
+        WHERE app_id = %s AND platform = %s
         ORDER BY recorded_at DESC
         LIMIT 1
     """, (app_id, platform))
@@ -294,10 +390,12 @@ def insert_app(data: Dict) -> Tuple[bool, int]:
     data['recorded_at'] = datetime.now().isoformat()
 
     columns = ', '.join(data.keys())
-    placeholders = ', '.join(['?' for _ in data])
-    cursor.execute(f"INSERT INTO apps ({columns}) VALUES ({placeholders})", list(data.values()))
-
-    record_id = cursor.lastrowid
+    placeholders = ', '.join(['%s' for _ in data])
+    cursor.execute(
+        f"INSERT INTO apps ({columns}) VALUES ({placeholders}) RETURNING id",
+        list(data.values())
+    )
+    record_id = cursor.fetchone()['id']
     conn.commit()
     conn.close()
     return True, record_id
@@ -309,7 +407,7 @@ def get_latest_app_localized(app_id: str, platform: str, language: str) -> Optio
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM apps_localized
-        WHERE app_id = ? AND platform = ? AND language = ?
+        WHERE app_id = %s AND platform = %s AND language = %s
         ORDER BY recorded_at DESC
         LIMIT 1
     """, (app_id, platform, language))
@@ -333,10 +431,12 @@ def insert_app_localized(data: Dict) -> Tuple[bool, int]:
     data['recorded_at'] = datetime.now().isoformat()
 
     columns = ', '.join(data.keys())
-    placeholders = ', '.join(['?' for _ in data])
-    cursor.execute(f"INSERT INTO apps_localized ({columns}) VALUES ({placeholders})", list(data.values()))
-
-    record_id = cursor.lastrowid
+    placeholders = ', '.join(['%s' for _ in data])
+    cursor.execute(
+        f"INSERT INTO apps_localized ({columns}) VALUES ({placeholders}) RETURNING id",
+        list(data.values())
+    )
+    record_id = cursor.fetchone()['id']
     conn.commit()
     conn.close()
     return True, record_id
@@ -348,7 +448,7 @@ def get_latest_app_metrics(app_id: str, platform: str) -> Optional[Dict]:
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM apps_metrics
-        WHERE app_id = ? AND platform = ?
+        WHERE app_id = %s AND platform = %s
         ORDER BY recorded_at DESC
         LIMIT 1
     """, (app_id, platform))
@@ -371,10 +471,12 @@ def insert_app_metrics(data: Dict) -> Tuple[bool, int]:
     data['recorded_at'] = datetime.now().isoformat()
 
     columns = ', '.join(data.keys())
-    placeholders = ', '.join(['?' for _ in data])
-    cursor.execute(f"INSERT INTO apps_metrics ({columns}) VALUES ({placeholders})", list(data.values()))
-
-    record_id = cursor.lastrowid
+    placeholders = ', '.join(['%s' for _ in data])
+    cursor.execute(
+        f"INSERT INTO apps_metrics ({columns}) VALUES ({placeholders}) RETURNING id",
+        list(data.values())
+    )
+    record_id = cursor.fetchone()['id']
     conn.commit()
     conn.close()
     return True, record_id
@@ -386,7 +488,7 @@ def review_exists(app_id: str, platform: str, review_id: str) -> bool:
     cursor = conn.cursor()
     cursor.execute("""
         SELECT 1 FROM app_reviews
-        WHERE app_id = ? AND platform = ? AND review_id = ?
+        WHERE app_id = %s AND platform = %s AND review_id = %s
     """, (app_id, platform, review_id))
     exists = cursor.fetchone() is not None
     conn.close()
@@ -395,24 +497,21 @@ def review_exists(app_id: str, platform: str, review_id: str) -> bool:
 
 def insert_review(data: Dict) -> bool:
     """리뷰를 삽입합니다. 이미 존재하면 False 반환."""
-    if review_exists(data['app_id'], data['platform'], data['review_id']):
-        return False
-
     conn = get_connection()
     cursor = conn.cursor()
     data['recorded_at'] = datetime.now().isoformat()
 
     columns = ', '.join(data.keys())
-    placeholders = ', '.join(['?' for _ in data])
-
-    try:
-        cursor.execute(f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders})", list(data.values()))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False
+    placeholders = ', '.join(['%s' for _ in data])
+    cursor.execute(
+        f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
+        "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
+        list(data.values())
+    )
+    inserted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return inserted
 
 
 def insert_reviews_batch(reviews: List[Dict]) -> int:
@@ -428,13 +527,14 @@ def insert_reviews_batch(reviews: List[Dict]) -> int:
     for data in reviews:
         data['recorded_at'] = now
         columns = ', '.join(data.keys())
-        placeholders = ', '.join(['?' for _ in data])
-
-        try:
-            cursor.execute(f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders})", list(data.values()))
+        placeholders = ', '.join(['%s' for _ in data])
+        cursor.execute(
+            f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
+            "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
+            list(data.values())
+        )
+        if cursor.rowcount > 0:
             inserted += 1
-        except sqlite3.IntegrityError:
-            pass  # 중복 리뷰
 
     conn.commit()
     conn.close()
@@ -446,7 +546,7 @@ def is_failed_app(app_id: str, platform: str) -> bool:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT 1 FROM failed_apps WHERE app_id = ? AND platform = ?
+        SELECT 1 FROM failed_apps WHERE app_id = %s AND platform = %s
     """, (app_id, platform))
     exists = cursor.fetchone() is not None
     conn.close()
@@ -460,8 +560,9 @@ def mark_app_failed(app_id: str, platform: str, reason: str):
     now = datetime.now().isoformat()
 
     cursor.execute("""
-        INSERT OR REPLACE INTO failed_apps (app_id, platform, reason, failed_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO failed_apps (app_id, platform, reason, failed_at)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (app_id, platform) DO NOTHING
     """, (app_id, platform, reason, now))
 
     conn.commit()
@@ -473,7 +574,7 @@ def get_collection_status(app_id: str, platform: str) -> Optional[Dict]:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT * FROM collection_status WHERE app_id = ? AND platform = ?
+        SELECT * FROM collection_status WHERE app_id = %s AND platform = %s
     """, (app_id, platform))
     row = cursor.fetchone()
     conn.close()
@@ -492,7 +593,7 @@ def update_collection_status(app_id: str, platform: str,
 
     # 기존 상태 확인
     cursor.execute("""
-        SELECT * FROM collection_status WHERE app_id = ? AND platform = ?
+        SELECT * FROM collection_status WHERE app_id = %s AND platform = %s
     """, (app_id, platform))
     existing = cursor.fetchone()
 
@@ -501,31 +602,31 @@ def update_collection_status(app_id: str, platform: str,
         params = []
 
         if details_collected:
-            updates.append("details_collected_at = ?")
+            updates.append("details_collected_at = %s")
             params.append(now)
 
         if reviews_collected:
-            updates.append("reviews_collected_at = ?")
+            updates.append("reviews_collected_at = %s")
             params.append(now)
 
         if reviews_count is not None:
-            updates.append("reviews_total_count = ?")
+            updates.append("reviews_total_count = %s")
             params.append(reviews_count)
 
         if initial_review_done is not None:
-            updates.append("initial_review_done = ?")
+            updates.append("initial_review_done = %s")
             params.append(1 if initial_review_done else 0)
 
         if updates:
             params.extend([app_id, platform])
             cursor.execute(f"""
                 UPDATE collection_status SET {', '.join(updates)}
-                WHERE app_id = ? AND platform = ?
+                WHERE app_id = %s AND platform = %s
             """, params)
     else:
         cursor.execute("""
             INSERT INTO collection_status (app_id, platform, details_collected_at, reviews_collected_at, reviews_total_count, initial_review_done)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (
             app_id, platform,
             now if details_collected else None,
@@ -543,7 +644,7 @@ def get_review_count(app_id: str, platform: str) -> int:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT COUNT(*) as count FROM app_reviews WHERE app_id = ? AND platform = ?
+        SELECT COUNT(*) as count FROM app_reviews WHERE app_id = %s AND platform = %s
     """, (app_id, platform))
     count = cursor.fetchone()['count']
     conn.close()
@@ -556,7 +657,7 @@ def get_latest_review_id(app_id: str, platform: str) -> Optional[str]:
     cursor = conn.cursor()
     cursor.execute("""
         SELECT review_id FROM app_reviews
-        WHERE app_id = ? AND platform = ?
+        WHERE app_id = %s AND platform = %s
         ORDER BY reviewed_at DESC
         LIMIT 1
     """, (app_id, platform))
@@ -570,7 +671,7 @@ def get_all_review_ids(app_id: str, platform: str) -> set:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT review_id FROM app_reviews WHERE app_id = ? AND platform = ?
+        SELECT review_id FROM app_reviews WHERE app_id = %s AND platform = %s
     """, (app_id, platform))
     ids = {row['review_id'] for row in cursor.fetchall()}
     conn.close()
@@ -606,7 +707,7 @@ def get_failed_app_ids(platform: str) -> set:
     """실패한 앱 ID 목록을 반환합니다."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT app_id FROM failed_apps WHERE platform = ?", (platform,))
+    cursor.execute("SELECT app_id FROM failed_apps WHERE platform = %s", (platform,))
     ids = {row['app_id'] for row in cursor.fetchall()}
     conn.close()
     return ids
@@ -631,13 +732,13 @@ def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
                    ROW_NUMBER() OVER (PARTITION BY app_id, platform ORDER BY recorded_at DESC) as rn
             FROM apps
         ) a ON cs.app_id = a.app_id AND cs.platform = a.platform AND a.rn = 1
-        WHERE cs.platform = ?
+        WHERE cs.platform = %s
           AND cs.{collected_at_field} IS NOT NULL
-          AND cs.{collected_at_field} > datetime('now', '-{ABANDONED_COLLECTION_INTERVAL_DAYS} days')
+          AND cs.{collected_at_field} > (now() - interval '{ABANDONED_COLLECTION_INTERVAL_DAYS} days')
           AND (
               -- 2년 이상 업데이트 안 됨 (버려진 앱)
-              (a.updated_date IS NOT NULL AND date(a.updated_date) < date('now', '-{ABANDONED_THRESHOLD_DAYS} days'))
-              OR (a.updated_date IS NULL AND a.release_date IS NOT NULL AND date(a.release_date) < date('now', '-{ABANDONED_THRESHOLD_DAYS} days'))
+              (a.updated_date IS NOT NULL AND a.updated_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
+              OR (a.updated_date IS NULL AND a.release_date IS NOT NULL AND a.release_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
           )
     """, (platform,))
 
