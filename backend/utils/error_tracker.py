@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
-from .logger import get_logger, LOG_DIR
+from .logger import get_timestamped_logger, LOG_DIR
 
 
 class ErrorStep(Enum):
@@ -65,9 +65,9 @@ class ErrorTracker:
         self.max_errors = max_errors
         self.errors: List[ErrorRecord] = []
         self.error_counts: Dict[str, int] = {}  # step별 에러 카운트
-        self.logger = get_logger(
+        self.logger = get_timestamped_logger(
             f"error_tracker_{name}",
-            log_file=f"errors_{name}.log"
+            file_prefix=f"errors_{name}",
         )
 
     def add_error(
@@ -256,32 +256,32 @@ class ErrorTracker:
         """콘솔에 요약 출력"""
         summary = self.get_summary()
 
-        print("\n" + "=" * 60)
-        print("에러 추적 요약")
-        print("=" * 60)
-        print(f"총 에러 수: {summary['total_errors']}")
-        print(f"에러 발생 앱 수: {summary['unique_apps_with_errors']}")
+        self.logger.info("\n" + "=" * 60)
+        self.logger.info("에러 추적 요약")
+        self.logger.info("=" * 60)
+        self.logger.info(f"총 에러 수: {summary['total_errors']}")
+        self.logger.info(f"에러 발생 앱 수: {summary['unique_apps_with_errors']}")
 
-        print("\n[플랫폼별 에러]")
+        self.logger.info("\n[플랫폼별 에러]")
         for platform, count in summary['errors_by_platform'].items():
             if count > 0:
-                print(f"  {platform}: {count}건")
+                self.logger.info(f"  {platform}: {count}건")
 
-        print("\n[단계별 에러]")
+        self.logger.info("\n[단계별 에러]")
         for step, count in sorted(summary['errors_by_step'].items(), key=lambda x: -x[1]):
-            print(f"  {step}: {count}건")
+            self.logger.info(f"  {step}: {count}건")
 
-        print("\n[에러 유형별]")
+        self.logger.info("\n[에러 유형별]")
         for error_type, count in sorted(summary['error_types'].items(), key=lambda x: -x[1])[:10]:
-            print(f"  {error_type}: {count}건")
+            self.logger.info(f"  {error_type}: {count}건")
 
-        print("\n[최근 에러 (최대 10개)]")
+        self.logger.info("\n[최근 에러 (최대 10개)]")
         for err in summary['recent_errors'][-10:]:
             app_info = f"app={err['app_id']}" if err['app_id'] else "no_app"
-            print(f"  [{err['platform']}:{err['step']}] {app_info}")
-            print(f"    {err['error_type']}: {err['error_message'][:80]}")
+            self.logger.info(f"  [{err['platform']}:{err['step']}] {app_info}")
+            self.logger.info(f"    {err['error_type']}: {err['error_message'][:80]}")
 
-        print("=" * 60 + "\n")
+        self.logger.info("=" * 60 + "\n")
 
 
 # 전역 에러 트래커 (싱글톤 패턴)

@@ -25,6 +25,12 @@ def ensure_log_dir():
         os.makedirs(LOG_DIR)
 
 
+def _build_timestamped_log_file(prefix: str, timestamp: Optional[str] = None) -> str:
+    """타임스탬프가 포함된 로그 파일명을 생성합니다."""
+    resolved_timestamp = timestamp or datetime.now().strftime('%Y%m%d_%H%M%S')
+    return f"{prefix}_{resolved_timestamp}.log"
+
+
 def get_logger(
     name: str,
     log_file: Optional[str] = None,
@@ -83,6 +89,18 @@ def get_logger(
     return logger
 
 
+def get_timestamped_logger(
+    name: str,
+    file_prefix: str,
+    level: int = logging.INFO,
+    console: bool = True,
+    file_logging: bool = True
+) -> logging.Logger:
+    """타임스탬프 파일명을 사용하는 로거를 생성합니다."""
+    log_file = _build_timestamped_log_file(file_prefix)
+    return get_logger(name, log_file=log_file, level=level, console=console, file_logging=file_logging)
+
+
 def get_collection_logger(collector_name: str, verbose: bool = True) -> logging.Logger:
     """
     수집기용 로거를 생성합니다.
@@ -95,8 +113,8 @@ def get_collection_logger(collector_name: str, verbose: bool = True) -> logging.
         설정된 Logger 인스턴스
     """
     level = logging.DEBUG if verbose else logging.WARNING
-    log_file = f"collector_{collector_name.lower()}.log"
-    return get_logger(collector_name, log_file=log_file, level=level)
+    log_prefix = f"collector_{collector_name.lower()}"
+    return get_timestamped_logger(collector_name, file_prefix=log_prefix, level=level)
 
 
 def get_test_logger(test_name: str = 'long_running_test') -> logging.Logger:
@@ -109,10 +127,7 @@ def get_test_logger(test_name: str = 'long_running_test') -> logging.Logger:
     Returns:
         설정된 Logger 인스턴스
     """
-    # 테스트 시작 시간을 포함한 파일명
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = f"{test_name}_{timestamp}.log"
-    return get_logger(test_name, log_file=log_file, level=logging.DEBUG)
+    return get_timestamped_logger(test_name, file_prefix=test_name, level=logging.DEBUG)
 
 
 class CollectorLogger:

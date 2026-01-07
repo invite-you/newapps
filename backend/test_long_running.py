@@ -13,8 +13,6 @@ import os
 import json
 import time
 from datetime import datetime, timedelta
-from collections import defaultdict
-import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -90,9 +88,9 @@ class LongRunningTest:
         try:
             from scrapers.app_store_sitemap_collector import AppStoreSitemapCollector, SITEMAP_INDEX_URLS
             collector = AppStoreSitemapCollector(verbose=False)
-            content = fetch_url(SITEMAP_INDEX_URLS[0])
+            content = fetch_url(SITEMAP_INDEX_URLS[0], logger=self.logger)
             if content:
-                sitemap_urls = parse_sitemap_index(content)
+                sitemap_urls = parse_sitemap_index(content, logger=self.logger)
                 for url in sitemap_urls[:limit_files]:
                     collector.process_sitemap_file(url)
 
@@ -105,14 +103,15 @@ class LongRunningTest:
                 self.stats['new_app_discovery']['by_platform']['app_store'] = collector.stats['new_localizations']
         except Exception as e:
             self.add_error('sitemap_app_store', str(e))
+            self.logger.exception("[sitemap_app_store] 상세 예외")
 
         # Play Store
         try:
             from scrapers.play_store_sitemap_collector import PlayStoreSitemapCollector, SITEMAP_INDEX_URLS
             collector = PlayStoreSitemapCollector(verbose=False)
-            content = fetch_url(SITEMAP_INDEX_URLS[0])
+            content = fetch_url(SITEMAP_INDEX_URLS[0], logger=self.logger)
             if content:
-                sitemap_urls = parse_sitemap_index(content)
+                sitemap_urls = parse_sitemap_index(content, logger=self.logger)
                 for url in sitemap_urls[:limit_files]:
                     collector.process_sitemap_file(url)
 
@@ -124,6 +123,7 @@ class LongRunningTest:
                 self.stats['new_app_discovery']['by_platform']['play_store'] = collector.stats['new_localizations']
         except Exception as e:
             self.add_error('sitemap_play_store', str(e))
+            self.logger.exception("[sitemap_play_store] 상세 예외")
 
     def run_details_collection(self, limit: int = 5):
         """앱 상세정보 수집"""
@@ -151,6 +151,7 @@ class LongRunningTest:
                 self.stats['time_series']['changed_recorded'] += stats['new_records']
         except Exception as e:
             self.add_error('details_app_store', str(e))
+            self.logger.exception("[details_app_store] 상세 예외")
 
         # Play Store
         try:
@@ -171,6 +172,7 @@ class LongRunningTest:
                 self.stats['time_series']['changed_recorded'] += stats['new_records']
         except Exception as e:
             self.add_error('details_play_store', str(e))
+            self.logger.exception("[details_play_store] 상세 예외")
 
     def run_reviews_collection(self, limit: int = 2):
         """리뷰 수집"""
@@ -192,6 +194,7 @@ class LongRunningTest:
                 self.stats['reviews']['app_store']['errors'] += stats['errors']
         except Exception as e:
             self.add_error('reviews_app_store', str(e))
+            self.logger.exception("[reviews_app_store] 상세 예외")
 
         # Play Store
         try:
@@ -207,6 +210,7 @@ class LongRunningTest:
                 self.stats['reviews']['play_store']['errors'] += stats['errors']
         except Exception as e:
             self.add_error('reviews_play_store', str(e))
+            self.logger.exception("[reviews_play_store] 상세 예외")
 
     def check_korean_encoding(self):
         """한글 데이터 인코딩 확인"""
@@ -252,6 +256,7 @@ class LongRunningTest:
 
         except Exception as e:
             self.add_error('encoding_check', str(e))
+            self.logger.exception("[encoding_check] 상세 예외")
 
     def inject_new_app(self, iteration: int):
         """신규 앱 주입 테스트 (반복 실행 중 새 앱 추가)"""
@@ -286,6 +291,7 @@ class LongRunningTest:
 
         except Exception as e:
             self.add_error('inject_new_app', str(e))
+            self.logger.exception("[inject_new_app] 상세 예외")
 
     def get_db_stats(self):
         """현재 DB 통계 가져오기"""
@@ -298,6 +304,7 @@ class LongRunningTest:
             return {'sitemap': sitemap, 'details': details}
         except Exception as e:
             self.add_error('get_db_stats', str(e))
+            self.logger.exception("[get_db_stats] 상세 예외")
             return {}
 
     def run_iteration(self, iteration: int):
@@ -342,73 +349,73 @@ class LongRunningTest:
         """최종 리포트 생성"""
         elapsed = self.elapsed_minutes()
 
-        print("\n" + "=" * 70)
-        print("장시간 테스트 최종 리포트")
-        print("=" * 70)
-        print(f"\n테스트 시간: {elapsed:.1f}분")
-        print(f"반복 횟수: {self.stats['iterations']}")
+        self.logger.info("\n" + "=" * 70)
+        self.logger.info("장시간 테스트 최종 리포트")
+        self.logger.info("=" * 70)
+        self.logger.info(f"\n테스트 시간: {elapsed:.1f}분")
+        self.logger.info(f"반복 횟수: {self.stats['iterations']}")
 
-        print("\n[Sitemap 수집 통계]")
+        self.logger.info("\n[Sitemap 수집 통계]")
         for platform in ['app_store', 'play_store']:
             s = self.stats['sitemap'][platform]
-            print(f"  {platform}:")
-            print(f"    - 처리된 파일: {s['files_processed']}")
-            print(f"    - 스킵된 파일: {s['files_skipped']}")
-            print(f"    - 신규 로컬라이제이션: {s['new_localizations']}")
-            print(f"    - 에러: {s['errors']}")
+            self.logger.info(f"  {platform}:")
+            self.logger.info(f"    - 처리된 파일: {s['files_processed']}")
+            self.logger.info(f"    - 스킵된 파일: {s['files_skipped']}")
+            self.logger.info(f"    - 신규 로컬라이제이션: {s['new_localizations']}")
+            self.logger.info(f"    - 에러: {s['errors']}")
 
-        print("\n[상세정보 수집 통계]")
+        self.logger.info("\n[상세정보 수집 통계]")
         for platform in ['app_store', 'play_store']:
             d = self.stats['details'][platform]
-            print(f"  {platform}:")
-            print(f"    - 처리: {d['processed']}")
-            print(f"    - 성공: {d['success']}")
-            print(f"    - 미발견: {d['not_found']}")
-            print(f"    - 에러: {d['errors']}")
+            self.logger.info(f"  {platform}:")
+            self.logger.info(f"    - 처리: {d['processed']}")
+            self.logger.info(f"    - 성공: {d['success']}")
+            self.logger.info(f"    - 미발견: {d['not_found']}")
+            self.logger.info(f"    - 에러: {d['errors']}")
             if d['processed'] > 0:
                 success_rate = (d['success'] / d['processed']) * 100
-                print(f"    - 성공률: {success_rate:.1f}%")
+                self.logger.info(f"    - 성공률: {success_rate:.1f}%")
 
-        print("\n[리뷰 수집 통계]")
+        self.logger.info("\n[리뷰 수집 통계]")
         for platform in ['app_store', 'play_store']:
             r = self.stats['reviews'][platform]
-            print(f"  {platform}:")
-            print(f"    - 처리 앱: {r['apps_processed']}")
-            print(f"    - 수집 리뷰: {r['reviews_collected']}")
-            print(f"    - 에러: {r['errors']}")
+            self.logger.info(f"  {platform}:")
+            self.logger.info(f"    - 처리 앱: {r['apps_processed']}")
+            self.logger.info(f"    - 수집 리뷰: {r['reviews_collected']}")
+            self.logger.info(f"    - 에러: {r['errors']}")
 
-        print("\n[시계열 분석]")
+        self.logger.info("\n[시계열 분석]")
         ts = self.stats['time_series']
-        print(f"  변경 없음 (스킵): {ts['unchanged_skipped']}")
-        print(f"  변경 감지 (기록): {ts['changed_recorded']}")
+        self.logger.info(f"  변경 없음 (스킵): {ts['unchanged_skipped']}")
+        self.logger.info(f"  변경 감지 (기록): {ts['changed_recorded']}")
 
-        print("\n[신규 앱 발견]")
+        self.logger.info("\n[신규 앱 발견]")
         nad = self.stats['new_app_discovery']
-        print(f"  총 신규 앱: {nad['total_new_apps']}")
+        self.logger.info(f"  총 신규 앱: {nad['total_new_apps']}")
 
-        print("\n[인코딩 검사]")
+        self.logger.info("\n[인코딩 검사]")
         enc = self.stats['encoding']
-        print(f"  한글 샘플: {enc['korean_samples']}")
-        print(f"  인코딩 에러: {enc['encoding_errors']}")
+        self.logger.info(f"  한글 샘플: {enc['korean_samples']}")
+        self.logger.info(f"  인코딩 에러: {enc['encoding_errors']}")
 
-        print("\n[에러 요약]")
+        self.logger.info("\n[에러 요약]")
         error_summary = self.error_tracker.get_summary()
-        print(f"  총 에러: {error_summary['total_errors']}건")
-        print(f"  에러 발생 앱 수: {error_summary['unique_apps_with_errors']}개")
+        self.logger.info(f"  총 에러: {error_summary['total_errors']}건")
+        self.logger.info(f"  에러 발생 앱 수: {error_summary['unique_apps_with_errors']}개")
 
         if error_summary['errors_by_step']:
-            print("\n  [단계별 에러]")
+            self.logger.info("\n  [단계별 에러]")
             for step, count in sorted(error_summary['errors_by_step'].items(), key=lambda x: -x[1]):
-                print(f"    - {step}: {count}건")
+                self.logger.info(f"    - {step}: {count}건")
 
-        print("\n  [최근 에러 (최대 10개)]")
+        self.logger.info("\n  [최근 에러 (최대 10개)]")
         for err in error_summary['recent_errors'][-10:]:
             app_info = f"app={err['app_id']}" if err.get('app_id') else ""
-            print(f"    - [{err['platform']}:{err['step']}] {app_info}")
-            print(f"      {err['error_type']}: {err['error_message'][:60]}")
+            self.logger.info(f"    - [{err['platform']}:{err['step']}] {app_info}")
+            self.logger.info(f"      {err['error_type']}: {err['error_message'][:60]}")
 
         # 전체 성공률 계산
-        print("\n[전체 성공/실패 분석]")
+        self.logger.info("\n[전체 성공/실패 분석]")
         total_processed = 0
         total_errors = 0
 
@@ -424,11 +431,11 @@ class LongRunningTest:
 
         if total_processed > 0:
             overall_success = ((total_processed - total_errors) / total_processed) * 100
-            print(f"  전체 요청: {total_processed}건")
-            print(f"  전체 에러: {total_errors}건")
-            print(f"  성공률: {overall_success:.1f}%")
+            self.logger.info(f"  전체 요청: {total_processed}건")
+            self.logger.info(f"  전체 에러: {total_errors}건")
+            self.logger.info(f"  성공률: {overall_success:.1f}%")
 
-        print("\n" + "=" * 70)
+        self.logger.info("\n" + "=" * 70)
 
         return self.stats
 
@@ -456,7 +463,7 @@ class LongRunningTest:
             self.log("테스트 중단됨 (Ctrl+C)")
         except Exception as e:
             self.add_error('main_loop', str(e))
-            traceback.print_exc()
+            self.logger.exception("[main_loop] 상세 예외")
 
         # 최종 리포트
         final_stats = self.generate_report()

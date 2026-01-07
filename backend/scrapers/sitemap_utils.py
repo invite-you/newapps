@@ -4,17 +4,23 @@ MD5 해시, HTTP 요청, XML 파싱 등
 """
 import hashlib
 import gzip
+import logging
 import requests
 import xml.etree.ElementTree as ET
-from io import BytesIO
+from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 from urllib.parse import urlparse, parse_qs
 import re
 import time
 
+from config.language_country_priority import get_best_country_for_language
+from utils.logger import get_timestamped_logger
+
 # User-Agent 설정
 USER_AGENT = "Mozilla/5.0 (compatible; SitemapBot/1.0)"
 REQUEST_TIMEOUT = 60
+LOG_FILE_PREFIX = "sitemap_utils"
+DEFAULT_LOGGER = get_timestamped_logger("sitemap_utils", file_prefix=LOG_FILE_PREFIX, level=logging.INFO)
 
 
 def calculate_md5(data: bytes) -> str:
@@ -22,8 +28,18 @@ def calculate_md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
-def fetch_url(url: str, max_retries: int = 3, retry_delay: float = 2.0) -> Optional[bytes]:
+def _resolve_logger(logger: Optional[logging.Logger]) -> logging.Logger:
+    return logger or DEFAULT_LOGGER
+
+
+def fetch_url(
+    url: str,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+    logger: Optional[logging.Logger] = None
+) -> Optional[bytes]:
     """URL에서 데이터를 가져옵니다. gzip 압축된 경우 자동 해제."""
+    resolved_logger = _resolve_logger(logger)
     headers = {
         'User-Agent': USER_AGENT,
         'Accept-Encoding': 'gzip, deflate'
@@ -50,16 +66,20 @@ def fetch_url(url: str, max_retries: int = 3, retry_delay: float = 2.0) -> Optio
             if attempt < max_retries - 1:
                 time.sleep(retry_delay * (attempt + 1))  # 지수 백오프
             else:
-                print(f"Error fetching {url}: {e}")
+                resolved_logger.error(f"Error fetching {url}: {e}")
                 return None
 
     return None
 
 
-def fetch_and_hash(url: str) -> Tuple[Optional[bytes], Optional[str]]:
+def fetch_and_hash(
+    url: str,
+    logger: Optional[logging.Logger] = None
+) -> Tuple[Optional[bytes], Optional[str]]:
     """URL에서 데이터를 가져오고 MD5 해시를 계산합니다.
     Returns: (decompressed_content, hash_of_original_compressed_data)
     """
+    resolved_logger = _resolve_logger(logger)
     headers = {
         'User-Agent': USER_AGENT,
     }
@@ -83,12 +103,16 @@ def fetch_and_hash(url: str) -> Tuple[Optional[bytes], Optional[str]]:
         return raw_content, content_hash
 
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching {url}: {e}")
+        resolved_logger.error(f"Error fetching {url}: {e}")
         return None, None
 
 
-def parse_sitemap_index(xml_content: bytes) -> List[str]:
+def parse_sitemap_index(
+    xml_content: bytes,
+    logger: Optional[logging.Logger] = None
+) -> List[str]:
     """sitemap index XML에서 개별 sitemap URL들을 추출합니다."""
+    resolved_logger = _resolve_logger(logger)
     try:
         root = ET.fromstring(xml_content)
         namespace = {'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
@@ -107,14 +131,18 @@ def parse_sitemap_index(xml_content: bytes) -> List[str]:
         return sitemap_urls
 
     except ET.ParseError as e:
-        print(f"Error parsing sitemap index: {e}")
+        resolved_logger.error(f"Error parsing sitemap index: {e}")
         return []
 
 
-def parse_sitemap_urlset(xml_content: bytes) -> List[Dict]:
+def parse_sitemap_urlset(
+    xml_content: bytes,
+    logger: Optional[logging.Logger] = None
+) -> List[Dict]:
     """sitemap urlset XML에서 URL 정보를 추출합니다.
     Returns: List of {loc, hreflangs: [{hreflang, href}, ...]}
     """
+    resolved_logger = _resolve_logger(logger)
     try:
         root = ET.fromstring(xml_content)
         namespace = {
@@ -148,7 +176,7 @@ def parse_sitemap_urlset(xml_content: bytes) -> List[Dict]:
         return results
 
     except ET.ParseError as e:
-        print(f"Error parsing sitemap urlset: {e}")
+        resolved_logger.error(f"Error parsing sitemap urlset: {e}")
         return []
 
 
@@ -189,3 +217,48 @@ def get_filename_from_url(url: str) -> str:
     """URL에서 파일명을 추출합니다."""
     parsed = urlparse(url)
     return parsed.path.split('/')[-1]
+
+
+def filter_best_country_per_language(raw_localizations: List[Dict]) -> List[Dict]:
+    """각 앱의 각 언어에 대해 최적의 국가 1개만 선택합니다.
+
+    예: 영어 116개 국가 → 영어 1개 국가 (US 우선)
+    이를 통해 DB 용량을 약 50% 절감합니다.
+    """
+    app_lang_countries = {}
+
+    for loc in raw_localizations:
+        app_id = loc['app_id']
+        language = loc['language']
+        country = loc['country']
+        app_lang_countries.setdefault(app_id, {}).setdefault(language, []).append((country, loc))
+
+    filtered = []
+    for app_id, lang_data in app_lang_countries.items():
+        for language, country_list in lang_data.items():
+            available_countries = [c for c, _ in country_list]
+            best_country = get_best_country_for_language(language, available_countries)
+
+            for country, loc_data in country_list:
+                if country.upper() == best_country.upper():
+                    filtered.append(loc_data)
+                    break
+            else:
+                filtered.append(country_list[0][1])
+
+    return filtered
+
+
+def log_sitemap_step_end(
+    logger: Optional[logging.Logger],
+    filename: str,
+    start_perf: float,
+    status: str
+) -> None:
+    """sitemap 처리 단계 종료 로그를 기록합니다."""
+    resolved_logger = _resolve_logger(logger)
+    elapsed = time.perf_counter() - start_perf
+    resolved_logger.info(
+        f"[STEP END] sitemap_file={filename} | {datetime.now().isoformat()} | "
+        f"elapsed={elapsed:.2f}s | status={status}"
+    )

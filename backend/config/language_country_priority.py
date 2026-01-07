@@ -418,26 +418,30 @@ def select_best_pairs_for_collection(pairs: list, max_languages: int = 10) -> li
 
 # 테스트
 if __name__ == '__main__':
+    from utils.logger import get_timestamped_logger
+
+    logger = get_timestamped_logger("language_country_priority", file_prefix="language_country_priority")
+
     # 테스트 케이스
-    print("=== 언어별 최우선 국가 ===")
+    logger.info("=== 언어별 최우선 국가 ===")
     test_languages = ['en', 'fr', 'de', 'zh', 'zh-hans', 'zh-hant', 'ko', 'ja', 'es', 'pt', 'ar']
     for lang in test_languages:
-        print(f"  {lang}: {get_primary_country(lang)}")
+        logger.info(f"  {lang}: {get_primary_country(lang)}")
 
-    print("\n=== 최적 국가 선택 테스트 ===")
+    logger.info("\n=== 최적 국가 선택 테스트 ===")
     # 프랑스어: CA, FR 중 FR 선택해야 함
     fr_countries = ['CA', 'FR', 'BE']
-    print(f"  French with {fr_countries}: {get_best_country_for_language('fr', fr_countries)}")
+    logger.info(f"  French with {fr_countries}: {get_best_country_for_language('fr', fr_countries)}")
 
     # 포르투갈어: BR, PT 중 BR 선택해야 함
     pt_countries = ['PT', 'BR']
-    print(f"  Portuguese with {pt_countries}: {get_best_country_for_language('pt', pt_countries)}")
+    logger.info(f"  Portuguese with {pt_countries}: {get_best_country_for_language('pt', pt_countries)}")
 
     # 스페인어: ES, MX 중 MX 선택해야 함
     es_countries = ['ES', 'AR', 'MX']
-    print(f"  Spanish with {es_countries}: {get_best_country_for_language('es', es_countries)}")
+    logger.info(f"  Spanish with {es_countries}: {get_best_country_for_language('es', es_countries)}")
 
-    print("\n=== 수집할 쌍 선택 테스트 ===")
+    logger.info("\n=== 수집할 쌍 선택 테스트 ===")
     test_pairs = [
         ('fr', 'CA'), ('fr', 'FR'), ('fr', 'BE'),
         ('en', 'US'), ('en', 'GB'), ('en', 'AU'),
@@ -447,7 +451,7 @@ if __name__ == '__main__':
         ('zh', 'CN'), ('zh', 'TW'),
     ]
     selected = select_best_pairs_for_collection(test_pairs, max_languages=5)
-    print(f"  Input: {len(test_pairs)} pairs")
-    print(f"  Selected (max 5):")
+    logger.info(f"  Input: {len(test_pairs)} pairs")
+    logger.info("  Selected (max 5):")
     for lang, country in selected:
-        print(f"    - {lang}: {country}")
+        logger.info(f"    - {lang}: {country}")

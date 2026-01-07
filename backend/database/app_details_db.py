@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 import psycopg
 from psycopg.rows import dict_row
+from utils.logger import get_timestamped_logger
 
 # psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
 DB_DSN = os.getenv("APP_DETAILS_DB_DSN")
@@ -20,6 +21,8 @@ DB_USER = os.getenv("APP_DETAILS_DB_USER", "app_details")
 DB_PASSWORD = os.getenv("APP_DETAILS_DB_PASSWORD", "")
 PARTITION_COUNT = 64
 APP_REVIEWS_PARTITION_COUNT = 64
+LOG_FILE_PREFIX = "app_details_db"
+DB_LOGGER = get_timestamped_logger("app_details_db", file_prefix=LOG_FILE_PREFIX)
 
 # 비교 제외 필드
 EXCLUDE_COMPARE_FIELDS = {'id', 'recorded_at'}
@@ -334,7 +337,7 @@ def init_database():
 
     conn.commit()
     conn.close()
-    print("Database initialized.")
+    DB_LOGGER.info("Database initialized.")
 
 
 def normalize_json_field(value: Any) -> str:
@@ -822,6 +825,6 @@ def get_stats() -> Dict[str, Any]:
 
 if __name__ == '__main__':
     init_database()
-    print("Database schema created successfully.")
+    DB_LOGGER.info("Database schema created successfully.")
     stats = get_stats()
-    print(f"Stats: {stats}")
+    DB_LOGGER.info(f"Stats: {stats}")

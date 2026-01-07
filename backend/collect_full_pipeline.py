@@ -13,6 +13,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON_BIN = sys.executable
 DEFAULT_LIMIT = None
 DEFAULT_RUN_TESTS = False
+LOG_FILE_PREFIX = "collect_full_pipeline"
 # psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
 DB_DSN = os.getenv("APP_DETAILS_DB_DSN")
 DB_HOST = os.getenv("APP_DETAILS_DB_HOST", "localhost")
@@ -40,32 +41,34 @@ PARTITION_NAME_TEMPLATE = os.getenv(
 )
 
 
-def log_step_start(step_name: str) -> float:
+def log_step_start(step_name: str, logger) -> float:
     start_ts = datetime.now().isoformat()
-    print(f"[STEP START] {step_name} | {start_ts}")
+    logger.info(f"[STEP START] {step_name} | {start_ts}")
     return time.perf_counter()
 
 
-def log_step_end(step_name: str, start_perf: float, status: str) -> None:
+def log_step_end(step_name: str, start_perf: float, status: str, logger) -> None:
     end_ts = datetime.now().isoformat()
     elapsed = time.perf_counter() - start_perf
-    print(f"[STEP END] {step_name} | {end_ts} | elapsed={elapsed:.2f}s | status={status}")
+    logger.info(f"[STEP END] {step_name} | {end_ts} | elapsed={elapsed:.2f}s | status={status}")
 
 
-def run_script(step_name: str, script_name: str, args: list) -> None:
-    start_perf = log_step_start(step_name)
+def run_script(step_name: str, script_name: str, args: list, logger) -> None:
+    start_perf = log_step_start(step_name, logger)
     status = "OK"
     try:
         cmd = [PYTHON_BIN, os.path.join(BASE_DIR, script_name), *args]
+        logger.info(f"[RUN] {' '.join(cmd)}")
         result = subprocess.run(cmd, check=False, cwd=BASE_DIR)
         if result.returncode != 0:
             status = "FAIL"
             raise RuntimeError(f"{script_name} failed with exit code {result.returncode}")
     except Exception:
         status = "FAIL"
+        logger.exception(f"[ERROR] {script_name} 실행 실패")
         raise
     finally:
-        log_step_end(step_name, start_perf, status)
+        log_step_end(step_name, start_perf, status, logger)
 
 
 def build_dsn() -> str:
@@ -92,20 +95,20 @@ def get_current_month_range() -> tuple[str, str, str]:
     return partition_name, month_start.isoformat(), next_month.isoformat()
 
 
-def ensure_current_month_partition() -> None:
+def ensure_current_month_partition(logger) -> None:
     step_name = "ENSURE_MONTHLY_PARTITION"
-    start_perf = log_step_start(step_name)
+    start_perf = log_step_start(step_name, logger)
     status = "OK"
     conn = None
     try:
         if not PARTITION_CHECK_ENABLED:
-            print("[INFO] 월별 파티션 점검이 비활성화되어 건너뜁니다.")
+            logger.info("[INFO] 월별 파티션 점검이 비활성화되어 건너뜁니다.")
             return
         if not PARTITION_PARENT_TABLE:
             raise ValueError("월별 파티션 대상 테이블이 비어 있습니다.")
 
         partition_name, range_start, range_end = get_current_month_range()
-        print(
+        logger.info(
             "[INFO] 월별 파티션 확인 시작: "
             f"schema={PARTITION_SCHEMA}, parent={PARTITION_PARENT_TABLE}, "
             f"child={partition_name}, range=({range_start}~{range_end})"
@@ -132,10 +135,10 @@ def ensure_current_month_partition() -> None:
         exists = cursor.fetchone() is not None
 
         if exists:
-            print("[INFO] 월별 파티션이 이미 존재합니다.")
+            logger.info("[INFO] 월별 파티션이 이미 존재합니다.")
             return
 
-        print("[INFO] 월별 파티션이 없어 생성합니다.")
+        logger.info("[INFO] 월별 파티션이 없어 생성합니다.")
         create_sql = sql.SQL(
             "CREATE TABLE {schema}.{child} "
             "PARTITION OF {schema}.{parent} "
@@ -147,18 +150,18 @@ def ensure_current_month_partition() -> None:
         )
         cursor.execute(create_sql, (range_start, range_end))
         conn.commit()
-        print("[INFO] 월별 파티션 생성 완료.")
+        logger.info("[INFO] 월별 파티션 생성 완료.")
     except Exception as exc:
         status = "FAIL"
-        print(f"[ERROR] 월별 파티션 점검/생성 실패: {exc}")
+        logger.exception(f"[ERROR] 월별 파티션 점검/생성 실패: {exc}")
         if PARTITION_ENFORCE:
-            print("[ERROR] 파티션 점검 실패로 파이프라인을 중단합니다.")
+            logger.error("[ERROR] 파티션 점검 실패로 파이프라인을 중단합니다.")
             raise
-        print("[WARN] 파티션 점검 실패를 무시하고 파이프라인을 계속합니다.")
+        logger.warning("[WARN] 파티션 점검 실패를 무시하고 파이프라인을 계속합니다.")
     finally:
         if conn is not None:
             conn.close()
-        log_step_end(step_name, start_perf, status)
+        log_step_end(step_name, start_perf, status, logger)
 
 
 def main() -> int:
@@ -177,34 +180,45 @@ def main() -> int:
         help="Run comprehensive tests at the end",
     )
     args = parser.parse_args()
+    from utils.logger import get_timestamped_logger
+    logger = get_timestamped_logger("collect_full_pipeline", file_prefix=LOG_FILE_PREFIX)
+    start_ts = datetime.now().isoformat()
+    start_perf = time.perf_counter()
+    logger.info(f"[STEP START] collect_full_pipeline | {start_ts}")
 
     limit = args.limit
     run_tests = args.run_tests if args.run_tests else DEFAULT_RUN_TESTS
 
-    print("=" * 70)
-    print(f"Full Pipeline Started at {datetime.now().isoformat()}")
-    print("=" * 70)
-    print(f"Limit: {limit if limit is not None else 'unlimited'}")
-    print(f"Run tests: {run_tests}")
-    print()
+    logger.info("=" * 70)
+    logger.info(f"Full Pipeline Started at {start_ts}")
+    logger.info("=" * 70)
+    logger.info(f"Limit: {limit if limit is not None else 'unlimited'}")
+    logger.info(f"Run tests: {run_tests}")
+    logger.info("")
 
-    ensure_current_month_partition()
+    ensure_current_month_partition(logger)
 
-    run_script("SITEMAP_COLLECTION_ALL", "collect_sitemaps.py", [])
+    run_script("SITEMAP_COLLECTION_ALL", "collect_sitemaps.py", [], logger)
     details_args = ["--limit", str(limit)] if limit is not None else []
     run_script(
         "DETAILS_AND_REVIEWS_ALL",
         "collect_app_details.py",
         details_args,
+        logger,
     )
 
     if run_tests:
-        run_script("COMPREHENSIVE_TESTS", "test_comprehensive.py", [])
+        run_script("COMPREHENSIVE_TESTS", "test_comprehensive.py", [], logger)
 
-    print()
-    print("=" * 70)
-    print(f"Full Pipeline Completed at {datetime.now().isoformat()}")
-    print("=" * 70)
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info(f"Full Pipeline Completed at {datetime.now().isoformat()}")
+    logger.info("=" * 70)
+    elapsed = time.perf_counter() - start_perf
+    logger.info(
+        f"[STEP END] collect_full_pipeline | {datetime.now().isoformat()} | "
+        f"elapsed={elapsed:.2f}s | status=OK"
+    )
     return 0
 
 
