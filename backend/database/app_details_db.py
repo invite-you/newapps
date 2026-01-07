@@ -18,6 +18,7 @@ DB_PORT = int(os.getenv("APP_DETAILS_DB_PORT", "5432"))
 DB_NAME = os.getenv("APP_DETAILS_DB_NAME", "app_details")
 DB_USER = os.getenv("APP_DETAILS_DB_USER", "app_details")
 DB_PASSWORD = os.getenv("APP_DETAILS_DB_PASSWORD", "")
+APP_REVIEWS_PARTITION_COUNT = 64
 
 # 비교 제외 필드
 EXCLUDE_COMPARE_FIELDS = {'id', 'recorded_at'}
@@ -159,7 +160,19 @@ def init_database():
             replied_at TEXT,
             recorded_at TEXT NOT NULL,
             UNIQUE(app_id, platform, review_id)
-        )
+        ) PARTITION BY HASH (app_id)
+    """)
+
+    for remainder in range(APP_REVIEWS_PARTITION_COUNT):
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS app_reviews_p{remainder}
+            PARTITION OF app_reviews
+            FOR VALUES WITH (MODULUS {APP_REVIEWS_PARTITION_COUNT}, REMAINDER {remainder})
+        """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS app_reviews_latest_idx
+        ON app_reviews (app_id, platform, reviewed_at DESC)
     """)
 
     # failed_apps: 영구 실패 앱 (재시도 안 함)
