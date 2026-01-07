@@ -58,7 +58,7 @@ class PlayStoreDetailsCollector:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT DISTINCT language, country FROM app_localizations
-            WHERE app_id = ? AND platform = ?
+            WHERE app_id = %s AND platform = %s
         """, (app_id, PLATFORM))
         pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
         conn.close()

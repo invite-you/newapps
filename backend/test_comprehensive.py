@@ -13,7 +13,6 @@ import sys
 import os
 import json
 import time
-import sqlite3
 from datetime import datetime
 from collections import defaultdict
 
@@ -411,7 +410,7 @@ def test_time_series(results: TestResults):
     cursor.execute("""
         SELECT id, app_id, version, recorded_at
         FROM apps
-        WHERE app_id = ?
+        WHERE app_id = %s
         ORDER BY recorded_at
     """, (test_app_id,))
 
@@ -438,7 +437,7 @@ def test_time_series(results: TestResults):
     cursor.execute("""
         SELECT id, score, ratings, recorded_at
         FROM apps_metrics
-        WHERE app_id = ?
+        WHERE app_id = %s
         ORDER BY recorded_at
     """, (test_app_id,))
 

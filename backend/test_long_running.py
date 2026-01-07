@@ -12,7 +12,6 @@ import sys
 import os
 import json
 import time
-import sqlite3
 from datetime import datetime, timedelta
 from collections import defaultdict
 import traceback

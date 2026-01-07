@@ -4,21 +4,29 @@ Sitemap Apps Database
 
 최적화: href 필드 제거 (불필요 - URL은 app_id/country로 재구성 가능)
 """
-import sqlite3
 import os
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
-DATABASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_PATH = os.path.join(DATABASE_DIR, 'sitemap_apps.db')
+import psycopg
+from psycopg.rows import dict_row
+
+# psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
+DB_DSN = os.getenv("SITEMAP_DB_DSN")
+DB_HOST = os.getenv("SITEMAP_DB_HOST", "localhost")
+DB_PORT = int(os.getenv("SITEMAP_DB_PORT", "5432"))
+DB_NAME = os.getenv("SITEMAP_DB_NAME", "sitemap_apps")
+DB_USER = os.getenv("SITEMAP_DB_USER", "sitemap_apps")
+DB_PASSWORD = os.getenv("SITEMAP_DB_PASSWORD", "")
 
 
-def get_connection() -> sqlite3.Connection:
+def get_connection() -> psycopg.Connection:
     """DB 연결을 반환합니다."""
-    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    dsn = DB_DSN or (
+        f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
+        f"user={DB_USER} password={DB_PASSWORD}"
+    )
+    conn = psycopg.connect(dsn, row_factory=dict_row)
     return conn
 
 
@@ -30,14 +38,14 @@ def init_database():
     # sitemap_files: xml.gz 파일별 MD5 해시 저장
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sitemap_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             platform TEXT NOT NULL,           -- 'app_store' or 'play_store'
             file_url TEXT NOT NULL UNIQUE,    -- sitemap xml.gz 파일 URL
             md5_hash TEXT,                    -- 파일의 MD5 해시
-            last_collected_at TEXT,           -- 마지막 수집 시각
+            last_collected_at TIMESTAMPTZ,    -- 마지막 수집 시각
             app_count INTEGER DEFAULT 0,      -- 해당 파일에서 수집된 앱 수
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
 
@@ -45,14 +53,14 @@ def init_database():
     # 최적화: href 필드 제거 (URL은 platform/country/app_id로 재구성 가능)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_localizations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             platform TEXT NOT NULL,           -- 'app_store' or 'play_store'
             app_id TEXT NOT NULL,             -- 앱 ID (App Store: 숫자, Play Store: 패키지명)
             language TEXT NOT NULL,           -- 언어 코드 (ko, en, ja 등)
             country TEXT NOT NULL,            -- 국가 코드 (kr, us, jp 등)
             source_file TEXT NOT NULL,        -- 수집된 sitemap 파일명
-            first_seen_at TEXT DEFAULT (datetime('now')),  -- 처음 발견 시각
-            last_seen_at TEXT DEFAULT (datetime('now')),   -- 마지막 발견 시각
+            first_seen_at TIMESTAMPTZ DEFAULT NOW(),  -- 처음 발견 시각
+            last_seen_at TIMESTAMPTZ DEFAULT NOW(),   -- 마지막 발견 시각
             UNIQUE(platform, app_id, language, country)
         )
     """)
@@ -67,14 +75,14 @@ def init_database():
 
     conn.commit()
     conn.close()
-    print(f"Database initialized at {DATABASE_PATH}")
+    print("Database initialized.")
 
 
 def get_sitemap_file_hash(file_url: str) -> Optional[str]:
     """특정 sitemap 파일의 저장된 MD5 해시를 반환합니다."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT md5_hash FROM sitemap_files WHERE file_url = ?", (file_url,))
+    cursor.execute("SELECT md5_hash FROM sitemap_files WHERE file_url = %s", (file_url,))
     row = cursor.fetchone()
     conn.close()
     return row['md5_hash'] if row else None
@@ -88,12 +96,12 @@ def update_sitemap_file(platform: str, file_url: str, md5_hash: str, app_count: 
 
     cursor.execute("""
         INSERT INTO sitemap_files (platform, file_url, md5_hash, last_collected_at, app_count, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT(file_url) DO UPDATE SET
-            md5_hash = excluded.md5_hash,
-            last_collected_at = excluded.last_collected_at,
-            app_count = excluded.app_count,
-            updated_at = excluded.updated_at
+            md5_hash = EXCLUDED.md5_hash,
+            last_collected_at = EXCLUDED.last_collected_at,
+            app_count = EXCLUDED.app_count,
+            updated_at = EXCLUDED.updated_at
     """, (platform, file_url, md5_hash, now, app_count, now))
 
     conn.commit()
@@ -107,28 +115,15 @@ def upsert_app_localization(platform: str, app_id: str, language: str, country: 
     cursor = conn.cursor()
     now = datetime.now().isoformat()
 
-    # 기존 레코드 확인
     cursor.execute("""
-        SELECT id FROM app_localizations
-        WHERE platform = ? AND app_id = ? AND language = ? AND country = ?
-    """, (platform, app_id, language, country))
-    existing = cursor.fetchone()
-
-    if existing:
-        # 기존 레코드 업데이트
-        cursor.execute("""
-            UPDATE app_localizations
-            SET source_file = ?, last_seen_at = ?
-            WHERE platform = ? AND app_id = ? AND language = ? AND country = ?
-        """, (source_file, now, platform, app_id, language, country))
-        is_new = False
-    else:
-        # 새 레코드 추가
-        cursor.execute("""
-            INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (platform, app_id, language, country, source_file, now, now))
-        is_new = True
+        INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT(platform, app_id, language, country) DO UPDATE SET
+            source_file = EXCLUDED.source_file,
+            last_seen_at = EXCLUDED.last_seen_at
+        RETURNING (xmax = 0) AS inserted
+    """, (platform, app_id, language, country, source_file, now, now))
+    is_new = cursor.fetchone()['inserted']
 
     conn.commit()
     conn.close()
@@ -142,9 +137,6 @@ def upsert_app_localizations_batch(localizations: List[Dict[str, Any]]) -> int:
 
     conn = get_connection()
     cursor = conn.cursor()
-    # WAL 모드와 함께 사용해도 되는 최소 동기화 설정. 대량 적재 시 쓰기 지연을 줄이기 위함.
-    cursor.execute("PRAGMA synchronous=OFF")
-
     now = datetime.now().isoformat()
 
     # (platform, app_id, language, country) 키 기준으로 중복 제거
@@ -153,55 +145,35 @@ def upsert_app_localizations_batch(localizations: List[Dict[str, Any]]) -> int:
         key = (loc['platform'], loc['app_id'], loc['language'], loc['country'])
         aggregated[key] = loc
 
+    values = [
+        (
+            loc['platform'],
+            loc['app_id'],
+            loc['language'],
+            loc['country'],
+            loc['source_file'],
+            now,
+            now
+        )
+        for loc in aggregated.values()
+    ]
+
     try:
-        cursor.execute("""
-            CREATE TEMP TABLE IF NOT EXISTS temp_app_localizations (
-                platform TEXT NOT NULL,
-                app_id TEXT NOT NULL,
-                language TEXT NOT NULL,
-                country TEXT NOT NULL,
-                PRIMARY KEY(platform, app_id, language, country)
+        insert_sql = """
+            INSERT INTO app_localizations (
+                platform, app_id, language, country, source_file, first_seen_at, last_seen_at
             )
-        """)
-        cursor.execute("DELETE FROM temp_app_localizations")
-
-        cursor.executemany("""
-            INSERT INTO temp_app_localizations (platform, app_id, language, country)
-            VALUES (?, ?, ?, ?)
-        """, [(k[0], k[1], k[2], k[3]) for k in aggregated.keys()])
-
-        # 새로 추가될 키 개수 계산
-        cursor.execute("""
-            SELECT COUNT(*) as new_count
-            FROM temp_app_localizations t
-            LEFT JOIN app_localizations a
-                ON a.platform = t.platform
-                AND a.app_id = t.app_id
-                AND a.language = t.language
-                AND a.country = t.country
-            WHERE a.id IS NULL
-        """)
-        new_count = cursor.fetchone()["new_count"]
-
-        cursor.executemany("""
-            INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES %s
             ON CONFLICT(platform, app_id, language, country) DO UPDATE SET
-                source_file = excluded.source_file,
-                last_seen_at = excluded.last_seen_at
-        """, [
-            (
-                loc['platform'],
-                loc['app_id'],
-                loc['language'],
-                loc['country'],
-                loc['source_file'],
-                now,
-                now
-            )
-            for loc in aggregated.values()
-        ])
+                source_file = EXCLUDED.source_file,
+                last_seen_at = EXCLUDED.last_seen_at
+            RETURNING (xmax = 0) AS inserted
+        """
+        from psycopg.extras import execute_values
 
+        execute_values(cursor, insert_sql, values)
+        inserted_rows = cursor.fetchall()
+        new_count = sum(1 for row in inserted_rows if row['inserted'])
         conn.commit()
     finally:
         conn.close()
