@@ -5,10 +5,9 @@ google-play-scraper 라이브러리를 사용하여 앱 상세정보를 수집�
 import sys
 import os
 import time
+from datetime import datetime
 import json
 from typing import List, Dict, Any, Optional, Tuple
-import traceback
-from typing import List, Dict, Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,12 +21,12 @@ from database.app_details_db import (
     get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
-from config.language_country_priority import (
-    select_best_pairs_for_collection,
-    get_primary_country,
-    PRIORITY_LANGUAGES
+from config.language_country_priority import select_best_pairs_for_collection
+from scrapers.collection_utils import (
+    get_app_language_country_pairs,
+    select_primary_pair
 )
-from utils.logger import get_collection_logger
+from utils.logger import get_collection_logger, get_timestamped_logger
 from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'play_store'
@@ -51,18 +50,6 @@ class PlayStoreDetailsCollector:
     def log(self, message: str):
         if self.verbose:
             self.logger.info(message)
-
-    def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
-        """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
-        conn = get_sitemap_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT language, country FROM app_localizations
-            WHERE app_id = %s AND platform = %s
-        """, (app_id, PLATFORM))
-        pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
-        conn.close()
-        return pairs if pairs else [('en', 'us')]
 
     def fetch_app_info(self, app_id: str, lang: str = 'en', country: str = 'us') -> Tuple[Optional[Dict], Optional[str]]:
         """google-play-scraper로 앱 정보를 가져옵니다.
@@ -156,33 +143,31 @@ class PlayStoreDetailsCollector:
 
     def collect_app(self, app_id: str) -> bool:
         """단일 앱의 상세정보를 수집합니다."""
+        self.logger.info(f"[APP START] app_id={app_id} | {datetime.now().isoformat()}")
         # 실패한 앱인지 확인
         if is_failed_app(app_id, PLATFORM):
             self.stats['apps_skipped_failed'] += 1
+            self.logger.info(f"[APP SKIP] app_id={app_id} | status=failed_app")
             return False
 
         # sitemap에서 (language, country) 쌍 가져오기
-        pairs = self.get_app_language_country_pairs(app_id)
-        if not pairs:
-            pairs = [('en', 'us')]
+        pairs = get_app_language_country_pairs(
+            app_id,
+            PLATFORM,
+            normalize_country_case="lower",
+            default_pair=("en", "us")
+        )
 
         # 우선순위에 따라 최적의 (language, country) 쌍 선택
         # 각 언어당 가장 적합한 국가를 선택 (예: fr-FR > fr-CA)
         optimized_pairs = select_best_pairs_for_collection(pairs, max_languages=10)
 
         # 기본 정보 수집용 쌍 결정 (영어 US 우선)
-        primary_pair = None
-        for lang, country in optimized_pairs:
-            if lang == 'en' and country.upper() == 'US':
-                primary_pair = (lang, country)
-                break
-        if not primary_pair:
-            for lang, country in optimized_pairs:
-                if lang == 'en':
-                    primary_pair = (lang, country)
-                    break
-        if not primary_pair:
-            primary_pair = optimized_pairs[0] if optimized_pairs else ('en', 'us')
+        primary_pair = select_primary_pair(
+            optimized_pairs,
+            preferred_language="en",
+            preferred_country="us"
+        )
 
         primary_lang, primary_country = primary_pair
         data, last_error = self.fetch_app_info(app_id, lang=primary_lang, country=primary_country.lower())
@@ -204,6 +189,7 @@ class PlayStoreDetailsCollector:
             reason = last_error or 'unknown'
             mark_app_failed(app_id, PLATFORM, reason)
             self.stats['apps_not_found'] += 1
+            self.logger.info(f"[APP FAIL] app_id={app_id} | reason={reason}")
             return False
 
         # 앱 메타데이터 저장
@@ -252,16 +238,19 @@ class PlayStoreDetailsCollector:
         # 수집 상태 업데이트
         update_collection_status(app_id, PLATFORM, details_collected=True)
         self.stats['apps_processed'] += 1
+        self.logger.info(f"[APP END] app_id={app_id} | status=OK")
 
         return True
 
     def collect_batch(self, app_ids: List[str]) -> Dict[str, Any]:
         """배치로 앱 상세정보를 수집합니다."""
+        start_ts = datetime.now().isoformat()
+        start_perf = time.perf_counter()
         self.log(f"Starting batch collection for {len(app_ids)} apps...")
+        self.logger.info(f"[STEP START] collect_batch | {start_ts}")
 
         for i, app_id in enumerate(app_ids, 1):
-            if i % 100 == 0:
-                self.log(f"Progress: {i}/{len(app_ids)}")
+            self.logger.info(f"[PROGRESS] {i}/{len(app_ids)} | app_id={app_id}")
 
             try:
                 self.collect_app(app_id)
@@ -276,10 +265,16 @@ class PlayStoreDetailsCollector:
                     app_id=app_id,
                     include_traceback=True
                 )
+                self.logger.exception(f"[APP ERROR] app_id={app_id}")
 
             time.sleep(REQUEST_DELAY)
 
         self.log(f"Batch collection completed. Stats: {self.stats}")
+        elapsed = time.perf_counter() - start_perf
+        self.logger.info(
+            f"[STEP END] collect_batch | {datetime.now().isoformat()} | "
+            f"elapsed={elapsed:.2f}s | status=OK"
+        )
         return self.stats
 
     def get_error_tracker(self) -> ErrorTracker:
@@ -323,12 +318,13 @@ def main():
 
     # 수집할 앱 목록
     app_ids = get_apps_to_collect(limit=10)
-    print(f"Found {len(app_ids)} apps to collect")
+    logger = get_timestamped_logger("play_store_details_main", file_prefix="play_store_details_main")
+    logger.info(f"Found {len(app_ids)} apps to collect")
 
     if app_ids:
         collector = PlayStoreDetailsCollector(verbose=True)
         stats = collector.collect_batch(app_ids)
-        print(f"\nFinal Stats: {stats}")
+        logger.info(f"\nFinal Stats: {stats}")
 
 
 if __name__ == '__main__':

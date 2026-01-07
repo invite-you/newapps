@@ -17,7 +17,7 @@ from database.app_details_db import (
     is_failed_app, get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format
 )
 from database.sitemap_apps_db import get_connection as get_sitemap_connection
-from utils.logger import get_collection_logger
+from utils.logger import get_collection_logger, get_timestamped_logger
 from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'app_store'
@@ -345,12 +345,13 @@ def main():
 
     # 수집할 앱 목록
     app_ids = get_apps_for_review_collection(limit=10)
-    print(f"Found {len(app_ids)} apps for review collection")
+    logger = get_timestamped_logger("app_store_reviews_main", file_prefix="app_store_reviews_main")
+    logger.info(f"Found {len(app_ids)} apps for review collection")
 
     if app_ids:
         collector = AppStoreReviewsCollector(verbose=True)
         stats = collector.collect_batch(app_ids)
-        print(f"\nFinal Stats: {stats}")
+        logger.info(f"\nFinal Stats: {stats}")
 
 
 if __name__ == '__main__':

@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any
 
 import psycopg
 from psycopg.rows import dict_row
+from utils.logger import get_timestamped_logger
 
 # psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
 DB_DSN = os.getenv("SITEMAP_DB_DSN")
@@ -18,6 +19,8 @@ DB_PORT = int(os.getenv("SITEMAP_DB_PORT", "5432"))
 DB_NAME = os.getenv("SITEMAP_DB_NAME", "sitemap_apps")
 DB_USER = os.getenv("SITEMAP_DB_USER", "sitemap_apps")
 DB_PASSWORD = os.getenv("SITEMAP_DB_PASSWORD", "")
+LOG_FILE_PREFIX = "sitemap_apps_db"
+DB_LOGGER = get_timestamped_logger("sitemap_apps_db", file_prefix=LOG_FILE_PREFIX)
 
 
 def get_connection() -> psycopg.Connection:
@@ -75,7 +78,7 @@ def init_database():
 
     conn.commit()
     conn.close()
-    print("Database initialized.")
+    DB_LOGGER.info("Database initialized.")
 
 
 def get_sitemap_file_hash(file_url: str) -> Optional[str]:
@@ -214,6 +217,6 @@ def get_stats() -> Dict[str, Any]:
 
 if __name__ == '__main__':
     init_database()
-    print("Database schema created successfully.")
+    DB_LOGGER.info("Database schema created successfully.")
     stats = get_stats()
-    print(f"Stats: {stats}")
+    DB_LOGGER.info(f"Stats: {stats}")

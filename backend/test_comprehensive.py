@@ -14,14 +14,16 @@ import os
 import json
 import time
 from datetime import datetime
-from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from utils.logger import get_test_logger
 
 # 테스트 결과 저장용
 class TestResults:
     def __init__(self):
         self.start_time = datetime.now()
+        self.logger = get_test_logger('comprehensive_test')
         self.results = {
             'sitemap': {'app_store': {}, 'play_store': {}},
             'details': {'app_store': {}, 'play_store': {}},
@@ -40,7 +42,7 @@ class TestResults:
             'context': context,
             'error': error
         })
-        print(f"[ERROR] {context}: {error}")
+        self.logger.error(f"[ERROR] {context}: {error}")
 
     def summary(self):
         elapsed = (datetime.now() - self.start_time).total_seconds()
@@ -77,9 +79,9 @@ def check_encoding(text: str, source: str, results: TestResults) -> bool:
 
 def test_sitemap_collection(results: TestResults, limit_files: int = 2):
     """Sitemap 수집 테스트 (소량)"""
-    print("\n" + "=" * 60)
-    print("1. SITEMAP 수집 테스트")
-    print("=" * 60)
+    results.logger.info("\n" + "=" * 60)
+    results.logger.info("1. SITEMAP 수집 테스트")
+    results.logger.info("=" * 60)
 
     from database.sitemap_apps_db import init_database, get_stats
     from scrapers.sitemap_utils import (
@@ -90,39 +92,39 @@ def test_sitemap_collection(results: TestResults, limit_files: int = 2):
     init_database()
 
     # App Store 테스트
-    print("\n[App Store Sitemap 테스트]")
+    results.logger.info("\n[App Store Sitemap 테스트]")
     app_store_index = 'https://apps.apple.com/sitemaps_apps_index_app_1.xml'
 
     try:
-        content = fetch_url(app_store_index)
+        content = fetch_url(app_store_index, logger=results.logger)
         if content:
-            sitemap_urls = parse_sitemap_index(content)
+            sitemap_urls = parse_sitemap_index(content, logger=results.logger)
             results.results['sitemap']['app_store']['index_urls'] = len(sitemap_urls)
-            print(f"  Sitemap index 파일 수: {len(sitemap_urls)}")
+            results.logger.info(f"  Sitemap index 파일 수: {len(sitemap_urls)}")
 
             if sitemap_urls:
                 # 첫 번째 sitemap 파일만 테스트
                 test_url = sitemap_urls[0]
-                print(f"  테스트 파일: {test_url.split('/')[-1]}")
+                results.logger.info(f"  테스트 파일: {test_url.split('/')[-1]}")
 
-                content, hash_val = fetch_and_hash(test_url)
+                content, hash_val = fetch_and_hash(test_url, logger=results.logger)
                 if content:
-                    url_entries = parse_sitemap_urlset(content)
+                    url_entries = parse_sitemap_urlset(content, logger=results.logger)
                     results.results['sitemap']['app_store']['entries_in_first_file'] = len(url_entries)
-                    print(f"  첫 파일 엔트리 수: {len(url_entries)}")
+                    results.logger.info(f"  첫 파일 엔트리 수: {len(url_entries)}")
 
                     # 샘플 데이터 확인
                     if url_entries:
                         sample = url_entries[0]
                         hreflangs = sample.get('hreflangs', [])
                         results.results['sitemap']['app_store']['sample_hreflangs'] = len(hreflangs)
-                        print(f"  첫 엔트리 hreflang 수: {len(hreflangs)}")
+                        results.logger.info(f"  첫 엔트리 hreflang 수: {len(hreflangs)}")
 
                         if hreflangs:
                             first_href = hreflangs[0]
                             app_id = extract_app_store_app_id(first_href['href'])
                             lang, country = parse_hreflang(first_href['hreflang'])
-                            print(f"  샘플 앱 ID: {app_id}, 언어: {lang}, 국가: {country}")
+                            results.logger.info(f"  샘플 앱 ID: {app_id}, 언어: {lang}, 국가: {country}")
                             results.results['sitemap']['app_store']['success'] = True
                 else:
                     results.add_error('app_store_sitemap', 'Failed to fetch sitemap file')
@@ -133,38 +135,38 @@ def test_sitemap_collection(results: TestResults, limit_files: int = 2):
         results.results['sitemap']['app_store']['success'] = False
 
     # Play Store 테스트
-    print("\n[Play Store Sitemap 테스트]")
+    results.logger.info("\n[Play Store Sitemap 테스트]")
     play_store_index = 'https://play.google.com/sitemaps/sitemaps-index-0.xml'
 
     try:
-        content = fetch_url(play_store_index)
+        content = fetch_url(play_store_index, logger=results.logger)
         if content:
-            sitemap_urls = parse_sitemap_index(content)
+            sitemap_urls = parse_sitemap_index(content, logger=results.logger)
             results.results['sitemap']['play_store']['index_urls'] = len(sitemap_urls)
-            print(f"  Sitemap index 파일 수: {len(sitemap_urls)}")
+            results.logger.info(f"  Sitemap index 파일 수: {len(sitemap_urls)}")
 
             if sitemap_urls:
                 # 첫 번째 sitemap 파일만 테스트
                 test_url = sitemap_urls[0]
-                print(f"  테스트 파일: {test_url.split('/')[-1]}")
+                results.logger.info(f"  테스트 파일: {test_url.split('/')[-1]}")
 
-                content, hash_val = fetch_and_hash(test_url)
+                content, hash_val = fetch_and_hash(test_url, logger=results.logger)
                 if content:
-                    url_entries = parse_sitemap_urlset(content)
+                    url_entries = parse_sitemap_urlset(content, logger=results.logger)
                     results.results['sitemap']['play_store']['entries_in_first_file'] = len(url_entries)
-                    print(f"  첫 파일 엔트리 수: {len(url_entries)}")
+                    results.logger.info(f"  첫 파일 엔트리 수: {len(url_entries)}")
 
                     if url_entries:
                         sample = url_entries[0]
                         hreflangs = sample.get('hreflangs', [])
                         results.results['sitemap']['play_store']['sample_hreflangs'] = len(hreflangs)
-                        print(f"  첫 엔트리 hreflang 수: {len(hreflangs)}")
+                        results.logger.info(f"  첫 엔트리 hreflang 수: {len(hreflangs)}")
 
                         if hreflangs:
                             first_href = hreflangs[0]
                             app_id = extract_play_store_app_id(first_href['href'])
                             lang, country = parse_hreflang(first_href['hreflang'])
-                            print(f"  샘플 앱 ID: {app_id}, 언어: {lang}, 국가: {country}")
+                            results.logger.info(f"  샘플 앱 ID: {app_id}, 언어: {lang}, 국가: {country}")
                             results.results['sitemap']['play_store']['success'] = True
                 else:
                     results.add_error('play_store_sitemap', 'Failed to fetch sitemap file')
@@ -177,9 +179,9 @@ def test_sitemap_collection(results: TestResults, limit_files: int = 2):
 
 def run_sitemap_collection(results: TestResults):
     """실제 sitemap 수집 (소량)"""
-    print("\n" + "=" * 60)
-    print("2. 실제 SITEMAP 수집 (소량)")
-    print("=" * 60)
+    results.logger.info("\n" + "=" * 60)
+    results.logger.info("2. 실제 SITEMAP 수집 (소량)")
+    results.logger.info("=" * 60)
 
     from database.sitemap_apps_db import init_database, get_stats
     from scrapers.app_store_sitemap_collector import AppStoreSitemapCollector, SITEMAP_INDEX_URLS as APP_STORE_URLS
@@ -189,47 +191,47 @@ def run_sitemap_collection(results: TestResults):
     init_database()
 
     # App Store - 첫 번째 sitemap 파일만 수집
-    print("\n[App Store 소량 수집]")
+    results.logger.info("\n[App Store 소량 수집]")
     try:
         collector = AppStoreSitemapCollector(verbose=True)
-        content = fetch_url(APP_STORE_URLS[0])
+        content = fetch_url(APP_STORE_URLS[0], logger=results.logger)
         if content:
-            sitemap_urls = parse_sitemap_index(content)
+            sitemap_urls = parse_sitemap_index(content, logger=results.logger)
             if sitemap_urls and len(sitemap_urls) > 0:
                 # 첫 2개 파일만 처리
                 for url in sitemap_urls[:2]:
                     collector.process_sitemap_file(url)
                 results.results['sitemap']['app_store']['collection_stats'] = collector.stats
-                print(f"  수집 결과: {collector.stats}")
+                results.logger.info(f"  수집 결과: {collector.stats}")
     except Exception as e:
         results.add_error('app_store_collection', str(e))
 
     # Play Store - 첫 번째 sitemap 파일만 수집
-    print("\n[Play Store 소량 수집]")
+    results.logger.info("\n[Play Store 소량 수집]")
     try:
         collector = PlayStoreSitemapCollector(verbose=True)
-        content = fetch_url(PLAY_STORE_URLS[0])
+        content = fetch_url(PLAY_STORE_URLS[0], logger=results.logger)
         if content:
-            sitemap_urls = parse_sitemap_index(content)
+            sitemap_urls = parse_sitemap_index(content, logger=results.logger)
             if sitemap_urls and len(sitemap_urls) > 0:
                 for url in sitemap_urls[:2]:
                     collector.process_sitemap_file(url)
                 results.results['sitemap']['play_store']['collection_stats'] = collector.stats
-                print(f"  수집 결과: {collector.stats}")
+                results.logger.info(f"  수집 결과: {collector.stats}")
     except Exception as e:
         results.add_error('play_store_collection', str(e))
 
     # 통계 확인
     stats = get_stats()
-    print(f"\n현재 DB 통계: {stats}")
+    results.logger.info(f"\n현재 DB 통계: {stats}")
     results.results['sitemap']['db_stats'] = stats
 
 
 def test_details_collection(results: TestResults, limit: int = 5):
     """상세정보 수집 테스트"""
-    print("\n" + "=" * 60)
-    print("3. 앱 상세정보 수집 테스트")
-    print("=" * 60)
+    results.logger.info("\n" + "=" * 60)
+    results.logger.info("3. 앱 상세정보 수집 테스트")
+    results.logger.info("=" * 60)
 
     from database.app_details_db import init_database, get_stats
     from scrapers.app_store_details_collector import AppStoreDetailsCollector, get_apps_to_collect as get_app_store_apps
@@ -238,12 +240,12 @@ def test_details_collection(results: TestResults, limit: int = 5):
     init_database()
 
     # App Store 상세정보 수집
-    print("\n[App Store 상세정보 수집]")
+    results.logger.info("\n[App Store 상세정보 수집]")
     try:
         app_ids = get_app_store_apps(limit=limit)
-        print(f"  수집 대상: {len(app_ids)}개")
+        results.logger.info(f"  수집 대상: {len(app_ids)}개")
         if app_ids:
-            print(f"  앱 ID 샘플: {app_ids[:3]}")
+            results.logger.info(f"  앱 ID 샘플: {app_ids[:3]}")
             collector = AppStoreDetailsCollector(verbose=True)
             stats = collector.collect_batch(app_ids)
             results.results['details']['app_store'] = stats
@@ -251,12 +253,12 @@ def test_details_collection(results: TestResults, limit: int = 5):
         results.add_error('app_store_details', str(e))
 
     # Play Store 상세정보 수집
-    print("\n[Play Store 상세정보 수집]")
+    results.logger.info("\n[Play Store 상세정보 수집]")
     try:
         app_ids = get_play_store_apps(limit=limit)
-        print(f"  수집 대상: {len(app_ids)}개")
+        results.logger.info(f"  수집 대상: {len(app_ids)}개")
         if app_ids:
-            print(f"  앱 ID 샘플: {app_ids[:3]}")
+            results.logger.info(f"  앱 ID 샘플: {app_ids[:3]}")
             collector = PlayStoreDetailsCollector(verbose=True)
             stats = collector.collect_batch(app_ids)
             results.results['details']['play_store'] = stats
@@ -265,15 +267,15 @@ def test_details_collection(results: TestResults, limit: int = 5):
 
     # 통계 확인
     stats = get_stats()
-    print(f"\n현재 App Details DB 통계: {stats}")
+    results.logger.info(f"\n현재 App Details DB 통계: {stats}")
     results.results['details']['db_stats'] = stats
 
 
 def test_reviews_collection(results: TestResults, limit: int = 3):
     """리뷰 수집 테스트"""
-    print("\n" + "=" * 60)
-    print("4. 앱 리뷰 수집 테스트")
-    print("=" * 60)
+    results.logger.info("\n" + "=" * 60)
+    results.logger.info("4. 앱 리뷰 수집 테스트")
+    results.logger.info("=" * 60)
 
     from database.app_details_db import init_database, get_stats
     from scrapers.app_store_reviews_collector import AppStoreReviewsCollector, get_apps_for_review_collection as get_app_store_review_apps
@@ -282,10 +284,10 @@ def test_reviews_collection(results: TestResults, limit: int = 3):
     init_database()
 
     # App Store 리뷰 수집
-    print("\n[App Store 리뷰 수집]")
+    results.logger.info("\n[App Store 리뷰 수집]")
     try:
         app_ids = get_app_store_review_apps(limit=limit)
-        print(f"  수집 대상: {len(app_ids)}개")
+        results.logger.info(f"  수집 대상: {len(app_ids)}개")
         if app_ids:
             collector = AppStoreReviewsCollector(verbose=True)
             stats = collector.collect_batch(app_ids)
@@ -294,10 +296,10 @@ def test_reviews_collection(results: TestResults, limit: int = 3):
         results.add_error('app_store_reviews', str(e))
 
     # Play Store 리뷰 수집
-    print("\n[Play Store 리뷰 수집]")
+    results.logger.info("\n[Play Store 리뷰 수집]")
     try:
         app_ids = get_play_store_review_apps(limit=limit)
-        print(f"  수집 대상: {len(app_ids)}개")
+        results.logger.info(f"  수집 대상: {len(app_ids)}개")
         if app_ids:
             collector = PlayStoreReviewsCollector(verbose=True)
             stats = collector.collect_batch(app_ids)
@@ -307,15 +309,15 @@ def test_reviews_collection(results: TestResults, limit: int = 3):
 
     # 통계 확인
     stats = get_stats()
-    print(f"\n현재 App Details DB 통계: {stats}")
+    results.logger.info(f"\n현재 App Details DB 통계: {stats}")
     results.results['reviews']['db_stats'] = stats
 
 
 def test_new_app_discovery(results: TestResults):
     """신규 앱 발견 테스트"""
-    print("\n" + "=" * 60)
-    print("5. 신규 앱 발견 테스트")
-    print("=" * 60)
+    results.logger.info("\n" + "=" * 60)
+    results.logger.info("5. 신규 앱 발견 테스트")
+    results.logger.info("=" * 60)
 
     from database.sitemap_apps_db import (
         get_connection, upsert_app_localizations_batch, get_stats
@@ -323,7 +325,7 @@ def test_new_app_discovery(results: TestResults):
 
     # 현재 상태 확인
     before_stats = get_stats()
-    print(f"  현재 상태: {before_stats}")
+    results.logger.info(f"  현재 상태: {before_stats}")
 
     # 가상의 신규 앱 추가
     test_apps = [
@@ -346,14 +348,14 @@ def test_new_app_discovery(results: TestResults):
     ]
 
     new_count = upsert_app_localizations_batch(test_apps)
-    print(f"  신규 앱 추가: {new_count}개")
+    results.logger.info(f"  신규 앱 추가: {new_count}개")
 
     # 중복 추가 테스트
     duplicate_count = upsert_app_localizations_batch(test_apps)
-    print(f"  중복 추가 시도: {duplicate_count}개 (0이어야 정상)")
+    results.logger.info(f"  중복 추가 시도: {duplicate_count}개 (0이어야 정상)")
 
     after_stats = get_stats()
-    print(f"  추가 후 상태: {after_stats}")
+    results.logger.info(f"  추가 후 상태: {after_stats}")
 
     results.results['new_app_discovery'] = {
         'before': before_stats,
@@ -365,9 +367,9 @@ def test_new_app_discovery(results: TestResults):
 
 def test_time_series(results: TestResults):
     """시계열 분석 기능 테스트"""
-    print("\n" + "=" * 60)
-    print("6. 시계열 분석 기능 테스트")
-    print("=" * 60)
+    results.logger.info("\n" + "=" * 60)
+    results.logger.info("6. 시계열 분석 기능 테스트")
+    results.logger.info("=" * 60)
 
     from database.app_details_db import (
         get_connection, insert_app, insert_app_metrics,
@@ -390,13 +392,13 @@ def test_time_series(results: TestResults):
         'free': 1
     }
     is_new_v1, id_v1 = insert_app(app_data_v1)
-    print(f"  첫 번째 삽입 (v1.0.0): is_new={is_new_v1}, id={id_v1}")
+    results.logger.info(f"  첫 번째 삽입 (v1.0.0): is_new={is_new_v1}, id={id_v1}")
 
     time.sleep(0.1)  # 시간 차이를 위해
 
     # 동일 데이터 삽입 시도 (변경 없음)
     is_new_dup, id_dup = insert_app(app_data_v1)
-    print(f"  동일 데이터 삽입 시도: is_new={is_new_dup}, id={id_dup}")
+    results.logger.info(f"  동일 데이터 삽입 시도: is_new={is_new_dup}, id={id_dup}")
 
     time.sleep(0.1)
 
@@ -404,7 +406,7 @@ def test_time_series(results: TestResults):
     app_data_v2 = app_data_v1.copy()
     app_data_v2['version'] = '2.0.0'
     is_new_v2, id_v2 = insert_app(app_data_v2)
-    print(f"  두 번째 삽입 (v2.0.0): is_new={is_new_v2}, id={id_v2}")
+    results.logger.info(f"  두 번째 삽입 (v2.0.0): is_new={is_new_v2}, id={id_v2}")
 
     # 시계열 데이터 확인
     cursor.execute("""
@@ -415,9 +417,9 @@ def test_time_series(results: TestResults):
     """, (test_app_id,))
 
     records = cursor.fetchall()
-    print(f"\n  시계열 레코드 수: {len(records)}")
+    results.logger.info(f"\n  시계열 레코드 수: {len(records)}")
     for r in records:
-        print(f"    ID: {r['id']}, Version: {r['version']}, Recorded: {r['recorded_at']}")
+        results.logger.info(f"    ID: {r['id']}, Version: {r['version']}, Recorded: {r['recorded_at']}")
 
     # 수치 데이터 시계열 테스트
     metrics_v1 = {
@@ -442,9 +444,9 @@ def test_time_series(results: TestResults):
     """, (test_app_id,))
 
     metric_records = cursor.fetchall()
-    print(f"\n  수치 시계열 레코드 수: {len(metric_records)}")
+    results.logger.info(f"\n  수치 시계열 레코드 수: {len(metric_records)}")
     for r in metric_records:
-        print(f"    ID: {r['id']}, Score: {r['score']}, Ratings: {r['ratings']}, Recorded: {r['recorded_at']}")
+        results.logger.info(f"    ID: {r['id']}, Score: {r['score']}, Ratings: {r['ratings']}, Recorded: {r['recorded_at']}")
 
     conn.close()
 
@@ -458,9 +460,9 @@ def test_time_series(results: TestResults):
 
 def test_db_integrity(results: TestResults):
     """DB 데이터 무결성 검사"""
-    print("\n" + "=" * 60)
-    print("7. DB 데이터 무결성 검사")
-    print("=" * 60)
+    results.logger.info("\n" + "=" * 60)
+    results.logger.info("7. DB 데이터 무결성 검사")
+    results.logger.info("=" * 60)
 
     integrity_issues = []
 
@@ -479,7 +481,7 @@ def test_db_integrity(results: TestResults):
         null_count = cursor.fetchone()['cnt']
         if null_count > 0:
             integrity_issues.append(f"sitemap: {null_count} NULL app_id/platform")
-        print(f"  Sitemap NULL 값: {null_count}")
+        results.logger.info(f"  Sitemap NULL 값: {null_count}")
 
         # 2. 중복 체크
         cursor.execute("""
@@ -491,7 +493,7 @@ def test_db_integrity(results: TestResults):
         duplicates = cursor.fetchall()
         if duplicates:
             integrity_issues.append(f"sitemap: {len(duplicates)} duplicates")
-        print(f"  Sitemap 중복: {len(duplicates)}")
+        results.logger.info(f"  Sitemap 중복: {len(duplicates)}")
 
         # 3. 인코딩 문제 체크
         cursor.execute("SELECT app_id, language, country, source_file FROM app_localizations LIMIT 100")
@@ -499,7 +501,7 @@ def test_db_integrity(results: TestResults):
         for row in cursor.fetchall():
             if not check_encoding(row['source_file'], 'sitemap_source_file', results):
                 encoding_issues += 1
-        print(f"  Sitemap 인코딩 문제: {encoding_issues}")
+        results.logger.info(f"  Sitemap 인코딩 문제: {encoding_issues}")
 
         conn.close()
     except Exception as e:
@@ -522,7 +524,7 @@ def test_db_integrity(results: TestResults):
         review_duplicates = cursor.fetchall()
         if review_duplicates:
             integrity_issues.append(f"reviews: {len(review_duplicates)} duplicates")
-        print(f"  리뷰 중복: {len(review_duplicates)}")
+        results.logger.info(f"  리뷰 중복: {len(review_duplicates)}")
 
         # 2. 한글 리뷰 인코딩 체크
         cursor.execute("""
@@ -535,7 +537,7 @@ def test_db_integrity(results: TestResults):
         for row in cursor.fetchall():
             if row['content'] and check_encoding(row['content'], 'review_content', results):
                 korean_encoding_ok += 1
-        print(f"  한글 리뷰 샘플: {len(korean_reviews)}개")
+        results.logger.info(f"  한글 리뷰 샘플: {len(korean_reviews)}개")
 
         # 3. 상태 불일치 체크 (상세정보 있는데 collection_status 없는 경우)
         cursor.execute("""
@@ -546,7 +548,7 @@ def test_db_integrity(results: TestResults):
         orphan_apps = cursor.fetchall()
         if orphan_apps:
             integrity_issues.append(f"apps without status: {len(orphan_apps)}")
-        print(f"  상태 정보 없는 앱: {len(orphan_apps)}")
+        results.logger.info(f"  상태 정보 없는 앱: {len(orphan_apps)}")
 
         conn.close()
     except Exception as e:
@@ -560,9 +562,9 @@ def test_db_integrity(results: TestResults):
 
 def test_repeated_execution(results: TestResults, iterations: int = 3):
     """반복 실행 테스트 (안정성 확인)"""
-    print("\n" + "=" * 60)
-    print("8. 반복 실행 안정성 테스트")
-    print("=" * 60)
+    results.logger.info("\n" + "=" * 60)
+    results.logger.info("8. 반복 실행 안정성 테스트")
+    results.logger.info("=" * 60)
 
     from database.app_details_db import get_stats as get_details_stats
     from database.sitemap_apps_db import get_stats as get_sitemap_stats
@@ -570,7 +572,7 @@ def test_repeated_execution(results: TestResults, iterations: int = 3):
     all_stats = []
 
     for i in range(iterations):
-        print(f"\n  [반복 {i+1}/{iterations}]")
+        results.logger.info(f"\n  [반복 {i+1}/{iterations}]")
         results.iterations = i + 1
 
         try:
@@ -584,7 +586,7 @@ def test_repeated_execution(results: TestResults, iterations: int = 3):
                     'iteration': i + 1,
                     'app_store_details': stats
                 })
-                print(f"    App Store: {stats}")
+                results.logger.info(f"    App Store: {stats}")
 
             # 소량의 리뷰 수집
             from scrapers.app_store_reviews_collector import AppStoreReviewsCollector, get_apps_for_review_collection
@@ -592,7 +594,7 @@ def test_repeated_execution(results: TestResults, iterations: int = 3):
             if review_apps:
                 collector = AppStoreReviewsCollector(verbose=False)
                 stats = collector.collect_batch(review_apps)
-                print(f"    Reviews: {stats}")
+                results.logger.info(f"    Reviews: {stats}")
 
             time.sleep(1)  # 요청 간격
 
@@ -603,94 +605,94 @@ def test_repeated_execution(results: TestResults, iterations: int = 3):
     details_stats = get_details_stats()
     sitemap_stats = get_sitemap_stats()
 
-    print(f"\n  최종 상태:")
-    print(f"    Details DB: {details_stats}")
-    print(f"    Sitemap DB: {sitemap_stats}")
+    results.logger.info(f"\n  최종 상태:")
+    results.logger.info(f"    Details DB: {details_stats}")
+    results.logger.info(f"    Sitemap DB: {sitemap_stats}")
 
 
 def generate_final_report(results: TestResults):
     """최종 분석 리포트 생성"""
-    print("\n" + "=" * 70)
-    print("최종 분석 리포트")
-    print("=" * 70)
+    results.logger.info("\n" + "=" * 70)
+    results.logger.info("최종 분석 리포트")
+    results.logger.info("=" * 70)
 
     summary = results.summary()
     elapsed = summary['elapsed_seconds']
 
-    print(f"\n총 테스트 시간: {elapsed:.1f}초")
-    print(f"반복 실행 횟수: {summary['iterations']}")
+    results.logger.info(f"\n총 테스트 시간: {elapsed:.1f}초")
+    results.logger.info(f"반복 실행 횟수: {summary['iterations']}")
 
     # Sitemap 수집 결과
-    print("\n[Sitemap 수집 결과]")
+    results.logger.info("\n[Sitemap 수집 결과]")
     for platform, data in summary['sitemap'].items():
         if platform in ['app_store', 'play_store']:
             stats = data.get('collection_stats', {})
             if stats:
-                print(f"  {platform}:")
-                print(f"    - 처리된 파일: {stats.get('sitemap_files_processed', 0)}")
-                print(f"    - 스킵된 파일: {stats.get('sitemap_files_skipped', 0)}")
-                print(f"    - 신규 로컬라이제이션: {stats.get('new_localizations', 0)}")
-                print(f"    - 에러: {stats.get('errors', 0)}")
+                results.logger.info(f"  {platform}:")
+                results.logger.info(f"    - 처리된 파일: {stats.get('sitemap_files_processed', 0)}")
+                results.logger.info(f"    - 스킵된 파일: {stats.get('sitemap_files_skipped', 0)}")
+                results.logger.info(f"    - 신규 로컬라이제이션: {stats.get('new_localizations', 0)}")
+                results.logger.info(f"    - 에러: {stats.get('errors', 0)}")
 
     # 상세정보 수집 결과
-    print("\n[상세정보 수집 결과]")
+    results.logger.info("\n[상세정보 수집 결과]")
     for platform, stats in summary['details'].items():
         if platform in ['app_store', 'play_store'] and stats:
-            print(f"  {platform}:")
-            print(f"    - 처리: {stats.get('apps_processed', 0)}")
-            print(f"    - 신규: {stats.get('new_records', 0)}")
-            print(f"    - 변경없음: {stats.get('unchanged_records', 0)}")
-            print(f"    - 미발견: {stats.get('apps_not_found', 0)}")
-            print(f"    - 에러: {stats.get('errors', 0)}")
+            results.logger.info(f"  {platform}:")
+            results.logger.info(f"    - 처리: {stats.get('apps_processed', 0)}")
+            results.logger.info(f"    - 신규: {stats.get('new_records', 0)}")
+            results.logger.info(f"    - 변경없음: {stats.get('unchanged_records', 0)}")
+            results.logger.info(f"    - 미발견: {stats.get('apps_not_found', 0)}")
+            results.logger.info(f"    - 에러: {stats.get('errors', 0)}")
 
     # 리뷰 수집 결과
-    print("\n[리뷰 수집 결과]")
+    results.logger.info("\n[리뷰 수집 결과]")
     for platform, stats in summary['reviews'].items():
         if platform in ['app_store', 'play_store'] and stats:
-            print(f"  {platform}:")
-            print(f"    - 처리 앱: {stats.get('apps_processed', 0)}")
-            print(f"    - 수집 리뷰: {stats.get('reviews_collected', 0)}")
-            print(f"    - 에러: {stats.get('errors', 0)}")
+            results.logger.info(f"  {platform}:")
+            results.logger.info(f"    - 처리 앱: {stats.get('apps_processed', 0)}")
+            results.logger.info(f"    - 수집 리뷰: {stats.get('reviews_collected', 0)}")
+            results.logger.info(f"    - 에러: {stats.get('errors', 0)}")
 
     # 신규 앱 발견 테스트 결과
-    print("\n[신규 앱 발견 테스트]")
+    results.logger.info("\n[신규 앱 발견 테스트]")
     new_app = summary['new_app_discovery']
     if new_app:
-        print(f"  신규 앱 추가: {new_app.get('new_apps_added', 0)}")
-        print(f"  중복 방지: {'OK' if new_app.get('duplicate_check') else 'FAIL'}")
+        results.logger.info(f"  신규 앱 추가: {new_app.get('new_apps_added', 0)}")
+        results.logger.info(f"  중복 방지: {'OK' if new_app.get('duplicate_check') else 'FAIL'}")
 
     # 시계열 분석 테스트 결과
-    print("\n[시계열 분석 테스트]")
+    results.logger.info("\n[시계열 분석 테스트]")
     time_series = summary['time_series']
     if time_series:
-        print(f"  앱 이력 레코드: {time_series.get('app_history_count', 0)}")
-        print(f"  수치 이력 레코드: {time_series.get('metrics_history_count', 0)}")
-        print(f"  중복 방지: {'OK' if time_series.get('duplicate_prevention') else 'FAIL'}")
-        print(f"  변경 감지: {'OK' if time_series.get('change_detection') else 'FAIL'}")
+        results.logger.info(f"  앱 이력 레코드: {time_series.get('app_history_count', 0)}")
+        results.logger.info(f"  수치 이력 레코드: {time_series.get('metrics_history_count', 0)}")
+        results.logger.info(f"  중복 방지: {'OK' if time_series.get('duplicate_prevention') else 'FAIL'}")
+        results.logger.info(f"  변경 감지: {'OK' if time_series.get('change_detection') else 'FAIL'}")
 
     # DB 무결성 검사 결과
-    print("\n[DB 무결성 검사]")
+    results.logger.info("\n[DB 무결성 검사]")
     integrity = summary['db_integrity']
     if integrity:
-        print(f"  통과: {'OK' if integrity.get('passed') else 'FAIL'}")
+        results.logger.info(f"  통과: {'OK' if integrity.get('passed') else 'FAIL'}")
         for issue in integrity.get('issues', []):
-            print(f"    - {issue}")
+            results.logger.info(f"    - {issue}")
 
     # 인코딩 문제
-    print("\n[인코딩 문제]")
+    results.logger.info("\n[인코딩 문제]")
     encoding = summary['encoding']
     broken = encoding.get('broken_chars', [])
-    print(f"  발견된 문제: {len(broken)}건")
+    results.logger.info(f"  발견된 문제: {len(broken)}건")
 
     # 에러 요약
-    print("\n[에러 요약]")
+    results.logger.info("\n[에러 요약]")
     errors = summary['errors']
-    print(f"  총 에러: {len(errors)}건")
+    results.logger.info(f"  총 에러: {len(errors)}건")
     for err in errors[:5]:  # 처음 5개만
-        print(f"    - [{err['context']}] {err['error'][:50]}")
+        results.logger.info(f"    - [{err['context']}] {err['error'][:50]}")
 
     # 성공률 계산
-    print("\n[성공/실패 분석]")
+    results.logger.info("\n[성공/실패 분석]")
     total_requests = 0
     total_errors = 0
 
@@ -706,24 +708,23 @@ def generate_final_report(results: TestResults):
 
         if processed > 0:
             success_rate = ((processed - errors) / processed) * 100
-            print(f"  {platform}: {processed}건 처리, {errors}건 에러 ({success_rate:.1f}% 성공)")
+            results.logger.info(f"  {platform}: {processed}건 처리, {errors}건 에러 ({success_rate:.1f}% 성공)")
 
     if total_requests > 0:
         overall_success = ((total_requests - total_errors) / total_requests) * 100
-        print(f"\n  전체: {total_requests}건 처리, {total_errors}건 에러 ({overall_success:.1f}% 성공)")
+        results.logger.info(f"\n  전체: {total_requests}건 처리, {total_errors}건 에러 ({overall_success:.1f}% 성공)")
 
-    print("\n" + "=" * 70)
+    results.logger.info("\n" + "=" * 70)
 
     return summary
 
 
 def main():
-    print("=" * 70)
-    print("앱 발견 시스템 종합 테스트")
-    print(f"시작 시간: {datetime.now().isoformat()}")
-    print("=" * 70)
-
     results = TestResults()
+    results.logger.info("=" * 70)
+    results.logger.info("앱 발견 시스템 종합 테스트")
+    results.logger.info(f"시작 시간: {datetime.now().isoformat()}")
+    results.logger.info("=" * 70)
 
     try:
         # 1. Sitemap 수집 기본 테스트
@@ -751,11 +752,10 @@ def main():
         test_repeated_execution(results, iterations=2)
 
     except KeyboardInterrupt:
-        print("\n테스트 중단됨")
+        results.logger.warning("\n테스트 중단됨")
     except Exception as e:
         results.add_error('main', str(e))
-        import traceback
-        traceback.print_exc()
+        results.logger.exception("[main] 상세 예외")
 
     # 최종 리포트
     summary = generate_final_report(results)
@@ -764,7 +764,7 @@ def main():
     report_path = os.path.join(os.path.dirname(__file__), 'test_report.json')
     with open(report_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
-    print(f"\n상세 리포트 저장: {report_path}")
+    results.logger.info(f"\n상세 리포트 저장: {report_path}")
 
     return summary
 
