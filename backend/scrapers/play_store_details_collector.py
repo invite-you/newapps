@@ -20,7 +20,10 @@ from database.app_details_db import (
     is_failed_app, mark_app_failed, update_collection_status,
     get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format
 )
-from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from database.sitemap_apps_db import (
+    get_connection as get_sitemap_connection,
+    release_connection as release_sitemap_connection,
+)
 from config.language_country_priority import select_best_pairs_for_collection
 from scrapers.collection_utils import (
     get_app_language_country_pairs,
@@ -295,21 +298,22 @@ def get_apps_to_collect(limit: Optional[int] = None) -> List[str]:
 
     # sitemap에서 앱 목록 가져오기 (최근 발견 순)
     sitemap_conn = get_sitemap_connection()
-    cursor = sitemap_conn.cursor()
-    cursor.execute("""
-        SELECT DISTINCT app_id FROM app_localizations
-        WHERE platform = 'play_store'
-        ORDER BY first_seen_at DESC
-    """)
+    try:
+        with sitemap_conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT app_id FROM app_localizations
+                WHERE platform = 'play_store'
+                ORDER BY first_seen_at DESC
+            """)
 
-    result = []
-    for row in cursor.fetchall():
-        if row['app_id'] not in exclude_ids:
-            result.append(row['app_id'])
-            if limit is not None and len(result) >= limit:
-                break
-
-    sitemap_conn.close()
+            result = []
+            for row in cursor.fetchall():
+                if row['app_id'] not in exclude_ids:
+                    result.append(row['app_id'])
+                    if limit is not None and len(result) >= limit:
+                        break
+    finally:
+        release_sitemap_connection(sitemap_conn)
     return result
 
 

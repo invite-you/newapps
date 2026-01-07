@@ -18,7 +18,10 @@ from database.app_details_db import (
     get_collection_status, update_collection_status, get_review_count,
     is_failed_app, get_failed_app_ids, get_abandoned_apps_to_skip
 )
-from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from database.sitemap_apps_db import (
+    get_connection as get_sitemap_connection,
+    release_connection as release_sitemap_connection,
+)
 from utils.logger import get_collection_logger, get_timestamped_logger
 from utils.error_tracker import ErrorTracker, ErrorStep
 
@@ -48,14 +51,16 @@ class PlayStoreReviewsCollector:
     def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
         """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
         conn = get_sitemap_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT language, country FROM app_localizations
-            WHERE app_id = %s AND platform = %s
-        """, (app_id, PLATFORM))
-        pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
-        conn.close()
-        return pairs if pairs else [('en', 'us')]
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT DISTINCT language, country FROM app_localizations
+                    WHERE app_id = %s AND platform = %s
+                """, (app_id, PLATFORM))
+                pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
+                return pairs if pairs else [('en', 'us')]
+        finally:
+            release_sitemap_connection(conn)
 
     def fetch_reviews(self, app_id: str, lang: str = 'en', country: str = 'us',
                       count: int = BATCH_SIZE, continuation_token: str = None) -> tuple:
