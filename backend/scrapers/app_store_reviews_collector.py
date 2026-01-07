@@ -310,7 +310,7 @@ class AppStoreReviewsCollector:
         return self.error_tracker
 
 
-def get_apps_for_review_collection(limit: int = 1000) -> List[str]:
+def get_apps_for_review_collection(limit: Optional[int] = None) -> List[str]:
     """리뷰 수집할 앱 ID 목록을 가져옵니다.
 
     수집 정책:
@@ -337,7 +337,7 @@ def get_apps_for_review_collection(limit: int = 1000) -> List[str]:
     for row in cursor.fetchall():
         if row['app_id'] not in exclude_ids:
             result.append(row['app_id'])
-            if len(result) >= limit:
+            if limit is not None and len(result) >= limit:
                 break
 
     details_conn.close()

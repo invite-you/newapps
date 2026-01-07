@@ -8,7 +8,7 @@ from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON_BIN = sys.executable
-DEFAULT_LIMIT = sys.maxsize
+DEFAULT_LIMIT = None
 DEFAULT_RUN_TESTS = False
 
 
@@ -63,15 +63,16 @@ def main() -> int:
     print("=" * 70)
     print(f"Full Pipeline Started at {datetime.now().isoformat()}")
     print("=" * 70)
-    print(f"Limit: {limit}")
+    print(f"Limit: {limit if limit is not None else 'unlimited'}")
     print(f"Run tests: {run_tests}")
     print()
 
     run_script("SITEMAP_COLLECTION_ALL", "collect_sitemaps.py", [])
+    details_args = ["--limit", str(limit)] if limit is not None else []
     run_script(
         "DETAILS_AND_REVIEWS_ALL",
         "collect_app_details.py",
-        ["--limit", str(limit)],
+        details_args,
     )
 
     if run_tests:
