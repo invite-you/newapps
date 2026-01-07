@@ -162,19 +162,20 @@ def upsert_app_localizations_batch(localizations: List[Dict[str, Any]]) -> int:
     ]
 
     try:
-        insert_sql = """
+        value_placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(values))
+        insert_sql = f"""
             INSERT INTO app_localizations (
                 platform, app_id, language, country, source_file, first_seen_at, last_seen_at
             )
-            VALUES %s
+            VALUES {value_placeholders}
             ON CONFLICT(platform, app_id, language, country) DO UPDATE SET
                 source_file = EXCLUDED.source_file,
                 last_seen_at = EXCLUDED.last_seen_at
             RETURNING (xmax = 0) AS inserted
         """
-        from psycopg.extras import execute_values
+        flattened_values = [item for row in values for item in row]
 
-        execute_values(cursor, insert_sql, values)
+        cursor.execute(insert_sql, flattened_values)
         inserted_rows = cursor.fetchall()
         new_count = sum(1 for row in inserted_rows if row['inserted'])
         conn.commit()
