@@ -22,13 +22,11 @@ from utils.error_tracker import ErrorTracker, ErrorStep
 # 테스트 설정
 TEST_DURATION_MINUTES = 20  # 테스트 시간 (분)
 ITERATION_INTERVAL_SECONDS = 15  # 반복 간격 (초)
-SESSION_ID = None
 
 class LongRunningTest:
-    def __init__(self, session_id: str):
-        self.session_id = session_id
+    def __init__(self):
         self.start_time = datetime.now()
-        self.logger = get_test_logger('long_running_test', session_id=session_id)
+        self.logger = get_test_logger('long_running_test')
         self.error_tracker = ErrorTracker('long_running_test')
         self.stats = {
             'iterations': 0,
@@ -89,7 +87,7 @@ class LongRunningTest:
         # App Store
         try:
             from scrapers.app_store_sitemap_collector import AppStoreSitemapCollector, SITEMAP_INDEX_URLS
-            collector = AppStoreSitemapCollector(verbose=False, session_id=self.session_id)
+            collector = AppStoreSitemapCollector(verbose=False)
             content = fetch_url(SITEMAP_INDEX_URLS[0], logger=self.logger)
             if content:
                 sitemap_urls = parse_sitemap_index(content, logger=self.logger)
@@ -110,7 +108,7 @@ class LongRunningTest:
         # Play Store
         try:
             from scrapers.play_store_sitemap_collector import PlayStoreSitemapCollector, SITEMAP_INDEX_URLS
-            collector = PlayStoreSitemapCollector(verbose=False, session_id=self.session_id)
+            collector = PlayStoreSitemapCollector(verbose=False)
             content = fetch_url(SITEMAP_INDEX_URLS[0], logger=self.logger)
             if content:
                 sitemap_urls = parse_sitemap_index(content, logger=self.logger)
@@ -139,11 +137,7 @@ class LongRunningTest:
             app_ids = get_apps_to_collect(limit=limit)
             if app_ids:
                 # 에러 트래커 공유
-                collector = AppStoreDetailsCollector(
-                    verbose=False,
-                    error_tracker=self.error_tracker,
-                    session_id=self.session_id,
-                )
+                collector = AppStoreDetailsCollector(verbose=False, error_tracker=self.error_tracker)
                 stats = collector.collect_batch(app_ids)
 
                 self.stats['details']['app_store']['processed'] += stats['apps_processed']
@@ -165,11 +159,7 @@ class LongRunningTest:
             app_ids = get_apps_to_collect(limit=limit)
             if app_ids:
                 # 에러 트래커 공유
-                collector = PlayStoreDetailsCollector(
-                    verbose=False,
-                    error_tracker=self.error_tracker,
-                    session_id=self.session_id,
-                )
+                collector = PlayStoreDetailsCollector(verbose=False, error_tracker=self.error_tracker)
                 stats = collector.collect_batch(app_ids)
 
                 self.stats['details']['play_store']['processed'] += stats['apps_processed']
@@ -196,11 +186,7 @@ class LongRunningTest:
             app_ids = get_apps_for_review_collection(limit=limit)
             if app_ids:
                 # 에러 트래커 공유
-                collector = AppStoreReviewsCollector(
-                    verbose=False,
-                    error_tracker=self.error_tracker,
-                    session_id=self.session_id,
-                )
+                collector = AppStoreReviewsCollector(verbose=False, error_tracker=self.error_tracker)
                 stats = collector.collect_batch(app_ids)
 
                 self.stats['reviews']['app_store']['apps_processed'] += stats['apps_processed']
@@ -216,11 +202,7 @@ class LongRunningTest:
             app_ids = get_apps_for_review_collection(limit=limit)
             if app_ids:
                 # 에러 트래커 공유
-                collector = PlayStoreReviewsCollector(
-                    verbose=False,
-                    error_tracker=self.error_tracker,
-                    session_id=self.session_id,
-                )
+                collector = PlayStoreReviewsCollector(verbose=False, error_tracker=self.error_tracker)
                 stats = collector.collect_batch(app_ids)
 
                 self.stats['reviews']['play_store']['apps_processed'] += stats['apps_processed']
@@ -506,9 +488,7 @@ class LongRunningTest:
 
 
 def main():
-    global SESSION_ID
-    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
-    test = LongRunningTest(SESSION_ID)
+    test = LongRunningTest()
     return test.run()
 
 

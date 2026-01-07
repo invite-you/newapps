@@ -31,18 +31,12 @@ from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
-SESSION_ID = None
 
 
 class PlayStoreDetailsCollector:
-    def __init__(
-        self,
-        verbose: bool = True,
-        error_tracker: Optional[ErrorTracker] = None,
-        session_id: Optional[str] = None,
-    ):
+    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None):
         self.verbose = verbose
-        self.logger = get_collection_logger('PlayStoreDetails', verbose, session_id=session_id)
+        self.logger = get_collection_logger('PlayStoreDetails', verbose)
         self.error_tracker = error_tracker or ErrorTracker('play_store_details')
         self.stats = {
             'apps_processed': 0,
@@ -320,21 +314,15 @@ def get_apps_to_collect(limit: Optional[int] = None) -> List[str]:
 
 
 def main():
-    global SESSION_ID
-    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
     init_database()
 
     # 수집할 앱 목록
     app_ids = get_apps_to_collect(limit=10)
-    logger = get_timestamped_logger(
-        "play_store_details_main",
-        file_prefix="play_store_details_main",
-        session_id=SESSION_ID,
-    )
+    logger = get_timestamped_logger("play_store_details_main", file_prefix="play_store_details_main")
     logger.info(f"Found {len(app_ids)} apps to collect")
 
     if app_ids:
-        collector = PlayStoreDetailsCollector(verbose=True, session_id=SESSION_ID)
+        collector = PlayStoreDetailsCollector(verbose=True)
         stats = collector.collect_batch(app_ids)
         logger.info(f"\nFinal Stats: {stats}")
 

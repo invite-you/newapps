@@ -23,19 +23,13 @@ from utils.error_tracker import ErrorTracker, ErrorStep
 PLATFORM = 'app_store'
 RSS_BASE_URL = 'https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json'
 REQUEST_DELAY = 0.01  # 10ms
-SESSION_ID = None
 MAX_REVIEWS_TOTAL = 50000  # 실행당 최대 수집 리뷰 수 (무한루프 방지)
 
 
 class AppStoreReviewsCollector:
-    def __init__(
-        self,
-        verbose: bool = True,
-        error_tracker: Optional[ErrorTracker] = None,
-        session_id: Optional[str] = None,
-    ):
+    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None):
         self.verbose = verbose
-        self.logger = get_collection_logger('AppStoreReviews', verbose, session_id=session_id)
+        self.logger = get_collection_logger('AppStoreReviews', verbose)
         self.error_tracker = error_tracker or ErrorTracker('app_store_reviews')
         self.stats = {
             'apps_processed': 0,
@@ -347,21 +341,15 @@ def get_apps_for_review_collection(limit: Optional[int] = None) -> List[str]:
 
 
 def main():
-    global SESSION_ID
-    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
     init_database()
 
     # 수집할 앱 목록
     app_ids = get_apps_for_review_collection(limit=10)
-    logger = get_timestamped_logger(
-        "app_store_reviews_main",
-        file_prefix="app_store_reviews_main",
-        session_id=SESSION_ID,
-    )
+    logger = get_timestamped_logger("app_store_reviews_main", file_prefix="app_store_reviews_main")
     logger.info(f"Found {len(app_ids)} apps for review collection")
 
     if app_ids:
-        collector = AppStoreReviewsCollector(verbose=True, session_id=SESSION_ID)
+        collector = AppStoreReviewsCollector(verbose=True)
         stats = collector.collect_batch(app_ids)
         logger.info(f"\nFinal Stats: {stats}")
 

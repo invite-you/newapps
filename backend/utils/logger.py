@@ -94,21 +94,14 @@ def get_timestamped_logger(
     file_prefix: str,
     level: int = logging.INFO,
     console: bool = True,
-    file_logging: bool = True,
-    session_id: Optional[str] = None,
-    log_file: Optional[str] = None
+    file_logging: bool = True
 ) -> logging.Logger:
     """타임스탬프 파일명을 사용하는 로거를 생성합니다."""
-    if log_file is None:
-        log_file = _build_timestamped_log_file(file_prefix, timestamp=session_id)
+    log_file = _build_timestamped_log_file(file_prefix)
     return get_logger(name, log_file=log_file, level=level, console=console, file_logging=file_logging)
 
 
-def get_collection_logger(
-    collector_name: str,
-    verbose: bool = True,
-    session_id: Optional[str] = None
-) -> logging.Logger:
+def get_collection_logger(collector_name: str, verbose: bool = True) -> logging.Logger:
     """
     수집기용 로거를 생성합니다.
 
@@ -121,18 +114,10 @@ def get_collection_logger(
     """
     level = logging.DEBUG if verbose else logging.WARNING
     log_prefix = f"collector_{collector_name.lower()}"
-    return get_timestamped_logger(
-        collector_name,
-        file_prefix=log_prefix,
-        level=level,
-        session_id=session_id,
-    )
+    return get_timestamped_logger(collector_name, file_prefix=log_prefix, level=level)
 
 
-def get_test_logger(
-    test_name: str = 'long_running_test',
-    session_id: Optional[str] = None
-) -> logging.Logger:
+def get_test_logger(test_name: str = 'long_running_test') -> logging.Logger:
     """
     테스트용 로거를 생성합니다.
 
@@ -142,12 +127,7 @@ def get_test_logger(
     Returns:
         설정된 Logger 인스턴스
     """
-    return get_timestamped_logger(
-        test_name,
-        file_prefix=test_name,
-        level=logging.DEBUG,
-        session_id=session_id,
-    )
+    return get_timestamped_logger(test_name, file_prefix=test_name, level=logging.DEBUG)
 
 
 class CollectorLogger:

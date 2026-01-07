@@ -11,7 +11,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from scrapers.sitemap_utils import (
     fetch_url, fetch_and_hash, parse_sitemap_index, parse_sitemap_urlset,
     extract_play_store_app_id, parse_hreflang, get_filename_from_url,
@@ -23,7 +23,6 @@ from database.sitemap_apps_db import (
 from utils.logger import get_timestamped_logger
 PLATFORM = 'play_store'
 LOG_FILE_PREFIX = "sitemap_play_store"
-SESSION_ID = None
 
 # Play Store sitemap index URLs
 SITEMAP_INDEX_URLS = [
@@ -33,13 +32,9 @@ SITEMAP_INDEX_URLS = [
 
 
 class PlayStoreSitemapCollector:
-    def __init__(self, verbose: bool = True, session_id: Optional[str] = None):
+    def __init__(self, verbose: bool = True):
         self.verbose = verbose
-        self.logger = get_timestamped_logger(
-            "play_store_sitemap",
-            file_prefix=LOG_FILE_PREFIX,
-            session_id=session_id,
-        )
+        self.logger = get_timestamped_logger("play_store_sitemap", file_prefix=LOG_FILE_PREFIX)
         self.stats = {
             'sitemap_files_processed': 0,
             'sitemap_files_skipped': 0,
@@ -185,12 +180,10 @@ class PlayStoreSitemapCollector:
 
 
 def main():
-    global SESSION_ID
-    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
     from database.sitemap_apps_db import init_database
     init_database()
 
-    collector = PlayStoreSitemapCollector(verbose=True, session_id=SESSION_ID)
+    collector = PlayStoreSitemapCollector(verbose=True)
     stats = collector.collect_all()
     collector.logger.info(f"\nFinal Stats: {stats}")
 

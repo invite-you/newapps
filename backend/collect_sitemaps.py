@@ -24,7 +24,6 @@ from scrapers.play_store_sitemap_collector import PlayStoreSitemapCollector
 from utils.logger import get_timestamped_logger
 
 LOG_FILE_PREFIX = "collect_sitemaps"
-SESSION_ID = None
 
 
 def print_stats(logger):
@@ -55,8 +54,6 @@ def print_stats(logger):
 
 
 def main():
-    global SESSION_ID
-    SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
     parser = argparse.ArgumentParser(
         description='Collect app localizations from App Store and Play Store sitemaps'
     )
@@ -66,11 +63,7 @@ def main():
     parser.add_argument('--quiet', '-q', action='store_true', help='Quiet mode (less output)')
 
     args = parser.parse_args()
-    logger = get_timestamped_logger(
-        "collect_sitemaps",
-        file_prefix=LOG_FILE_PREFIX,
-        session_id=SESSION_ID,
-    )
+    logger = get_timestamped_logger("collect_sitemaps", file_prefix=LOG_FILE_PREFIX)
     start_ts = datetime.now().isoformat()
     start_perf = time.perf_counter()
 
@@ -104,13 +97,13 @@ def main():
     # App Store 수집
     if collect_app_store:
         logger.info("\n>>> Collecting from App Store...\n")
-        collector = AppStoreSitemapCollector(verbose=verbose, session_id=SESSION_ID)
+        collector = AppStoreSitemapCollector(verbose=verbose)
         all_stats['app_store'] = collector.collect_all()
 
     # Play Store 수집
     if collect_play_store:
         logger.info("\n>>> Collecting from Play Store...\n")
-        collector = PlayStoreSitemapCollector(verbose=verbose, session_id=SESSION_ID)
+        collector = PlayStoreSitemapCollector(verbose=verbose)
         all_stats['play_store'] = collector.collect_all()
 
     # 결과 요약
