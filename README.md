@@ -2,9 +2,9 @@
 
 App Store와 Google Play Store에서 앱 정보, 로컬라이제이션 데이터, 상세정보 및 리뷰를 자동으로 수집하는 시스템입니다.
 
-## 프로젝트 개요
+## 프로젝트 개요 (한 줄 요약)
 
-이 프로젝트는 앱 스토어의 sitemap을 활용하여 전 세계 앱의 다국어 정보를 효율적으로 수집합니다. 수집된 데이터는 앱 시장 분석, 트렌드 파악, 경쟁사 분석 등에 활용될 수 있습니다.
+App Store/Play Store의 sitemap과 공개 API를 기반으로 전 세계 앱의 다국어 상세정보·리뷰를 자동 수집해 분석 가능한 DB로 적재하는 파이프라인입니다.
 
 ### 주요 기능
 
@@ -22,27 +22,89 @@ newapps/
 ├── AGENT.MD                 # 개발 지침
 ├── README.md                # 이 파일
 └── backend/
-    ├── collect_sitemaps.py      # Sitemap 수집 메인 스크립트
-    ├── collect_app_details.py   # 상세정보/리뷰 수집 메인 스크립트
-    ├── collect_full_pipeline.py # 전체 sitemap + 상세정보/리뷰 + 테스트 통합 실행
-    ├── requirements.txt         # Python 의존성
-    ├── test_comprehensive.py    # 종합 테스트 스크립트
+    ├── collect_sitemaps.py          # Sitemap 수집 메인 스크립트
+    ├── collect_app_details.py       # 상세정보/리뷰 수집 메인 스크립트
+    ├── collect_full_pipeline.py     # 전체 파이프라인 실행(수집+옵션 테스트)
+    ├── requirements.txt             # Python 의존성
+    ├── test_comprehensive.py        # 종합 테스트 스크립트
+    ├── test_long_running.py         # 장시간 수집 시뮬레이션 테스트
+    ├── test_report.json             # 테스트 결과 예시
+    ├── long_test_report.json        # 장시간 테스트 결과 예시
     │
     ├── config/
     │   └── language_country_priority.py  # 언어-국가 우선순위 설정
     │
     ├── database/
-    │   ├── sitemap_apps_db.py    # Sitemap 앱 DB (app_localizations)
-    │   └── app_details_db.py     # 상세정보 DB (apps, reviews, metrics)
+    │   ├── sitemap_apps_db.py        # Sitemap 앱 DB (app_localizations)
+    │   └── app_details_db.py         # 상세정보 DB (apps, reviews, metrics)
     │
-    └── scrapers/
-        ├── sitemap_utils.py              # Sitemap 파싱 유틸리티
-        ├── app_store_sitemap_collector.py   # App Store sitemap 수집
-        ├── play_store_sitemap_collector.py  # Play Store sitemap 수집
-        ├── app_store_details_collector.py   # App Store 상세정보 수집
-        ├── play_store_details_collector.py  # Play Store 상세정보 수집
-        ├── app_store_reviews_collector.py   # App Store 리뷰 수집
-        └── play_store_reviews_collector.py  # Play Store 리뷰 수집
+    ├── scrapers/
+        ├── sitemap_utils.py                # Sitemap 파싱 유틸리티
+        ├── collection_utils.py             # 공통 수집 유틸/재시도 로직
+        ├── app_store_sitemap_collector.py  # App Store sitemap 수집
+        ├── play_store_sitemap_collector.py # Play Store sitemap 수집
+        ├── app_store_details_collector.py  # App Store 상세정보 수집
+        ├── play_store_details_collector.py # Play Store 상세정보 수집
+        ├── app_store_reviews_collector.py  # App Store 리뷰 수집
+        └── play_store_reviews_collector.py # Play Store 리뷰 수집
+    └── utils/
+        ├── logger.py                    # 타임스탬프 로깅 유틸
+        └── error_tracker.py             # 예외 추적/에러 누적
+```
+
+## 핵심 로직 흐름
+
+1. **Sitemap 수집 시작 (`collect_sitemaps.py`)**
+   - App Store/Play Store의 sitemap index를 순회해 개별 sitemap URL을 수집합니다.
+   - 각 sitemap 파일을 다운로드하고 MD5 해시를 계산해 기존 해시와 비교합니다.
+   - 변경된 sitemap만 파싱하여 앱 ID, 언어, 국가 코드를 추출합니다.
+   - 언어별 우선 국가만 남기고 `sitemap_apps` DB에 upsert합니다.
+2. **상세정보/리뷰 수집 시작 (`collect_app_details.py`)**
+   - `sitemap_apps`에서 수집 대상 앱을 조회합니다.
+   - App Store는 iTunes Lookup API, Play Store는 `google-play-scraper`로 메타데이터/수치/리뷰를 수집합니다.
+   - 최신 레코드와 비교해 변경된 데이터만 `app_details` DB에 시계열로 저장합니다.
+3. **통합 파이프라인 (`collect_full_pipeline.py`)**
+   - 월별 파티션을 점검/생성한 뒤 sitemap 수집 → 상세정보/리뷰 수집 → (옵션) 테스트 순으로 실행합니다.
+   - 모든 단계는 타임스탬프 기반 로그로 시작/종료 시간이 기록됩니다.
+
+## 주요 의존성
+
+- **requests**: App Store sitemap 및 iTunes API 요청 처리
+- **google-play-scraper**: Play Store 메타데이터/리뷰 스크레이핑
+- **psycopg[binary]**: PostgreSQL 연결 및 파티션 관리
+
+## 전체 로직 시퀀스 다이어그램
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Runner as collect_full_pipeline.py
+    participant Sitemap as collect_sitemaps.py
+    participant AS_Sitemap as AppStoreSitemapCollector
+    participant PS_Sitemap as PlayStoreSitemapCollector
+    participant SitemapDB as sitemap_apps_db
+    participant Details as collect_app_details.py
+    participant AS_Details as AppStoreDetailsCollector
+    participant PS_Details as PlayStoreDetailsCollector
+    participant AS_Reviews as AppStoreReviewsCollector
+    participant PS_Reviews as PlayStoreReviewsCollector
+    participant DetailsDB as app_details_db
+
+    Runner->>Sitemap: run_script(collect_sitemaps)
+    Sitemap->>AS_Sitemap: collect_all()
+    AS_Sitemap->>SitemapDB: upsert_app_localizations_batch()
+    Sitemap->>PS_Sitemap: collect_all()
+    PS_Sitemap->>SitemapDB: upsert_app_localizations_batch()
+
+    Runner->>Details: run_script(collect_app_details)
+    Details->>AS_Details: collect_batch(app_ids)
+    AS_Details->>DetailsDB: upsert apps/apps_localized/apps_metrics
+    Details->>AS_Reviews: collect_batch(app_ids)
+    AS_Reviews->>DetailsDB: upsert app_reviews
+    Details->>PS_Details: collect_batch(app_ids)
+    PS_Details->>DetailsDB: upsert apps/apps_localized/apps_metrics
+    Details->>PS_Reviews: collect_batch(app_ids)
+    PS_Reviews->>DetailsDB: upsert app_reviews
 ```
 
 ## 설치 & 최초 실행 (아마존 우분투 기준)
