@@ -467,43 +467,46 @@ def test_db_integrity(results: TestResults):
     integrity_issues = []
 
     # sitemap_apps.db 검사
-    from database.sitemap_apps_db import get_connection as get_sitemap_conn
+    from database.sitemap_apps_db import (
+        get_connection as get_sitemap_conn,
+        release_connection as release_sitemap_conn,
+    )
 
     try:
         conn = get_sitemap_conn()
-        cursor = conn.cursor()
+        try:
+            with conn.cursor() as cursor:
+                # 1. NULL 값 체크
+                cursor.execute("""
+                    SELECT COUNT(*) as cnt FROM app_localizations
+                    WHERE app_id IS NULL OR platform IS NULL
+                """)
+                null_count = cursor.fetchone()['cnt']
+                if null_count > 0:
+                    integrity_issues.append(f"sitemap: {null_count} NULL app_id/platform")
+                results.logger.info(f"  Sitemap NULL 값: {null_count}")
 
-        # 1. NULL 값 체크
-        cursor.execute("""
-            SELECT COUNT(*) as cnt FROM app_localizations
-            WHERE app_id IS NULL OR platform IS NULL
-        """)
-        null_count = cursor.fetchone()['cnt']
-        if null_count > 0:
-            integrity_issues.append(f"sitemap: {null_count} NULL app_id/platform")
-        results.logger.info(f"  Sitemap NULL 값: {null_count}")
+                # 2. 중복 체크
+                cursor.execute("""
+                    SELECT platform, app_id, language, country, COUNT(*) as cnt
+                    FROM app_localizations
+                    GROUP BY platform, app_id, language, country
+                    HAVING cnt > 1
+                """)
+                duplicates = cursor.fetchall()
+                if duplicates:
+                    integrity_issues.append(f"sitemap: {len(duplicates)} duplicates")
+                results.logger.info(f"  Sitemap 중복: {len(duplicates)}")
 
-        # 2. 중복 체크
-        cursor.execute("""
-            SELECT platform, app_id, language, country, COUNT(*) as cnt
-            FROM app_localizations
-            GROUP BY platform, app_id, language, country
-            HAVING cnt > 1
-        """)
-        duplicates = cursor.fetchall()
-        if duplicates:
-            integrity_issues.append(f"sitemap: {len(duplicates)} duplicates")
-        results.logger.info(f"  Sitemap 중복: {len(duplicates)}")
-
-        # 3. 인코딩 문제 체크
-        cursor.execute("SELECT app_id, language, country, source_file FROM app_localizations LIMIT 100")
-        encoding_issues = 0
-        for row in cursor.fetchall():
-            if not check_encoding(row['source_file'], 'sitemap_source_file', results):
-                encoding_issues += 1
-        results.logger.info(f"  Sitemap 인코딩 문제: {encoding_issues}")
-
-        conn.close()
+                # 3. 인코딩 문제 체크
+                cursor.execute("SELECT app_id, language, country, source_file FROM app_localizations LIMIT 100")
+                encoding_issues = 0
+                for row in cursor.fetchall():
+                    if not check_encoding(row['source_file'], 'sitemap_source_file', results):
+                        encoding_issues += 1
+                results.logger.info(f"  Sitemap 인코딩 문제: {encoding_issues}")
+        finally:
+            release_sitemap_conn(conn)
     except Exception as e:
         results.add_error('sitemap_integrity', str(e))
 
