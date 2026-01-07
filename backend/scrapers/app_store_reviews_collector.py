@@ -23,7 +23,7 @@ from utils.error_tracker import ErrorTracker, ErrorStep
 PLATFORM = 'app_store'
 RSS_BASE_URL = 'https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json'
 REQUEST_DELAY = 0.01  # 10ms
-MAX_REVIEWS_TOTAL = 20000  # 실행당 최대 수집 리뷰 수 (무한루프 방지)
+MAX_REVIEWS_TOTAL = 50000  # 실행당 최대 수집 리뷰 수 (무한루프 방지)
 
 
 class AppStoreReviewsCollector:
@@ -181,13 +181,9 @@ class AppStoreReviewsCollector:
         # RSS는 country만 사용하므로 고유한 국가 목록 추출
         countries = list({country for _, country in pairs})
 
-        # 수집할 수 있는 리뷰 수 계산
-        if initial_done:
-            remaining = MAX_REVIEWS_TOTAL
-            mode = "추가 수집"
-        else:
-            remaining = MAX_REVIEWS_TOTAL - current_count
-            mode = "초기 수집"
+        # 수집할 수 있는 리뷰 수 계산 (실행당 최대 5만 건)
+        remaining = MAX_REVIEWS_TOTAL
+        mode = "추가 수집" if initial_done else "초기 수집"
 
         if remaining <= 0:
             self.log(f"  [{app_id}] 건너뜀: 이번 실행 할당량 소진")
