@@ -107,7 +107,7 @@ python collect_app_details.py --details-only
 # 리뷰만 수집
 python collect_app_details.py --reviews-only
 
-# 앱 개수 제한 (기본: 1000개)
+# 앱 개수 제한 (기본: 무제한)
 python collect_app_details.py --limit 100
 
 # 통계 확인

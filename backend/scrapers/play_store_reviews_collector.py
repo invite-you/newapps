@@ -24,7 +24,7 @@ from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
-MAX_REVIEWS_TOTAL = 20000  # 실행당 최대 수집 리뷰 수 (무한루프 방지)
+MAX_REVIEWS_TOTAL = 50000  # 실행당 최대 수집 리뷰 수 (무한루프 방지)
 BATCH_SIZE = 100  # 한 번에 가져올 리뷰 수
 
 
@@ -179,13 +179,9 @@ class PlayStoreReviewsCollector:
         if not pairs:
             pairs = [('en', 'us')]
 
-        # 수집할 수 있는 리뷰 수 계산
-        if initial_done:
-            remaining = MAX_REVIEWS_TOTAL
-            mode = "추가 수집"
-        else:
-            remaining = MAX_REVIEWS_TOTAL - current_count
-            mode = "초기 수집"
+        # 수집할 수 있는 리뷰 수 계산 (실행당 최대 5만 건)
+        remaining = MAX_REVIEWS_TOTAL
+        mode = "추가 수집" if initial_done else "초기 수집"
 
         if remaining <= 0:
             self.log(f"  [{app_id}] 건너뜀: 이번 실행 할당량 소진")
@@ -310,7 +306,7 @@ class PlayStoreReviewsCollector:
         return self.error_tracker
 
 
-def get_apps_for_review_collection(limit: int = 1000) -> List[str]:
+def get_apps_for_review_collection(limit: Optional[int] = None) -> List[str]:
     """리뷰 수집할 앱 ID 목록을 가져옵니다.
 
     수집 정책:
@@ -337,7 +333,7 @@ def get_apps_for_review_collection(limit: int = 1000) -> List[str]:
     for row in cursor.fetchall():
         if row['app_id'] not in exclude_ids:
             result.append(row['app_id'])
-            if len(result) >= limit:
+            if limit is not None and len(result) >= limit:
                 break
 
     details_conn.close()
