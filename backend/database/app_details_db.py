@@ -18,6 +18,7 @@ DB_PORT = int(os.getenv("APP_DETAILS_DB_PORT", "5432"))
 DB_NAME = os.getenv("APP_DETAILS_DB_NAME", "app_details")
 DB_USER = os.getenv("APP_DETAILS_DB_USER", "app_details")
 DB_PASSWORD = os.getenv("APP_DETAILS_DB_PASSWORD", "")
+PARTITION_COUNT = 64
 APP_REVIEWS_PARTITION_COUNT = 64
 
 # 비교 제외 필드
@@ -76,7 +77,7 @@ def init_database():
     # apps: 앱 메타데이터 (변경 시에만 누적)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apps (
-            id BIGSERIAL PRIMARY KEY,
+            id BIGSERIAL,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,             -- 'app_store' or 'play_store'
             bundle_id TEXT,
@@ -103,15 +104,23 @@ def init_database():
             release_date TEXT,
             updated_date TEXT,
             privacy_policy_url TEXT,
-            recorded_at TEXT NOT NULL
-        )
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (app_id, id)
+        ) PARTITION BY HASH (app_id)
     """)
+
+    for partition_index in range(PARTITION_COUNT):
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS apps_p{partition_index}
+            PARTITION OF apps
+            FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+        """)
 
     # apps_localized: 다국어 텍스트 (변경 시에만 누적)
     # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apps_localized (
-            id BIGSERIAL PRIMARY KEY,
+            id BIGSERIAL,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             language TEXT NOT NULL,
@@ -119,14 +128,22 @@ def init_database():
             summary TEXT,
             description TEXT,
             release_notes TEXT,
-            recorded_at TEXT NOT NULL
-        )
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (app_id, id)
+        ) PARTITION BY HASH (app_id)
     """)
+
+    for partition_index in range(PARTITION_COUNT):
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS apps_localized_p{partition_index}
+            PARTITION OF apps_localized
+            FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+        """)
 
     # apps_metrics: 수치 데이터 (변경 시에만 누적)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apps_metrics (
-            id BIGSERIAL PRIMARY KEY,
+            id BIGSERIAL,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             score REAL,
@@ -135,9 +152,17 @@ def init_database():
             installs TEXT,                      -- "100,000+" 형태
             installs_exact INTEGER,             -- 정확한 수치 (Play Store)
             histogram TEXT,                     -- JSON array [1점, 2점, 3점, 4점, 5점]
-            recorded_at TEXT NOT NULL
-        )
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (app_id, id)
+        ) PARTITION BY HASH (app_id)
     """)
+
+    for partition_index in range(PARTITION_COUNT):
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS apps_metrics_p{partition_index}
+            PARTITION OF apps_metrics
+            FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+        """)
 
     # app_reviews: 리뷰 (실행당 최대 20000건 수집, 이후 누적)
     cursor.execute("""
@@ -190,16 +215,24 @@ def init_database():
     # collection_status: 수집 상태 추적
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS collection_status (
-            id BIGSERIAL PRIMARY KEY,
+            id BIGSERIAL,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             details_collected_at TEXT,          -- 상세정보 마지막 수집 시각
             reviews_collected_at TEXT,          -- 리뷰 마지막 수집 시각
             reviews_total_count INTEGER DEFAULT 0,  -- 현재 수집된 총 리뷰 수
             initial_review_done INTEGER DEFAULT 0,  -- 최초 수집 완료 여부 (이후 중복 리뷰 발견 시 중단)
-            UNIQUE(app_id, platform)
-        )
+            UNIQUE(app_id, platform),
+            PRIMARY KEY (app_id, id)
+        ) PARTITION BY HASH (app_id)
     """)
+
+    for partition_index in range(PARTITION_COUNT):
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS collection_status_p{partition_index}
+            PARTITION OF collection_status
+            FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+        """)
 
     comment_sqls = [
         "COMMENT ON TABLE apps IS '앱 스토어/플레이 스토어 메타데이터의 변경 이력을 누적 저장하는 테이블로, 수집 원본 응답을 기록해 추후 비교/분석에 사용한다.'",
@@ -290,15 +323,14 @@ def init_database():
         cursor.execute(comment_sql)
 
     # 인덱스 생성
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_app_id ON apps(app_id, platform)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_recorded_at ON apps(recorded_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_localized_app_id ON apps_localized(app_id, platform, language)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_metrics_app_id ON apps_metrics(app_id, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_latest ON apps(app_id, platform, recorded_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_localized_latest ON apps_localized(app_id, platform, language, recorded_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_metrics_latest ON apps_metrics(app_id, platform, recorded_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_app_id ON app_reviews(app_id, platform)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_review_id ON app_reviews(review_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_reviewed_at ON app_reviews(reviewed_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_apps_app_id ON failed_apps(app_id, platform)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_status_app_id ON collection_status(app_id, platform)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_status_app_platform ON collection_status(app_id, platform)")
 
     conn.commit()
     conn.close()
