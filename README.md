@@ -83,29 +83,40 @@ sequenceDiagram
     participant AS_Sitemap as AppStoreSitemapCollector
     participant PS_Sitemap as PlayStoreSitemapCollector
     participant SitemapDB as sitemap_apps_db
-    participant Details as collect_app_details.py
+    participant AppDetails as collect_app_details.py
     participant AS_Details as AppStoreDetailsCollector
     participant PS_Details as PlayStoreDetailsCollector
     participant AS_Reviews as AppStoreReviewsCollector
     participant PS_Reviews as PlayStoreReviewsCollector
     participant DetailsDB as app_details_db
 
-    Runner->>Sitemap: run_script(collect_sitemaps)
+    Runner->>Sitemap: run_script: collect_sitemaps
     Sitemap->>AS_Sitemap: collect_all()
     AS_Sitemap->>SitemapDB: upsert_app_localizations_batch()
     Sitemap->>PS_Sitemap: collect_all()
     PS_Sitemap->>SitemapDB: upsert_app_localizations_batch()
 
-    Runner->>Details: run_script(collect_app_details)
-    Details->>AS_Details: collect_batch(app_ids)
+    Runner->>AppDetails: run_script: collect_app_details
+    AppDetails->>AS_Details: collect_batch(app_ids)
     AS_Details->>DetailsDB: upsert apps/apps_localized/apps_metrics
-    Details->>AS_Reviews: collect_batch(app_ids)
+    AppDetails->>AS_Reviews: collect_batch(app_ids)
     AS_Reviews->>DetailsDB: upsert app_reviews
-    Details->>PS_Details: collect_batch(app_ids)
+    AppDetails->>PS_Details: collect_batch(app_ids)
     PS_Details->>DetailsDB: upsert apps/apps_localized/apps_metrics
-    Details->>PS_Reviews: collect_batch(app_ids)
+    AppDetails->>PS_Reviews: collect_batch(app_ids)
     PS_Reviews->>DetailsDB: upsert app_reviews
 ```
+
+## 첫 번째 실행 vs 두 번째 실행 차이
+
+- **첫 번째 실행(초기 수집)**
+  - sitemap index 전체를 다운로드해 각 sitemap 파일의 MD5 해시를 DB에 기록합니다.
+  - 앱 로컬라이제이션이 비어 있으므로 대부분의 앱이 신규로 `sitemap_apps`에 저장됩니다.
+  - 상세정보/리뷰 수집 단계에서는 모든 앱이 신규이므로 메타데이터와 리뷰가 대량으로 적재됩니다.
+- **두 번째 실행(증분 수집)**
+  - sitemap 파일의 MD5 해시가 동일하면 해당 파일은 **스킵**되어 네트워크/파싱 비용을 줄입니다.
+  - 변경된 sitemap만 로컬라이제이션이 갱신되고, 상세정보/리뷰도 변경이 있는 앱만 시계열로 추가됩니다.
+  - 결과적으로 전체 실행 시간과 DB 쓰기가 크게 감소합니다.
 
 ## 설치 & 최초 실행 (아마존 우분투 기준)
 
@@ -168,7 +179,16 @@ python collect_full_pipeline.py --limit 10
 
 > 참고: 월별 파티션을 사용하지 않는 경우 `/etc/newapps.env`에 `APP_DETAILS_MONTHLY_PARTITION_CHECK=false`를 추가하여 비활성화할 수 있습니다.
 
-6) 매일 1회 자동 실행 (cron)
+6) 두 번째 실행 (증분 수집)
+
+```bash
+set -a
+source /etc/newapps.env
+set +a
+python collect_full_pipeline.py
+```
+
+7) 매일 1회 자동 실행 (cron)
 
 ```bash
 sudo tee /etc/cron.d/newapps >/dev/null <<'CRON'
