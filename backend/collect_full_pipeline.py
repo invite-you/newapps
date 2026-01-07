@@ -103,6 +103,7 @@ def ensure_current_month_partition(logger) -> None:
     try:
         if not PARTITION_CHECK_ENABLED:
             logger.info("[INFO] 월별 파티션 점검이 비활성화되어 건너뜁니다.")
+            status = "SKIP"
             return
         if not PARTITION_PARENT_TABLE:
             raise ValueError("월별 파티션 대상 테이블이 비어 있습니다.")
@@ -116,6 +117,27 @@ def ensure_current_month_partition(logger) -> None:
 
         conn = psycopg.connect(build_dsn())
         cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 1
+            FROM pg_class parent
+            JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+            WHERE parent.relname = %s
+              AND parent_ns.nspname = %s
+            LIMIT 1
+            """,
+            (PARTITION_PARENT_TABLE, PARTITION_SCHEMA),
+        )
+        parent_exists = cursor.fetchone() is not None
+
+        if not parent_exists:
+            logger.warning(
+                "[WARN] 월별 파티션 대상 테이블이 없어 점검을 건너뜁니다. "
+                f"schema={PARTITION_SCHEMA}, parent={PARTITION_PARENT_TABLE}"
+            )
+            status = "SKIP"
+            return
+
         cursor.execute(
             """
             SELECT 1
