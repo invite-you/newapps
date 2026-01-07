@@ -422,7 +422,7 @@ def select_best_pairs_for_collection(pairs: list, max_languages: int = 10) -> li
 # 테스트
 if __name__ == '__main__':
     from utils.logger import get_timestamped_logger
-
+    
     SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S')
     logger = get_timestamped_logger(
         "language_country_priority",
