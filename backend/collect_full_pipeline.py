@@ -81,7 +81,7 @@ def build_dsn() -> str:
     )
 
 
-def get_current_month_range() -> tuple[str, str, str]:
+def get_current_month_range() -> tuple[str, datetime.date, datetime.date]:
     """현재 월 파티션 생성에 필요한 범위 정보를 반환합니다."""
     month_start = datetime.now().date().replace(day=1)
     if month_start.month == 12:
@@ -92,7 +92,7 @@ def get_current_month_range() -> tuple[str, str, str]:
         parent=PARTITION_PARENT_TABLE,
         yyyymm=month_start.strftime("%Y%m"),
     )
-    return partition_name, month_start.isoformat(), next_month.isoformat()
+    return partition_name, month_start, next_month
 
 
 def ensure_current_month_partition(logger) -> None:
@@ -111,7 +111,7 @@ def ensure_current_month_partition(logger) -> None:
         logger.info(
             "[INFO] 월별 파티션 확인 시작: "
             f"schema={PARTITION_SCHEMA}, parent={PARTITION_PARENT_TABLE}, "
-            f"child={partition_name}, range=({range_start}~{range_end})"
+            f"child={partition_name}, range=({range_start.isoformat()}~{range_end.isoformat()})"
         )
 
         conn = psycopg.connect(build_dsn())
@@ -142,13 +142,15 @@ def ensure_current_month_partition(logger) -> None:
         create_sql = sql.SQL(
             "CREATE TABLE {schema}.{child} "
             "PARTITION OF {schema}.{parent} "
-            "FOR VALUES FROM (%s) TO (%s)"
+            "FOR VALUES FROM ({range_start}) TO ({range_end})"
         ).format(
             schema=sql.Identifier(PARTITION_SCHEMA),
             child=sql.Identifier(partition_name),
             parent=sql.Identifier(PARTITION_PARENT_TABLE),
+            range_start=sql.Literal(range_start),
+            range_end=sql.Literal(range_end),
         )
-        cursor.execute(create_sql, (range_start, range_end))
+        cursor.execute(create_sql)
         conn.commit()
         logger.info("[INFO] 월별 파티션 생성 완료.")
     except Exception as exc:
