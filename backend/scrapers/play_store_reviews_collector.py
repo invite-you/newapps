@@ -16,9 +16,10 @@ from google_play_scraper.exceptions import NotFoundError
 from database.app_details_db import (
     init_database, insert_reviews_batch, get_all_review_ids,
     get_collection_status, update_collection_status, get_review_count,
-    is_failed_app, get_failed_app_ids, get_abandoned_apps_to_skip
+    is_failed_app, get_failed_app_ids, get_abandoned_apps_to_skip,
+    AppDetailsDbSession,
 )
-from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from database.sitemap_apps_db import SitemapDbSession
 from utils.logger import get_collection_logger, get_timestamped_logger
 from utils.error_tracker import ErrorTracker, ErrorStep
 
@@ -45,17 +46,25 @@ class PlayStoreReviewsCollector:
         if self.verbose:
             self.logger.info(message)
 
-    def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
+    def get_app_language_country_pairs(
+        self,
+        app_id: str,
+        db_session: Optional[SitemapDbSession] = None,
+    ) -> List[tuple]:
         """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
-        conn = get_sitemap_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT language, country FROM app_localizations
-            WHERE app_id = %s AND platform = %s
-        """, (app_id, PLATFORM))
-        pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
-        conn.close()
-        return pairs if pairs else [('en', 'us')]
+        def action(conn):
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT DISTINCT language, country FROM app_localizations
+                    WHERE app_id = %s AND platform = %s
+                """, (app_id, PLATFORM))
+                pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
+                return pairs if pairs else [('en', 'us')]
+
+        if db_session:
+            return db_session.run(action)
+        with SitemapDbSession() as session:
+            return session.run(action)
 
     def fetch_reviews(self, app_id: str, lang: str = 'en', country: str = 'us',
                       count: int = BATCH_SIZE, continuation_token: str = None) -> tuple:
@@ -99,8 +108,16 @@ class PlayStoreReviewsCollector:
             'replied_at': replied_at.isoformat() if replied_at else None
         }
 
-    def collect_reviews_for_pair(self, app_id: str, lang: str, country: str, quota: int,
-                                   existing_ids: Set[str], stop_on_existing: bool) -> tuple:
+    def collect_reviews_for_pair(
+        self,
+        app_id: str,
+        lang: str,
+        country: str,
+        quota: int,
+        existing_ids: Set[str],
+        stop_on_existing: bool,
+        details_session: Optional[AppDetailsDbSession] = None,
+    ) -> tuple:
         """
         특정 (language, country) 쌍에서 리뷰를 수집합니다.
         Returns: (collected_count, hit_existing, has_more)
@@ -139,7 +156,7 @@ class PlayStoreReviewsCollector:
 
             if new_reviews:
                 to_save = new_reviews[:quota - collected]
-                inserted = insert_reviews_batch(to_save)
+                inserted = insert_reviews_batch(to_save, session=details_session)
                 collected += inserted
                 self.stats['reviews_collected'] += inserted
 
@@ -158,24 +175,29 @@ class PlayStoreReviewsCollector:
 
         return collected, hit_existing, has_more
 
-    def collect_reviews_for_app(self, app_id: str) -> int:
+    def collect_reviews_for_app(
+        self,
+        app_id: str,
+        db_session: Optional[SitemapDbSession] = None,
+        details_session: Optional[AppDetailsDbSession] = None,
+    ) -> int:
         """단일 앱의 리뷰를 수집합니다. 국가별 균등 분배 + 잔여 분배."""
         # 실패한 앱인지 확인
-        if is_failed_app(app_id, PLATFORM):
+        if is_failed_app(app_id, PLATFORM, session=details_session):
             self.log(f"  [{app_id}] 건너뜀: 실패 목록에 있음")
             self.stats['apps_skipped'] += 1
             return 0
 
         # 수집 상태 확인
-        status = get_collection_status(app_id, PLATFORM)
-        current_count = get_review_count(app_id, PLATFORM)
+        status = get_collection_status(app_id, PLATFORM, session=details_session)
+        current_count = get_review_count(app_id, PLATFORM, session=details_session)
         initial_done = status.get('initial_review_done', 0) if status else 0
 
         # 이미 수집된 리뷰 ID 세트
-        existing_ids = get_all_review_ids(app_id, PLATFORM)
+        existing_ids = get_all_review_ids(app_id, PLATFORM, session=details_session)
 
         # sitemap에서 (language, country) 쌍 가져오기
-        pairs = self.get_app_language_country_pairs(app_id)
+        pairs = self.get_app_language_country_pairs(app_id, db_session=db_session)
         if not pairs:
             pairs = [('en', 'us')]
 
@@ -205,7 +227,8 @@ class PlayStoreReviewsCollector:
         for lang, country in pairs:
             collected, hit_existing, has_more = self.collect_reviews_for_pair(
                 app_id, lang, country, per_pair_quota, existing_ids,
-                stop_on_existing=initial_done  # 추가 수집시에만 기존 리뷰에서 중단
+                stop_on_existing=initial_done,  # 추가 수집시에만 기존 리뷰에서 중단
+                details_session=details_session,
             )
             collected_total += collected
             pair_key = f"{lang}-{country}"
@@ -237,7 +260,8 @@ class PlayStoreReviewsCollector:
                 extra_quota = min(extra_per_pair, remaining - collected_total)
                 collected, hit_existing, _ = self.collect_reviews_for_pair(
                     app_id, lang, country, extra_quota, existing_ids,
-                    stop_on_existing=initial_done
+                    stop_on_existing=initial_done,
+                    details_session=details_session,
                 )
                 collected_total += collected
                 pair_key = f"{lang}-{country}"
@@ -255,7 +279,8 @@ class PlayStoreReviewsCollector:
             app_id, PLATFORM,
             reviews_collected=True,
             reviews_count=new_total,
-            initial_review_done=(not initial_done and (collected_total > 0 or hit_existing_any))
+            initial_review_done=(not initial_done and (collected_total > 0 or hit_existing_any)),
+            session=details_session,
         )
 
         self.stats['apps_processed'] += 1
@@ -274,24 +299,29 @@ class PlayStoreReviewsCollector:
         self.log(f"대상 앱: {len(app_ids)}개 | 실행당 최대: {MAX_REVIEWS_TOTAL}건/앱")
         self.log("")
 
-        for i, app_id in enumerate(app_ids, 1):
-            self.log(f"[{i}/{len(app_ids)}] 앱 처리 중...")
+        with SitemapDbSession() as sitemap_session, AppDetailsDbSession() as details_session:
+            for i, app_id in enumerate(app_ids, 1):
+                self.log(f"[{i}/{len(app_ids)}] 앱 처리 중...")
 
-            try:
-                self.collect_reviews_for_app(app_id)
-            except Exception as e:
-                self.log(f"  [{app_id}] 오류 발생: {e}")
-                self.stats['errors'] += 1
-                # 상세 에러 추적
-                self.error_tracker.add_error(
-                    platform=PLATFORM,
-                    step=ErrorStep.COLLECT_REVIEW,
-                    error=e,
-                    app_id=app_id,
-                    include_traceback=True
-                )
+                try:
+                    self.collect_reviews_for_app(
+                        app_id,
+                        db_session=sitemap_session,
+                        details_session=details_session,
+                    )
+                except Exception as e:
+                    self.log(f"  [{app_id}] 오류 발생: {e}")
+                    self.stats['errors'] += 1
+                    # 상세 에러 추적
+                    self.error_tracker.add_error(
+                        platform=PLATFORM,
+                        step=ErrorStep.COLLECT_REVIEW,
+                        error=e,
+                        app_id=app_id,
+                        include_traceback=True
+                    )
 
-            time.sleep(REQUEST_DELAY)
+                time.sleep(REQUEST_DELAY)
 
         self.log("")
         self.log(f"=== Play Store 리뷰 수집 완료 ===")
@@ -315,29 +345,31 @@ def get_apps_for_review_collection(limit: Optional[int] = None) -> List[str]:
     - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
     - 실패한 앱: 제외
     """
-    from database.app_details_db import get_connection as get_details_connection
-
     # 제외할 앱 ID: 실패한 앱 + 7일 이내 수집된 버려진 앱
-    exclude_ids = get_failed_app_ids(PLATFORM) | get_abandoned_apps_to_skip(PLATFORM, 'reviews_collected_at')
+    with AppDetailsDbSession() as details_session:
+        exclude_ids = get_failed_app_ids(PLATFORM, session=details_session) | get_abandoned_apps_to_skip(
+            PLATFORM,
+            'reviews_collected_at',
+            session=details_session,
+        )
 
-    # 상세정보가 수집된 앱 목록
-    details_conn = get_details_connection()
-    cursor = details_conn.cursor()
-    cursor.execute("""
-        SELECT app_id FROM collection_status
-        WHERE platform = 'play_store' AND details_collected_at IS NOT NULL
-        ORDER BY details_collected_at DESC
-    """)
+        def action(conn):
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT app_id FROM collection_status
+                    WHERE platform = 'play_store' AND details_collected_at IS NOT NULL
+                    ORDER BY details_collected_at DESC
+                """)
+                return cursor.fetchall()
 
-    result = []
-    for row in cursor.fetchall():
-        if row['app_id'] not in exclude_ids:
-            result.append(row['app_id'])
-            if limit is not None and len(result) >= limit:
-                break
-
-    details_conn.close()
-    return result
+        rows = details_session.run(action)
+        result = []
+        for row in rows:
+            if row['app_id'] not in exclude_ids:
+                result.append(row['app_id'])
+                if limit is not None and len(result) >= limit:
+                    break
+        return result
 
 
 def main():

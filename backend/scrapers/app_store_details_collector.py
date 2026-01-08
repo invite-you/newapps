@@ -15,9 +15,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.app_details_db import (
     init_database, insert_app, insert_app_localized, insert_app_metrics,
     is_failed_app, mark_app_failed, update_collection_status,
-    get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format
+    get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format,
+    AppDetailsDbSession,
 )
-from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from database.sitemap_apps_db import (
+    get_connection as get_sitemap_connection,
+    release_connection as release_sitemap_connection,
+)
 from config.language_country_priority import select_best_pairs_for_collection
 from scrapers.collection_utils import (
     get_app_language_country_pairs,
@@ -177,11 +181,11 @@ class AppStoreDetailsCollector:
             'histogram': None  # App Store에서 제공 안 함
         }
 
-    def collect_app(self, app_id: str) -> bool:
+    def collect_app(self, app_id: str, details_session: Optional[AppDetailsDbSession] = None) -> bool:
         """단일 앱의 상세정보를 수집합니다."""
         self.logger.info(f"[APP START] app_id={app_id} | {datetime.now().isoformat()}")
         # 실패한 앱인지 확인
-        if is_failed_app(app_id, PLATFORM):
+        if is_failed_app(app_id, PLATFORM, session=details_session):
             self.stats['apps_skipped_failed'] += 1
             self.logger.info(f"[APP SKIP] app_id={app_id} | status=failed_app")
             return False
@@ -218,14 +222,14 @@ class AppStoreDetailsCollector:
         if not data:
             # 상세한 에러 사유로 기록
             reason = last_error or 'unknown'
-            mark_app_failed(app_id, PLATFORM, reason)
+            mark_app_failed(app_id, PLATFORM, reason, session=details_session)
             self.stats['apps_not_found'] += 1
             self.logger.info(f"[APP FAIL] app_id={app_id} | reason={reason}")
             return False
 
         # 앱 메타데이터 저장
         app_meta = self.parse_app_metadata(data, app_id)
-        is_new, _ = insert_app(app_meta)
+        is_new, _ = insert_app(app_meta, session=details_session)
         if is_new:
             self.stats['new_records'] += 1
         else:
@@ -233,7 +237,7 @@ class AppStoreDetailsCollector:
 
         # 수치 데이터 저장
         metrics = self.parse_app_metrics(data, app_id)
-        insert_app_metrics(metrics)
+        insert_app_metrics(metrics, session=details_session)
 
         # 다국어 데이터 수집 - 우선순위 기반 최적화된 쌍 사용
         # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
@@ -244,7 +248,7 @@ class AppStoreDetailsCollector:
         base_localized = self.parse_app_localized(data, app_id, optimized_pairs[0][0] if optimized_pairs else 'en')
         base_title = base_localized.get('title')
         base_description = base_localized.get('description')
-        insert_app_localized(base_localized)
+        insert_app_localized(base_localized, session=details_session)
         languages_collected.add(base_localized['language'])
 
         for language, country in optimized_pairs:
@@ -265,11 +269,11 @@ class AppStoreDetailsCollector:
                 localized = self.parse_app_localized(country_data, app_id, language)
                 # 중복 체크: title과 description이 기준 언어와 다를 때만 저장
                 if localized.get('title') != base_title or localized.get('description') != base_description:
-                    insert_app_localized(localized)
+                    insert_app_localized(localized, session=details_session)
                 languages_collected.add(language)
 
         # 수집 상태 업데이트
-        update_collection_status(app_id, PLATFORM, details_collected=True)
+        update_collection_status(app_id, PLATFORM, details_collected=True, session=details_session)
         self.stats['apps_processed'] += 1
         self.logger.info(f"[APP END] app_id={app_id} | status=OK")
 
@@ -282,25 +286,26 @@ class AppStoreDetailsCollector:
         self.log(f"Starting batch collection for {len(app_ids)} apps...")
         self.logger.info(f"[STEP START] collect_batch | {start_ts}")
 
-        for i, app_id in enumerate(app_ids, 1):
-            self.logger.info(f"[PROGRESS] {i}/{len(app_ids)} | app_id={app_id}")
+        with AppDetailsDbSession() as details_session:
+            for i, app_id in enumerate(app_ids, 1):
+                self.logger.info(f"[PROGRESS] {i}/{len(app_ids)} | app_id={app_id}")
 
-            try:
-                self.collect_app(app_id)
-            except Exception as e:
-                self.log(f"Error processing app {app_id}: {e}")
-                self.stats['errors'] += 1
-                # 상세 에러 추적
-                self.error_tracker.add_error(
-                    platform=PLATFORM,
-                    step=ErrorStep.COLLECT_APP,
-                    error=e,
-                    app_id=app_id,
-                    include_traceback=True
-                )
-                self.logger.exception(f"[APP ERROR] app_id={app_id}")
+                try:
+                    self.collect_app(app_id, details_session=details_session)
+                except Exception as e:
+                    self.log(f"Error processing app {app_id}: {e}")
+                    self.stats['errors'] += 1
+                    # 상세 에러 추적
+                    self.error_tracker.add_error(
+                        platform=PLATFORM,
+                        step=ErrorStep.COLLECT_APP,
+                        error=e,
+                        app_id=app_id,
+                        include_traceback=True
+                    )
+                    self.logger.exception(f"[APP ERROR] app_id={app_id}")
 
-            time.sleep(REQUEST_DELAY)
+                time.sleep(REQUEST_DELAY)
 
         self.log(f"Batch collection completed. Stats: {self.stats}")
         elapsed = time.perf_counter() - start_perf
@@ -315,7 +320,10 @@ class AppStoreDetailsCollector:
         return self.error_tracker
 
 
-def get_apps_to_collect(limit: Optional[int] = None) -> List[str]:
+def get_apps_to_collect(
+    limit: Optional[int] = None,
+    details_session: Optional[AppDetailsDbSession] = None,
+) -> List[str]:
     """수집할 앱 ID 목록을 가져옵니다.
 
     수집 정책:
@@ -324,25 +332,30 @@ def get_apps_to_collect(limit: Optional[int] = None) -> List[str]:
     - 실패한 앱: 제외
     """
     # 제외할 앱 ID: 실패한 앱 + 7일 이내 수집된 버려진 앱
-    exclude_ids = get_failed_app_ids(PLATFORM) | get_abandoned_apps_to_skip(PLATFORM, 'details_collected_at')
+    exclude_ids = get_failed_app_ids(PLATFORM, session=details_session) | get_abandoned_apps_to_skip(
+        PLATFORM,
+        'details_collected_at',
+        session=details_session,
+    )
 
     # sitemap에서 앱 목록 가져오기 (최근 발견 순)
     sitemap_conn = get_sitemap_connection()
-    cursor = sitemap_conn.cursor()
-    cursor.execute("""
-        SELECT DISTINCT app_id FROM app_localizations
-        WHERE platform = 'app_store'
-        ORDER BY first_seen_at DESC
-    """)
+    try:
+        with sitemap_conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT app_id FROM app_localizations
+                WHERE platform = 'app_store'
+                ORDER BY first_seen_at DESC
+            """)
 
-    result = []
-    for row in cursor.fetchall():
-        if row['app_id'] not in exclude_ids:
-            result.append(row['app_id'])
-            if limit is not None and len(result) >= limit:
-                break
-
-    sitemap_conn.close()
+            result = []
+            for row in cursor.fetchall():
+                if row['app_id'] not in exclude_ids:
+                    result.append(row['app_id'])
+                    if limit is not None and len(result) >= limit:
+                        break
+    finally:
+        release_sitemap_connection(sitemap_conn)
     return result
 
 

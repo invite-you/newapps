@@ -7,9 +7,10 @@ Sitemap Apps Database
 import os
 import time
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable, TypeVar
 
 import psycopg
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from utils.logger import get_timestamped_logger
 
@@ -24,14 +25,23 @@ LOG_FILE_PREFIX = "sitemap_apps_db"
 DB_LOGGER = get_timestamped_logger("sitemap_apps_db", file_prefix=LOG_FILE_PREFIX)
 DB_CONNECT_MAX_RETRIES = int(os.getenv("SITEMAP_DB_CONNECT_MAX_RETRIES", "5"))
 DB_CONNECT_RETRY_DELAY_SEC = float(os.getenv("SITEMAP_DB_CONNECT_RETRY_DELAY_SEC", "2.0"))
+DB_REUSE_CONNECTION = os.getenv("SITEMAP_DB_REUSE_CONNECTION", "true").lower() in ("1", "true", "yes")
+
+_DB_CONNECTION: Optional[psycopg.Connection] = None
+T = TypeVar("T")
 
 
-def get_connection() -> psycopg.Connection:
-    """DB 연결을 반환합니다."""
-    dsn = DB_DSN or (
+def _build_dsn() -> str:
+    """DB DSN 문자열을 구성합니다."""
+    return DB_DSN or (
         f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
         f"user={DB_USER} password={DB_PASSWORD}"
     )
+
+
+def _connect_with_retry() -> psycopg.Connection:
+    """DB 연결을 생성합니다."""
+    dsn = _build_dsn()
     last_exc = None
     for attempt in range(1, DB_CONNECT_MAX_RETRIES + 1):
         step_label = f"DB_CONNECT_ATTEMPT_{attempt}"
@@ -74,113 +84,221 @@ def get_connection() -> psycopg.Connection:
     raise last_exc
 
 
-def init_database():
+def get_connection() -> psycopg.Connection:
+    """DB 연결을 반환합니다."""
+    global _DB_CONNECTION
+    if DB_REUSE_CONNECTION:
+        if _DB_CONNECTION and not _DB_CONNECTION.closed:
+            return _DB_CONNECTION
+        if _DB_CONNECTION and _DB_CONNECTION.closed:
+            DB_LOGGER.info("닫힌 DB 연결 감지: 재연결을 시도합니다.")
+        _DB_CONNECTION = _connect_with_retry()
+        return _DB_CONNECTION
+    return _connect_with_retry()
+
+
+def release_connection(conn: Optional[psycopg.Connection]):
+    """재사용 설정에 맞춰 연결을 정리합니다."""
+    if not conn:
+        return
+    if DB_REUSE_CONNECTION:
+        if not conn.closed and conn.info.transaction_status != TransactionStatus.IDLE:
+            DB_LOGGER.info("DB 트랜잭션 정리: rollback 수행")
+            conn.rollback()
+        return
+    if not conn.closed:
+        conn.close()
+
+
+def close_connection():
+    """전역 DB 연결을 닫습니다."""
+    global _DB_CONNECTION
+    if _DB_CONNECTION and not _DB_CONNECTION.closed:
+        _DB_CONNECTION.close()
+    _DB_CONNECTION = None
+
+
+class SitemapDbSession:
+    """sitemap DB 세션 관리"""
+
+    def __init__(self):
+        self.conn: Optional[psycopg.Connection] = None
+
+    def __enter__(self) -> "SitemapDbSession":
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def close(self):
+        """세션을 닫습니다."""
+        release_connection(self.conn)
+        self.conn = None
+
+    def _ensure_connection(self) -> psycopg.Connection:
+        if self.conn and not self.conn.closed:
+            return self.conn
+        self.conn = get_connection()
+        return self.conn
+
+    def run(self, action: Callable[[psycopg.Connection], T], commit: bool = False) -> T:
+        """DB 작업을 실행하고 필요 시 재연결합니다."""
+        last_exc = None
+        for attempt in range(1, DB_CONNECT_MAX_RETRIES + 1):
+            conn = self._ensure_connection()
+            try:
+                result = action(conn)
+                if commit:
+                    conn.commit()
+                return result
+            except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
+                last_exc = exc
+                DB_LOGGER.warning(
+                    "DB 연결 오류 발생: %s초 후 재시도 (%s/%s)",
+                    DB_CONNECT_RETRY_DELAY_SEC,
+                    attempt,
+                    DB_CONNECT_MAX_RETRIES,
+                )
+                if conn and not conn.closed:
+                    try:
+                        conn.rollback()
+                    except psycopg.Error:
+                        pass
+                    conn.close()
+                self.conn = None
+                if attempt < DB_CONNECT_MAX_RETRIES:
+                    time.sleep(DB_CONNECT_RETRY_DELAY_SEC)
+                    continue
+                break
+        raise last_exc
+
+
+def _run_with_session(
+    action: Callable[[psycopg.Connection], T],
+    commit: bool = False,
+    session: Optional[SitemapDbSession] = None,
+) -> T:
+    """세션 유무에 따라 DB 작업을 실행합니다."""
+    if session:
+        return session.run(action, commit=commit)
+    with SitemapDbSession() as local_session:
+        return local_session.run(action, commit=commit)
+
+
+def init_database(session: Optional[SitemapDbSession] = None):
     """DB 테이블을 초기화합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
+    def action(conn: psycopg.Connection):
+        with conn.cursor() as cursor:
+            # sitemap_files: xml.gz 파일별 MD5 해시 저장
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sitemap_files (
+                    id BIGSERIAL PRIMARY KEY,
+                    platform TEXT NOT NULL,           -- 'app_store' or 'play_store'
+                    file_url TEXT NOT NULL UNIQUE,    -- sitemap xml.gz 파일 URL
+                    md5_hash TEXT,                    -- 파일의 MD5 해시
+                    last_collected_at TIMESTAMPTZ,    -- 마지막 수집 시각
+                    app_count INTEGER DEFAULT 0,      -- 해당 파일에서 수집된 앱 수
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
 
-    # sitemap_files: xml.gz 파일별 MD5 해시 저장
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sitemap_files (
-            id BIGSERIAL PRIMARY KEY,
-            platform TEXT NOT NULL,           -- 'app_store' or 'play_store'
-            file_url TEXT NOT NULL UNIQUE,    -- sitemap xml.gz 파일 URL
-            md5_hash TEXT,                    -- 파일의 MD5 해시
-            last_collected_at TIMESTAMPTZ,    -- 마지막 수집 시각
-            app_count INTEGER DEFAULT 0,      -- 해당 파일에서 수집된 앱 수
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            updated_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
+            # app_localizations: 앱 ID + language + country 별 정보 저장
+            # 최적화: href 필드 제거 (URL은 platform/country/app_id로 재구성 가능)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS app_localizations (
+                    id BIGSERIAL PRIMARY KEY,
+                    platform TEXT NOT NULL,           -- 'app_store' or 'play_store'
+                    app_id TEXT NOT NULL,             -- 앱 ID (App Store: 숫자, Play Store: 패키지명)
+                    language TEXT NOT NULL,           -- 언어 코드 (ko, en, ja 등)
+                    country TEXT NOT NULL,            -- 국가 코드 (kr, us, jp 등)
+                    source_file TEXT NOT NULL,        -- 수집된 sitemap 파일명
+                    first_seen_at TIMESTAMPTZ DEFAULT NOW(),  -- 처음 발견 시각
+                    last_seen_at TIMESTAMPTZ DEFAULT NOW(),   -- 마지막 발견 시각
+                    UNIQUE(platform, app_id, language, country)
+                )
+            """)
 
-    # app_localizations: 앱 ID + language + country 별 정보 저장
-    # 최적화: href 필드 제거 (URL은 platform/country/app_id로 재구성 가능)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS app_localizations (
-            id BIGSERIAL PRIMARY KEY,
-            platform TEXT NOT NULL,           -- 'app_store' or 'play_store'
-            app_id TEXT NOT NULL,             -- 앱 ID (App Store: 숫자, Play Store: 패키지명)
-            language TEXT NOT NULL,           -- 언어 코드 (ko, en, ja 등)
-            country TEXT NOT NULL,            -- 국가 코드 (kr, us, jp 등)
-            source_file TEXT NOT NULL,        -- 수집된 sitemap 파일명
-            first_seen_at TIMESTAMPTZ DEFAULT NOW(),  -- 처음 발견 시각
-            last_seen_at TIMESTAMPTZ DEFAULT NOW(),   -- 마지막 발견 시각
-            UNIQUE(platform, app_id, language, country)
-        )
-    """)
+            # 인덱스 생성
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_platform ON app_localizations(platform)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_app_id ON app_localizations(app_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_country ON app_localizations(country)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_language ON app_localizations(language)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_first_seen ON app_localizations(first_seen_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sitemap_files_platform ON sitemap_files(platform)")
 
-    # 인덱스 생성
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_platform ON app_localizations(platform)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_app_id ON app_localizations(app_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_country ON app_localizations(country)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_language ON app_localizations(language)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_localizations_first_seen ON app_localizations(first_seen_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sitemap_files_platform ON sitemap_files(platform)")
-
-    conn.commit()
-    conn.close()
+    _run_with_session(action, commit=True, session=session)
     DB_LOGGER.info("Database initialized.")
 
 
-def get_sitemap_file_hash(file_url: str) -> Optional[str]:
+def get_sitemap_file_hash(file_url: str, session: Optional[SitemapDbSession] = None) -> Optional[str]:
     """특정 sitemap 파일의 저장된 MD5 해시를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT md5_hash FROM sitemap_files WHERE file_url = %s", (file_url,))
-    row = cursor.fetchone()
-    conn.close()
-    return row['md5_hash'] if row else None
+    def action(conn: psycopg.Connection) -> Optional[str]:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT md5_hash FROM sitemap_files WHERE file_url = %s", (file_url,))
+            row = cursor.fetchone()
+            return row['md5_hash'] if row else None
+
+    return _run_with_session(action, session=session)
 
 
-def update_sitemap_file(platform: str, file_url: str, md5_hash: str, app_count: int):
+def update_sitemap_file(
+    platform: str,
+    file_url: str,
+    md5_hash: str,
+    app_count: int,
+    session: Optional[SitemapDbSession] = None,
+):
     """sitemap 파일 정보를 업데이트합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
     now = datetime.now().isoformat()
+    def action(conn: psycopg.Connection):
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO sitemap_files (platform, file_url, md5_hash, last_collected_at, app_count, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT(file_url) DO UPDATE SET
+                    md5_hash = EXCLUDED.md5_hash,
+                    last_collected_at = EXCLUDED.last_collected_at,
+                    app_count = EXCLUDED.app_count,
+                    updated_at = EXCLUDED.updated_at
+            """, (platform, file_url, md5_hash, now, app_count, now))
 
-    cursor.execute("""
-        INSERT INTO sitemap_files (platform, file_url, md5_hash, last_collected_at, app_count, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT(file_url) DO UPDATE SET
-            md5_hash = EXCLUDED.md5_hash,
-            last_collected_at = EXCLUDED.last_collected_at,
-            app_count = EXCLUDED.app_count,
-            updated_at = EXCLUDED.updated_at
-    """, (platform, file_url, md5_hash, now, app_count, now))
-
-    conn.commit()
-    conn.close()
+    _run_with_session(action, commit=True, session=session)
 
 
-def upsert_app_localization(platform: str, app_id: str, language: str, country: str,
-                            source_file: str) -> bool:
+def upsert_app_localization(
+    platform: str,
+    app_id: str,
+    language: str,
+    country: str,
+    source_file: str,
+    session: Optional[SitemapDbSession] = None,
+) -> bool:
     """앱 로컬라이제이션 정보를 추가하거나 업데이트합니다. 새로 추가된 경우 True 반환."""
-    conn = get_connection()
-    cursor = conn.cursor()
     now = datetime.now().isoformat()
+    def action(conn: psycopg.Connection) -> bool:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(platform, app_id, language, country) DO UPDATE SET
+                    source_file = EXCLUDED.source_file,
+                    last_seen_at = EXCLUDED.last_seen_at
+                RETURNING (xmax = 0) AS inserted
+            """, (platform, app_id, language, country, source_file, now, now))
+            return cursor.fetchone()['inserted']
 
-    cursor.execute("""
-        INSERT INTO app_localizations (platform, app_id, language, country, source_file, first_seen_at, last_seen_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT(platform, app_id, language, country) DO UPDATE SET
-            source_file = EXCLUDED.source_file,
-            last_seen_at = EXCLUDED.last_seen_at
-        RETURNING (xmax = 0) AS inserted
-    """, (platform, app_id, language, country, source_file, now, now))
-    is_new = cursor.fetchone()['inserted']
-
-    conn.commit()
-    conn.close()
-    return is_new
+    return _run_with_session(action, commit=True, session=session)
 
 
-def upsert_app_localizations_batch(localizations: List[Dict[str, Any]]) -> int:
+def upsert_app_localizations_batch(
+    localizations: List[Dict[str, Any]],
+    session: Optional[SitemapDbSession] = None,
+) -> int:
     """앱 로컬라이제이션 정보를 배치로 추가하거나 업데이트합니다. 새로 추가된 개수 반환."""
     if not localizations:
         return 0
 
-    conn = get_connection()
-    cursor = conn.cursor()
     now = datetime.now().isoformat()
 
     # (platform, app_id, language, country) 키 기준으로 중복 제거
@@ -202,59 +320,56 @@ def upsert_app_localizations_batch(localizations: List[Dict[str, Any]]) -> int:
         for loc in aggregated.values()
     ]
 
-    try:
-        value_placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(values))
-        insert_sql = f"""
-            INSERT INTO app_localizations (
-                platform, app_id, language, country, source_file, first_seen_at, last_seen_at
-            )
-            VALUES {value_placeholders}
-            ON CONFLICT(platform, app_id, language, country) DO UPDATE SET
-                source_file = EXCLUDED.source_file,
-                last_seen_at = EXCLUDED.last_seen_at
-            RETURNING (xmax = 0) AS inserted
-        """
-        flattened_values = [item for row in values for item in row]
+    def action(conn: psycopg.Connection) -> int:
+        with conn.cursor() as cursor:
+            value_placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(values))
+            insert_sql = f"""
+                INSERT INTO app_localizations (
+                    platform, app_id, language, country, source_file, first_seen_at, last_seen_at
+                )
+                VALUES {value_placeholders}
+                ON CONFLICT(platform, app_id, language, country) DO UPDATE SET
+                    source_file = EXCLUDED.source_file,
+                    last_seen_at = EXCLUDED.last_seen_at
+                RETURNING (xmax = 0) AS inserted
+            """
+            flattened_values = [item for row in values for item in row]
 
-        cursor.execute(insert_sql, flattened_values)
-        inserted_rows = cursor.fetchall()
-        new_count = sum(1 for row in inserted_rows if row['inserted'])
-        conn.commit()
-    finally:
-        conn.close()
+            cursor.execute(insert_sql, flattened_values)
+            inserted_rows = cursor.fetchall()
+            return sum(1 for row in inserted_rows if row['inserted'])
 
-    return new_count
+    return _run_with_session(action, commit=True, session=session)
 
 
-def get_stats() -> Dict[str, Any]:
+def get_stats(session: Optional[SitemapDbSession] = None) -> Dict[str, Any]:
     """DB 통계를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
+    def action(conn: psycopg.Connection) -> Dict[str, Any]:
+        with conn.cursor() as cursor:
+            # 전체 앱 로컬라이제이션 수
+            cursor.execute("SELECT COUNT(*) as count FROM app_localizations")
+            total_localizations = cursor.fetchone()['count']
 
-    # 전체 앱 로컬라이제이션 수
-    cursor.execute("SELECT COUNT(*) as count FROM app_localizations")
-    total_localizations = cursor.fetchone()['count']
+            # 플랫폼별 통계
+            cursor.execute("""
+                SELECT platform, COUNT(DISTINCT app_id) as app_count, COUNT(*) as localization_count
+                FROM app_localizations
+                GROUP BY platform
+            """)
+            platform_stats = {row['platform']: {'apps': row['app_count'], 'localizations': row['localization_count']}
+                              for row in cursor.fetchall()}
 
-    # 플랫폼별 통계
-    cursor.execute("""
-        SELECT platform, COUNT(DISTINCT app_id) as app_count, COUNT(*) as localization_count
-        FROM app_localizations
-        GROUP BY platform
-    """)
-    platform_stats = {row['platform']: {'apps': row['app_count'], 'localizations': row['localization_count']}
-                      for row in cursor.fetchall()}
+            # sitemap 파일 수
+            cursor.execute("SELECT platform, COUNT(*) as count FROM sitemap_files GROUP BY platform")
+            sitemap_counts = {row['platform']: row['count'] for row in cursor.fetchall()}
 
-    # sitemap 파일 수
-    cursor.execute("SELECT platform, COUNT(*) as count FROM sitemap_files GROUP BY platform")
-    sitemap_counts = {row['platform']: row['count'] for row in cursor.fetchall()}
+        return {
+            'total_localizations': total_localizations,
+            'platform_stats': platform_stats,
+            'sitemap_file_counts': sitemap_counts
+        }
 
-    conn.close()
-
-    return {
-        'total_localizations': total_localizations,
-        'platform_stats': platform_stats,
-        'sitemap_file_counts': sitemap_counts
-    }
+    return _run_with_session(action, session=session)
 
 
 if __name__ == '__main__':

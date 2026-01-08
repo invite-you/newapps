@@ -4,7 +4,10 @@
 """
 from typing import List, Tuple, Optional
 
-from database.sitemap_apps_db import get_connection as get_sitemap_connection
+from database.sitemap_apps_db import (
+    get_connection as get_sitemap_connection,
+    release_connection as release_sitemap_connection,
+)
 
 DEFAULT_LANGUAGE = "en"
 DEFAULT_COUNTRY = "US"
@@ -25,19 +28,21 @@ def get_app_language_country_pairs(
 ) -> List[Tuple[str, str]]:
     """sitemap DB에서 앱의 (language, country) 쌍을 가져옵니다."""
     conn = get_sitemap_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT DISTINCT language, country FROM app_localizations
-        WHERE app_id = %s AND platform = %s
-        """,
-        (app_id, platform),
-    )
-    pairs = [
-        (row["language"], _normalize_country(row["country"], normalize_country_case))
-        for row in cursor.fetchall()
-    ]
-    conn.close()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT DISTINCT language, country FROM app_localizations
+                WHERE app_id = %s AND platform = %s
+                """,
+                (app_id, platform),
+            )
+            pairs = [
+                (row["language"], _normalize_country(row["country"], normalize_country_case))
+                for row in cursor.fetchall()
+            ]
+    finally:
+        release_sitemap_connection(conn)
 
     if pairs:
         return pairs
