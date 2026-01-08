@@ -5,10 +5,12 @@ App Details Database
 """
 import os
 import json
+import time
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
 import psycopg
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from utils.logger import get_timestamped_logger
 
@@ -19,6 +21,16 @@ DB_PORT = int(os.getenv("APP_DETAILS_DB_PORT", "5432"))
 DB_NAME = os.getenv("APP_DETAILS_DB_NAME", "app_details")
 DB_USER = os.getenv("APP_DETAILS_DB_USER", "app_details")
 DB_PASSWORD = os.getenv("APP_DETAILS_DB_PASSWORD", "")
+
+# 연결 재시도 설정
+DB_CONNECT_MAX_RETRIES = int(os.getenv("APP_DETAILS_DB_CONNECT_MAX_RETRIES", "5"))
+DB_CONNECT_RETRY_DELAY_SEC = float(os.getenv("APP_DETAILS_DB_CONNECT_RETRY_DELAY_SEC", "2.0"))
+
+# 연결 재사용 설정 (기본값: true)
+DB_REUSE_CONNECTION = os.getenv("APP_DETAILS_DB_REUSE_CONNECTION", "true").lower() in ("1", "true", "yes")
+
+# 전역 싱글톤 연결
+_DB_CONNECTION: Optional[psycopg.Connection] = None
 PARTITION_COUNT = 64
 APP_REVIEWS_PARTITION_COUNT = 64
 LOG_FILE_PREFIX = "app_details_db"
@@ -62,14 +74,91 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     return date_str
 
 
-def get_connection() -> psycopg.Connection:
-    """DB 연결을 반환합니다."""
-    dsn = DB_DSN or (
+def _build_dsn() -> str:
+    """DB DSN 문자열을 구성합니다."""
+    return DB_DSN or (
         f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
         f"user={DB_USER} password={DB_PASSWORD}"
     )
-    conn = psycopg.connect(dsn, row_factory=dict_row)
-    return conn
+
+
+def _connect_with_retry() -> psycopg.Connection:
+    """DB 연결을 생성합니다. 실패 시 재시도합니다."""
+    dsn = _build_dsn()
+    last_exc = None
+    for attempt in range(1, DB_CONNECT_MAX_RETRIES + 1):
+        step_label = f"DB_CONNECT_ATTEMPT_{attempt}"
+        start_ts = datetime.now().isoformat()
+        start_monotonic = time.monotonic()
+        DB_LOGGER.info("[STEP START] %s | %s", step_label, start_ts)
+        try:
+            conn = psycopg.connect(dsn, row_factory=dict_row)
+            elapsed = time.monotonic() - start_monotonic
+            end_ts = datetime.now().isoformat()
+            DB_LOGGER.info(
+                "[STEP END] %s | %s | elapsed=%.2fs | status=SUCCESS",
+                step_label,
+                end_ts,
+                elapsed,
+            )
+            if attempt > 1:
+                DB_LOGGER.info("DB 연결 복구 완료: 시도 횟수=%s", attempt)
+            return conn
+        except psycopg.OperationalError as exc:
+            elapsed = time.monotonic() - start_monotonic
+            end_ts = datetime.now().isoformat()
+            DB_LOGGER.info(
+                "[STEP END] %s | %s | elapsed=%.2fs | status=FAIL",
+                step_label,
+                end_ts,
+                elapsed,
+            )
+            last_exc = exc
+            if "database system is starting up" in str(exc) and attempt < DB_CONNECT_MAX_RETRIES:
+                DB_LOGGER.warning(
+                    "DB 시작 대기 중: %s초 후 재시도 (%s/%s)",
+                    DB_CONNECT_RETRY_DELAY_SEC,
+                    attempt,
+                    DB_CONNECT_MAX_RETRIES,
+                )
+                time.sleep(DB_CONNECT_RETRY_DELAY_SEC)
+                continue
+            break
+    raise last_exc
+
+
+def get_connection() -> psycopg.Connection:
+    """DB 연결을 반환합니다. 재사용 설정 시 싱글톤 연결을 반환합니다."""
+    global _DB_CONNECTION
+    if DB_REUSE_CONNECTION:
+        if _DB_CONNECTION and not _DB_CONNECTION.closed:
+            return _DB_CONNECTION
+        if _DB_CONNECTION and _DB_CONNECTION.closed:
+            DB_LOGGER.info("닫힌 DB 연결 감지: 재연결을 시도합니다.")
+        _DB_CONNECTION = _connect_with_retry()
+        return _DB_CONNECTION
+    return _connect_with_retry()
+
+
+def release_connection(conn: Optional[psycopg.Connection]):
+    """재사용 설정에 맞춰 연결을 정리합니다."""
+    if not conn:
+        return
+    if DB_REUSE_CONNECTION:
+        if not conn.closed and conn.info.transaction_status != TransactionStatus.IDLE:
+            DB_LOGGER.info("DB 트랜잭션 정리: rollback 수행")
+            conn.rollback()
+        return
+    if not conn.closed:
+        conn.close()
+
+
+def close_connection():
+    """전역 DB 연결을 닫습니다."""
+    global _DB_CONNECTION
+    if _DB_CONNECTION and not _DB_CONNECTION.closed:
+        _DB_CONNECTION.close()
+    _DB_CONNECTION = None
 
 
 def init_database():
@@ -336,7 +425,7 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_status_app_platform ON collection_status(app_id, platform)")
 
     conn.commit()
-    conn.close()
+    release_connection(conn)
     DB_LOGGER.info("Database initialized.")
 
 
@@ -408,16 +497,18 @@ def compare_records(existing: Dict, new_data: Dict, exclude_fields: set = None) 
 def get_latest_app(app_id: str, platform: str) -> Optional[Dict]:
     """앱의 최신 메타데이터를 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM apps
-        WHERE app_id = %s AND platform = %s
-        ORDER BY recorded_at DESC
-        LIMIT 1
-    """, (app_id, platform))
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM apps
+                WHERE app_id = %s AND platform = %s
+                ORDER BY recorded_at DESC
+                LIMIT 1
+            """, (app_id, platform))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    finally:
+        release_connection(conn)
 
 
 def insert_app(data: Dict) -> Tuple[bool, int]:
@@ -434,34 +525,38 @@ def insert_app(data: Dict) -> Tuple[bool, int]:
 
     # 새 레코드 삽입
     conn = get_connection()
-    cursor = conn.cursor()
-    data['recorded_at'] = datetime.now().isoformat()
+    try:
+        with conn.cursor() as cursor:
+            data['recorded_at'] = datetime.now().isoformat()
 
-    columns = ', '.join(data.keys())
-    placeholders = ', '.join(['%s' for _ in data])
-    cursor.execute(
-        f"INSERT INTO apps ({columns}) VALUES ({placeholders}) RETURNING id",
-        list(data.values())
-    )
-    record_id = cursor.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return True, record_id
+            columns = ', '.join(data.keys())
+            placeholders = ', '.join(['%s' for _ in data])
+            cursor.execute(
+                f"INSERT INTO apps ({columns}) VALUES ({placeholders}) RETURNING id",
+                list(data.values())
+            )
+            record_id = cursor.fetchone()['id']
+        conn.commit()
+        return True, record_id
+    finally:
+        release_connection(conn)
 
 
 def get_latest_app_localized(app_id: str, platform: str, language: str) -> Optional[Dict]:
     """앱의 최신 다국어 데이터를 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM apps_localized
-        WHERE app_id = %s AND platform = %s AND language = %s
-        ORDER BY recorded_at DESC
-        LIMIT 1
-    """, (app_id, platform, language))
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM apps_localized
+                WHERE app_id = %s AND platform = %s AND language = %s
+                ORDER BY recorded_at DESC
+                LIMIT 1
+            """, (app_id, platform, language))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    finally:
+        release_connection(conn)
 
 
 def insert_app_localized(data: Dict) -> Tuple[bool, int]:
@@ -475,34 +570,38 @@ def insert_app_localized(data: Dict) -> Tuple[bool, int]:
         return False, existing['id']
 
     conn = get_connection()
-    cursor = conn.cursor()
-    data['recorded_at'] = datetime.now().isoformat()
+    try:
+        with conn.cursor() as cursor:
+            data['recorded_at'] = datetime.now().isoformat()
 
-    columns = ', '.join(data.keys())
-    placeholders = ', '.join(['%s' for _ in data])
-    cursor.execute(
-        f"INSERT INTO apps_localized ({columns}) VALUES ({placeholders}) RETURNING id",
-        list(data.values())
-    )
-    record_id = cursor.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return True, record_id
+            columns = ', '.join(data.keys())
+            placeholders = ', '.join(['%s' for _ in data])
+            cursor.execute(
+                f"INSERT INTO apps_localized ({columns}) VALUES ({placeholders}) RETURNING id",
+                list(data.values())
+            )
+            record_id = cursor.fetchone()['id']
+        conn.commit()
+        return True, record_id
+    finally:
+        release_connection(conn)
 
 
 def get_latest_app_metrics(app_id: str, platform: str) -> Optional[Dict]:
     """앱의 최신 수치 데이터를 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM apps_metrics
-        WHERE app_id = %s AND platform = %s
-        ORDER BY recorded_at DESC
-        LIMIT 1
-    """, (app_id, platform))
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM apps_metrics
+                WHERE app_id = %s AND platform = %s
+                ORDER BY recorded_at DESC
+                LIMIT 1
+            """, (app_id, platform))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    finally:
+        release_connection(conn)
 
 
 def insert_app_metrics(data: Dict) -> Tuple[bool, int]:
@@ -515,51 +614,57 @@ def insert_app_metrics(data: Dict) -> Tuple[bool, int]:
         return False, existing['id']
 
     conn = get_connection()
-    cursor = conn.cursor()
-    data['recorded_at'] = datetime.now().isoformat()
+    try:
+        with conn.cursor() as cursor:
+            data['recorded_at'] = datetime.now().isoformat()
 
-    columns = ', '.join(data.keys())
-    placeholders = ', '.join(['%s' for _ in data])
-    cursor.execute(
-        f"INSERT INTO apps_metrics ({columns}) VALUES ({placeholders}) RETURNING id",
-        list(data.values())
-    )
-    record_id = cursor.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return True, record_id
+            columns = ', '.join(data.keys())
+            placeholders = ', '.join(['%s' for _ in data])
+            cursor.execute(
+                f"INSERT INTO apps_metrics ({columns}) VALUES ({placeholders}) RETURNING id",
+                list(data.values())
+            )
+            record_id = cursor.fetchone()['id']
+        conn.commit()
+        return True, record_id
+    finally:
+        release_connection(conn)
 
 
 def review_exists(app_id: str, platform: str, review_id: str) -> bool:
     """리뷰가 이미 존재하는지 확인합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT 1 FROM app_reviews
-        WHERE app_id = %s AND platform = %s AND review_id = %s
-    """, (app_id, platform, review_id))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT 1 FROM app_reviews
+                WHERE app_id = %s AND platform = %s AND review_id = %s
+            """, (app_id, platform, review_id))
+            exists = cursor.fetchone() is not None
+            return exists
+    finally:
+        release_connection(conn)
 
 
 def insert_review(data: Dict) -> bool:
     """리뷰를 삽입합니다. 이미 존재하면 False 반환."""
     conn = get_connection()
-    cursor = conn.cursor()
-    data['recorded_at'] = datetime.now().isoformat()
+    try:
+        with conn.cursor() as cursor:
+            data['recorded_at'] = datetime.now().isoformat()
 
-    columns = ', '.join(data.keys())
-    placeholders = ', '.join(['%s' for _ in data])
-    cursor.execute(
-        f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
-        "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
-        list(data.values())
-    )
-    inserted = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
-    return inserted
+            columns = ', '.join(data.keys())
+            placeholders = ', '.join(['%s' for _ in data])
+            cursor.execute(
+                f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
+                "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
+                list(data.values())
+            )
+            inserted = cursor.rowcount > 0
+        conn.commit()
+        return inserted
+    finally:
+        release_connection(conn)
 
 
 def insert_reviews_batch(reviews: List[Dict]) -> int:
@@ -568,65 +673,73 @@ def insert_reviews_batch(reviews: List[Dict]) -> int:
         return 0
 
     conn = get_connection()
-    cursor = conn.cursor()
-    now = datetime.now().isoformat()
-    inserted = 0
+    try:
+        with conn.cursor() as cursor:
+            now = datetime.now().isoformat()
+            inserted = 0
 
-    for data in reviews:
-        data['recorded_at'] = now
-        columns = ', '.join(data.keys())
-        placeholders = ', '.join(['%s' for _ in data])
-        cursor.execute(
-            f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
-            "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
-            list(data.values())
-        )
-        if cursor.rowcount > 0:
-            inserted += 1
+            for data in reviews:
+                data['recorded_at'] = now
+                columns = ', '.join(data.keys())
+                placeholders = ', '.join(['%s' for _ in data])
+                cursor.execute(
+                    f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
+                    "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
+                    list(data.values())
+                )
+                if cursor.rowcount > 0:
+                    inserted += 1
 
-    conn.commit()
-    conn.close()
-    return inserted
+        conn.commit()
+        return inserted
+    finally:
+        release_connection(conn)
 
 
 def is_failed_app(app_id: str, platform: str) -> bool:
     """영구 실패 앱인지 확인합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT 1 FROM failed_apps WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT 1 FROM failed_apps WHERE app_id = %s AND platform = %s
+            """, (app_id, platform))
+            exists = cursor.fetchone() is not None
+            return exists
+    finally:
+        release_connection(conn)
 
 
 def mark_app_failed(app_id: str, platform: str, reason: str):
     """앱을 영구 실패로 표시합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    now = datetime.now().isoformat()
+    try:
+        with conn.cursor() as cursor:
+            now = datetime.now().isoformat()
 
-    cursor.execute("""
-        INSERT INTO failed_apps (app_id, platform, reason, failed_at)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (app_id, platform) DO NOTHING
-    """, (app_id, platform, reason, now))
+            cursor.execute("""
+                INSERT INTO failed_apps (app_id, platform, reason, failed_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (app_id, platform) DO NOTHING
+            """, (app_id, platform, reason, now))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        release_connection(conn)
 
 
 def get_collection_status(app_id: str, platform: str) -> Optional[Dict]:
     """수집 상태를 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM collection_status WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM collection_status WHERE app_id = %s AND platform = %s
+            """, (app_id, platform))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    finally:
+        release_connection(conn)
 
 
 def update_collection_status(app_id: str, platform: str,
@@ -636,94 +749,102 @@ def update_collection_status(app_id: str, platform: str,
                               initial_review_done: bool = None):
     """수집 상태를 업데이트합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    now = datetime.now().isoformat()
+    try:
+        with conn.cursor() as cursor:
+            now = datetime.now().isoformat()
 
-    # 기존 상태 확인
-    cursor.execute("""
-        SELECT * FROM collection_status WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    existing = cursor.fetchone()
+            # 기존 상태 확인
+            cursor.execute("""
+                SELECT * FROM collection_status WHERE app_id = %s AND platform = %s
+            """, (app_id, platform))
+            existing = cursor.fetchone()
 
-    if existing:
-        updates = []
-        params = []
+            if existing:
+                updates = []
+                params = []
 
-        if details_collected:
-            updates.append("details_collected_at = %s")
-            params.append(now)
+                if details_collected:
+                    updates.append("details_collected_at = %s")
+                    params.append(now)
 
-        if reviews_collected:
-            updates.append("reviews_collected_at = %s")
-            params.append(now)
+                if reviews_collected:
+                    updates.append("reviews_collected_at = %s")
+                    params.append(now)
 
-        if reviews_count is not None:
-            updates.append("reviews_total_count = %s")
-            params.append(reviews_count)
+                if reviews_count is not None:
+                    updates.append("reviews_total_count = %s")
+                    params.append(reviews_count)
 
-        if initial_review_done is not None:
-            updates.append("initial_review_done = %s")
-            params.append(1 if initial_review_done else 0)
+                if initial_review_done is not None:
+                    updates.append("initial_review_done = %s")
+                    params.append(1 if initial_review_done else 0)
 
-        if updates:
-            params.extend([app_id, platform])
-            cursor.execute(f"""
-                UPDATE collection_status SET {', '.join(updates)}
-                WHERE app_id = %s AND platform = %s
-            """, params)
-    else:
-        cursor.execute("""
-            INSERT INTO collection_status (app_id, platform, details_collected_at, reviews_collected_at, reviews_total_count, initial_review_done)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            app_id, platform,
-            now if details_collected else None,
-            now if reviews_collected else None,
-            reviews_count or 0,
-            1 if initial_review_done else 0
-        ))
+                if updates:
+                    params.extend([app_id, platform])
+                    cursor.execute(f"""
+                        UPDATE collection_status SET {', '.join(updates)}
+                        WHERE app_id = %s AND platform = %s
+                    """, params)
+            else:
+                cursor.execute("""
+                    INSERT INTO collection_status (app_id, platform, details_collected_at, reviews_collected_at, reviews_total_count, initial_review_done)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    app_id, platform,
+                    now if details_collected else None,
+                    now if reviews_collected else None,
+                    reviews_count or 0,
+                    1 if initial_review_done else 0
+                ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        release_connection(conn)
 
 
 def get_review_count(app_id: str, platform: str) -> int:
     """앱의 수집된 리뷰 수를 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT COUNT(*) as count FROM app_reviews WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    count = cursor.fetchone()['count']
-    conn.close()
-    return count
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT COUNT(*) as count FROM app_reviews WHERE app_id = %s AND platform = %s
+            """, (app_id, platform))
+            count = cursor.fetchone()['count']
+            return count
+    finally:
+        release_connection(conn)
 
 
 def get_latest_review_id(app_id: str, platform: str) -> Optional[str]:
     """가장 최근에 수집된 리뷰의 review_id를 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT review_id FROM app_reviews
-        WHERE app_id = %s AND platform = %s
-        ORDER BY reviewed_at DESC
-        LIMIT 1
-    """, (app_id, platform))
-    row = cursor.fetchone()
-    conn.close()
-    return row['review_id'] if row else None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT review_id FROM app_reviews
+                WHERE app_id = %s AND platform = %s
+                ORDER BY reviewed_at DESC
+                LIMIT 1
+            """, (app_id, platform))
+            row = cursor.fetchone()
+            return row['review_id'] if row else None
+    finally:
+        release_connection(conn)
 
 
 def get_all_review_ids(app_id: str, platform: str) -> set:
     """앱의 모든 리뷰 ID를 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT review_id FROM app_reviews WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    ids = {row['review_id'] for row in cursor.fetchall()}
-    conn.close()
-    return ids
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT review_id FROM app_reviews WHERE app_id = %s AND platform = %s
+            """, (app_id, platform))
+            ids = {row['review_id'] for row in cursor.fetchall()}
+            return ids
+    finally:
+        release_connection(conn)
 
 
 # ============================================================
@@ -754,11 +875,13 @@ def parse_date(date_str: str) -> Optional[datetime]:
 def get_failed_app_ids(platform: str) -> set:
     """실패한 앱 ID 목록을 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT app_id FROM failed_apps WHERE platform = %s", (platform,))
-    ids = {row['app_id'] for row in cursor.fetchall()}
-    conn.close()
-    return ids
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT app_id FROM failed_apps WHERE platform = %s", (platform,))
+            ids = {row['app_id'] for row in cursor.fetchall()}
+            return ids
+    finally:
+        release_connection(conn)
 
 
 def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
@@ -769,58 +892,60 @@ def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
         collected_at_field: 'details_collected_at' or 'reviews_collected_at'
     """
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        with conn.cursor() as cursor:
+            # 7일 이내에 수집되었고, 2년 이상 업데이트 안 된 앱
+            cursor.execute(f"""
+                SELECT cs.app_id
+                FROM collection_status cs
+                LEFT JOIN (
+                    SELECT app_id, platform, updated_date, release_date,
+                           ROW_NUMBER() OVER (PARTITION BY app_id, platform ORDER BY recorded_at DESC) as rn
+                    FROM apps
+                ) a ON cs.app_id = a.app_id AND cs.platform = a.platform AND a.rn = 1
+                WHERE cs.platform = %s
+                  AND cs.{collected_at_field} IS NOT NULL
+                  AND cs.{collected_at_field} > (now() - interval '{ABANDONED_COLLECTION_INTERVAL_DAYS} days')
+                  AND (
+                      -- 2년 이상 업데이트 안 됨 (버려진 앱)
+                      (a.updated_date IS NOT NULL AND a.updated_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
+                      OR (a.updated_date IS NULL AND a.release_date IS NOT NULL AND a.release_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
+                  )
+            """, (platform,))
 
-    # 7일 이내에 수집되었고, 2년 이상 업데이트 안 된 앱
-    cursor.execute(f"""
-        SELECT cs.app_id
-        FROM collection_status cs
-        LEFT JOIN (
-            SELECT app_id, platform, updated_date, release_date,
-                   ROW_NUMBER() OVER (PARTITION BY app_id, platform ORDER BY recorded_at DESC) as rn
-            FROM apps
-        ) a ON cs.app_id = a.app_id AND cs.platform = a.platform AND a.rn = 1
-        WHERE cs.platform = %s
-          AND cs.{collected_at_field} IS NOT NULL
-          AND cs.{collected_at_field} > (now() - interval '{ABANDONED_COLLECTION_INTERVAL_DAYS} days')
-          AND (
-              -- 2년 이상 업데이트 안 됨 (버려진 앱)
-              (a.updated_date IS NOT NULL AND a.updated_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
-              OR (a.updated_date IS NULL AND a.release_date IS NOT NULL AND a.release_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
-          )
-    """, (platform,))
-
-    ids = {row['app_id'] for row in cursor.fetchall()}
-    conn.close()
-    return ids
+            ids = {row['app_id'] for row in cursor.fetchall()}
+            return ids
+    finally:
+        release_connection(conn)
 
 
 def get_stats() -> Dict[str, Any]:
     """DB 통계를 반환합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        with conn.cursor() as cursor:
+            stats = {}
 
-    stats = {}
+            # 각 테이블 레코드 수
+            for table in ['apps', 'apps_localized', 'apps_metrics', 'app_reviews', 'failed_apps', 'collection_status']:
+                cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
+                stats[table] = cursor.fetchone()['count']
 
-    # 각 테이블 레코드 수
-    for table in ['apps', 'apps_localized', 'apps_metrics', 'app_reviews', 'failed_apps', 'collection_status']:
-        cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
-        stats[table] = cursor.fetchone()['count']
+            # 플랫폼별 앱 수 (unique)
+            cursor.execute("""
+                SELECT platform, COUNT(DISTINCT app_id) as count FROM apps GROUP BY platform
+            """)
+            stats['apps_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
 
-    # 플랫폼별 앱 수 (unique)
-    cursor.execute("""
-        SELECT platform, COUNT(DISTINCT app_id) as count FROM apps GROUP BY platform
-    """)
-    stats['apps_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
+            # 플랫폼별 리뷰 수
+            cursor.execute("""
+                SELECT platform, COUNT(*) as count FROM app_reviews GROUP BY platform
+            """)
+            stats['reviews_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
 
-    # 플랫폼별 리뷰 수
-    cursor.execute("""
-        SELECT platform, COUNT(*) as count FROM app_reviews GROUP BY platform
-    """)
-    stats['reviews_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
-
-    conn.close()
-    return stats
+            return stats
+    finally:
+        release_connection(conn)
 
 
 if __name__ == '__main__':
