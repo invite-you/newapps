@@ -5,10 +5,13 @@ App Details Database
 """
 import os
 import json
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
 import psycopg
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from utils.logger import get_timestamped_logger
 
@@ -19,6 +22,16 @@ DB_PORT = int(os.getenv("APP_DETAILS_DB_PORT", "5432"))
 DB_NAME = os.getenv("APP_DETAILS_DB_NAME", "app_details")
 DB_USER = os.getenv("APP_DETAILS_DB_USER", "app_details")
 DB_PASSWORD = os.getenv("APP_DETAILS_DB_PASSWORD", "")
+
+# 연결 재시도 설정
+DB_CONNECT_MAX_RETRIES = int(os.getenv("APP_DETAILS_DB_CONNECT_MAX_RETRIES", "5"))
+DB_CONNECT_RETRY_DELAY_SEC = float(os.getenv("APP_DETAILS_DB_CONNECT_RETRY_DELAY_SEC", "2.0"))
+
+# 연결 재사용 설정 (기본값: true)
+DB_REUSE_CONNECTION = os.getenv("APP_DETAILS_DB_REUSE_CONNECTION", "true").lower() in ("1", "true", "yes")
+
+# 전역 싱글톤 연결
+_DB_CONNECTION: Optional[psycopg.Connection] = None
 PARTITION_COUNT = 64
 APP_REVIEWS_PARTITION_COUNT = 64
 LOG_FILE_PREFIX = "app_details_db"
@@ -62,14 +75,209 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     return date_str
 
 
-def get_connection() -> psycopg.Connection:
-    """DB 연결을 반환합니다."""
-    dsn = DB_DSN or (
+def _build_dsn() -> str:
+    """DB DSN 문자열을 구성합니다."""
+    return DB_DSN or (
         f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
         f"user={DB_USER} password={DB_PASSWORD}"
     )
-    conn = psycopg.connect(dsn, row_factory=dict_row)
-    return conn
+
+
+def _connect_with_retry() -> psycopg.Connection:
+    """DB 연결을 생성합니다. 실패 시 재시도합니다."""
+    dsn = _build_dsn()
+    last_exc = None
+    for attempt in range(1, DB_CONNECT_MAX_RETRIES + 1):
+        step_label = f"DB_CONNECT_ATTEMPT_{attempt}"
+        start_ts = datetime.now().isoformat()
+        start_monotonic = time.monotonic()
+        DB_LOGGER.info("[STEP START] %s | %s", step_label, start_ts)
+        try:
+            conn = psycopg.connect(dsn, row_factory=dict_row)
+            elapsed = time.monotonic() - start_monotonic
+            end_ts = datetime.now().isoformat()
+            DB_LOGGER.info(
+                "[STEP END] %s | %s | elapsed=%.2fs | status=SUCCESS",
+                step_label,
+                end_ts,
+                elapsed,
+            )
+            if attempt > 1:
+                DB_LOGGER.info("DB 연결 복구 완료: 시도 횟수=%s", attempt)
+            return conn
+        except psycopg.OperationalError as exc:
+            elapsed = time.monotonic() - start_monotonic
+            end_ts = datetime.now().isoformat()
+            DB_LOGGER.info(
+                "[STEP END] %s | %s | elapsed=%.2fs | status=FAIL",
+                step_label,
+                end_ts,
+                elapsed,
+            )
+            last_exc = exc
+            if "database system is starting up" in str(exc) and attempt < DB_CONNECT_MAX_RETRIES:
+                DB_LOGGER.warning(
+                    "DB 시작 대기 중: %s초 후 재시도 (%s/%s)",
+                    DB_CONNECT_RETRY_DELAY_SEC,
+                    attempt,
+                    DB_CONNECT_MAX_RETRIES,
+                )
+                time.sleep(DB_CONNECT_RETRY_DELAY_SEC)
+                continue
+            break
+    raise last_exc
+
+
+def get_connection() -> psycopg.Connection:
+    """DB 연결을 반환합니다. 재사용 설정 시 싱글톤 연결을 반환합니다."""
+    global _DB_CONNECTION
+    if DB_REUSE_CONNECTION:
+        if _DB_CONNECTION and not _DB_CONNECTION.closed:
+            return _DB_CONNECTION
+        if _DB_CONNECTION and _DB_CONNECTION.closed:
+            DB_LOGGER.info("닫힌 DB 연결 감지: 재연결을 시도합니다.")
+        _DB_CONNECTION = _connect_with_retry()
+        return _DB_CONNECTION
+    return _connect_with_retry()
+
+
+def release_connection(conn: Optional[psycopg.Connection]):
+    """재사용 설정에 맞춰 연결을 정리합니다."""
+    if not conn:
+        return
+    if DB_REUSE_CONNECTION:
+        if not conn.closed and conn.info.transaction_status != TransactionStatus.IDLE:
+            DB_LOGGER.info("DB 트랜잭션 정리: rollback 수행")
+            conn.rollback()
+        return
+    if not conn.closed:
+        conn.close()
+
+
+def close_connection():
+    """전역 DB 연결을 닫습니다."""
+    global _DB_CONNECTION
+    if _DB_CONNECTION and not _DB_CONNECTION.closed:
+        _DB_CONNECTION.close()
+    _DB_CONNECTION = None
+
+
+# ============================================================
+# DB 헬퍼 함수들 (중복 코드 제거)
+# ============================================================
+
+
+@contextmanager
+def db_cursor(commit: bool = False):
+    """DB 커서를 반환하는 컨텍스트 매니저.
+
+    Args:
+        commit: True면 작업 완료 후 자동 커밋
+
+    Yields:
+        cursor: DB 커서
+
+    Example:
+        with db_cursor() as cursor:
+            cursor.execute("SELECT ...")
+            return cursor.fetchone()
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            yield cursor
+        if commit:
+            conn.commit()
+    finally:
+        release_connection(conn)
+
+
+def _fetch_one(query: str, params: tuple = ()) -> Optional[Dict]:
+    """단일 행을 조회합니다."""
+    with db_cursor() as cursor:
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def _fetch_all(query: str, params: tuple = ()) -> List[Dict]:
+    """모든 행을 조회합니다."""
+    with db_cursor() as cursor:
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def _exists(query: str, params: tuple = ()) -> bool:
+    """레코드 존재 여부를 확인합니다."""
+    with db_cursor() as cursor:
+        cursor.execute(query, params)
+        return cursor.fetchone() is not None
+
+
+def _execute(query: str, params: tuple = (), commit: bool = True) -> int:
+    """쿼리를 실행하고 영향받은 행 수를 반환합니다."""
+    with db_cursor(commit=commit) as cursor:
+        cursor.execute(query, params)
+        return cursor.rowcount
+
+
+# 화이트리스트: SQL 인젝션 방지용 (헬퍼 함수에서 참조)
+_VALID_COLLECTION_FIELDS = {'details_collected_at', 'reviews_collected_at'}
+_VALID_TABLES = {'apps', 'apps_localized', 'apps_metrics', 'app_reviews', 'failed_apps', 'collection_status'}
+
+
+def _validate_table(table: str) -> None:
+    """테이블 이름을 화이트리스트로 검증합니다."""
+    if table not in _VALID_TABLES:
+        raise ValueError(f"Invalid table: {table}. Must be one of: {_VALID_TABLES}")
+
+
+def _insert_returning(table: str, data: Dict, returning: str = 'id') -> Any:
+    """INSERT 후 RETURNING 값을 반환합니다. 원본 data를 수정하지 않습니다."""
+    _validate_table(table)
+
+    # 원본 딕셔너리를 수정하지 않도록 복사
+    data_copy = data.copy()
+    data_copy['recorded_at'] = datetime.now().isoformat()
+
+    columns = ', '.join(data_copy.keys())
+    placeholders = ', '.join(['%s' for _ in data_copy])
+
+    with db_cursor(commit=True) as cursor:
+        cursor.execute(
+            f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING {returning}",
+            list(data_copy.values())
+        )
+        return cursor.fetchone()[returning]
+
+
+def _get_latest_record(table: str, app_id: str, platform: str,
+                       extra_where: str = '', extra_params: tuple = ()) -> Optional[Dict]:
+    """테이블에서 최신 레코드를 조회합니다."""
+    _validate_table(table)
+
+    where_clause = f"app_id = %s AND platform = %s{' AND ' + extra_where if extra_where else ''}"
+    params = (app_id, platform) + extra_params
+
+    return _fetch_one(f"""
+        SELECT * FROM {table}
+        WHERE {where_clause}
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """, params)
+
+
+def _insert_if_changed(table: str, data: Dict, existing: Optional[Dict]) -> Tuple[bool, int]:
+    """기존 레코드와 비교 후 변경 시에만 삽입합니다.
+
+    Returns:
+        (is_new_record, record_id)
+    """
+    if existing and compare_records(existing, data):
+        return False, existing['id']
+
+    record_id = _insert_returning(table, data, 'id')
+    return True, record_id
 
 
 def init_database():
@@ -336,7 +544,7 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_status_app_platform ON collection_status(app_id, platform)")
 
     conn.commit()
-    conn.close()
+    release_connection(conn)
     DB_LOGGER.info("Database initialized.")
 
 
@@ -407,226 +615,111 @@ def compare_records(existing: Dict, new_data: Dict, exclude_fields: set = None) 
 
 def get_latest_app(app_id: str, platform: str) -> Optional[Dict]:
     """앱의 최신 메타데이터를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM apps
-        WHERE app_id = %s AND platform = %s
-        ORDER BY recorded_at DESC
-        LIMIT 1
-    """, (app_id, platform))
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    return _get_latest_record('apps', app_id, platform)
 
 
 def insert_app(data: Dict) -> Tuple[bool, int]:
     """앱 메타데이터를 삽입합니다. 변경이 있을 때만 삽입.
     Returns: (is_new_record, record_id)
     """
-    app_id = data['app_id']
-    platform = data['platform']
-
-    # 최신 레코드와 비교
-    existing = get_latest_app(app_id, platform)
-    if existing and compare_records(existing, data):
-        return False, existing['id']
-
-    # 새 레코드 삽입
-    conn = get_connection()
-    cursor = conn.cursor()
-    data['recorded_at'] = datetime.now().isoformat()
-
-    columns = ', '.join(data.keys())
-    placeholders = ', '.join(['%s' for _ in data])
-    cursor.execute(
-        f"INSERT INTO apps ({columns}) VALUES ({placeholders}) RETURNING id",
-        list(data.values())
-    )
-    record_id = cursor.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return True, record_id
+    existing = get_latest_app(data['app_id'], data['platform'])
+    return _insert_if_changed('apps', data, existing)
 
 
 def get_latest_app_localized(app_id: str, platform: str, language: str) -> Optional[Dict]:
     """앱의 최신 다국어 데이터를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM apps_localized
-        WHERE app_id = %s AND platform = %s AND language = %s
-        ORDER BY recorded_at DESC
-        LIMIT 1
-    """, (app_id, platform, language))
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    return _get_latest_record('apps_localized', app_id, platform,
+                               extra_where='language = %s', extra_params=(language,))
 
 
 def insert_app_localized(data: Dict) -> Tuple[bool, int]:
     """앱 다국어 데이터를 삽입합니다. 변경이 있을 때만 삽입."""
-    app_id = data['app_id']
-    platform = data['platform']
-    language = data['language']
-
-    existing = get_latest_app_localized(app_id, platform, language)
-    if existing and compare_records(existing, data):
-        return False, existing['id']
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    data['recorded_at'] = datetime.now().isoformat()
-
-    columns = ', '.join(data.keys())
-    placeholders = ', '.join(['%s' for _ in data])
-    cursor.execute(
-        f"INSERT INTO apps_localized ({columns}) VALUES ({placeholders}) RETURNING id",
-        list(data.values())
-    )
-    record_id = cursor.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return True, record_id
+    existing = get_latest_app_localized(data['app_id'], data['platform'], data['language'])
+    return _insert_if_changed('apps_localized', data, existing)
 
 
 def get_latest_app_metrics(app_id: str, platform: str) -> Optional[Dict]:
     """앱의 최신 수치 데이터를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM apps_metrics
-        WHERE app_id = %s AND platform = %s
-        ORDER BY recorded_at DESC
-        LIMIT 1
-    """, (app_id, platform))
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    return _get_latest_record('apps_metrics', app_id, platform)
 
 
 def insert_app_metrics(data: Dict) -> Tuple[bool, int]:
     """앱 수치 데이터를 삽입합니다. 변경이 있을 때만 삽입."""
-    app_id = data['app_id']
-    platform = data['platform']
-
-    existing = get_latest_app_metrics(app_id, platform)
-    if existing and compare_records(existing, data):
-        return False, existing['id']
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    data['recorded_at'] = datetime.now().isoformat()
-
-    columns = ', '.join(data.keys())
-    placeholders = ', '.join(['%s' for _ in data])
-    cursor.execute(
-        f"INSERT INTO apps_metrics ({columns}) VALUES ({placeholders}) RETURNING id",
-        list(data.values())
-    )
-    record_id = cursor.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return True, record_id
+    existing = get_latest_app_metrics(data['app_id'], data['platform'])
+    return _insert_if_changed('apps_metrics', data, existing)
 
 
 def review_exists(app_id: str, platform: str, review_id: str) -> bool:
     """리뷰가 이미 존재하는지 확인합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT 1 FROM app_reviews
-        WHERE app_id = %s AND platform = %s AND review_id = %s
-    """, (app_id, platform, review_id))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
+    return _exists(
+        "SELECT 1 FROM app_reviews WHERE app_id = %s AND platform = %s AND review_id = %s",
+        (app_id, platform, review_id)
+    )
 
 
 def insert_review(data: Dict) -> bool:
-    """리뷰를 삽입합니다. 이미 존재하면 False 반환."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    data['recorded_at'] = datetime.now().isoformat()
+    """리뷰를 삽입합니다. 이미 존재하면 False 반환. 원본 data를 수정하지 않습니다."""
+    data_copy = data.copy()
+    data_copy['recorded_at'] = datetime.now().isoformat()
 
-    columns = ', '.join(data.keys())
-    placeholders = ', '.join(['%s' for _ in data])
-    cursor.execute(
-        f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
-        "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
-        list(data.values())
-    )
-    inserted = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
-    return inserted
+    columns = ', '.join(data_copy.keys())
+    placeholders = ', '.join(['%s' for _ in data_copy])
 
-
-def insert_reviews_batch(reviews: List[Dict]) -> int:
-    """리뷰를 배치로 삽입합니다. 삽입된 개수 반환."""
-    if not reviews:
-        return 0
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    now = datetime.now().isoformat()
-    inserted = 0
-
-    for data in reviews:
-        data['recorded_at'] = now
-        columns = ', '.join(data.keys())
-        placeholders = ', '.join(['%s' for _ in data])
+    with db_cursor(commit=True) as cursor:
         cursor.execute(
             f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
             "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
-            list(data.values())
+            list(data_copy.values())
         )
-        if cursor.rowcount > 0:
-            inserted += 1
+        return cursor.rowcount > 0
 
-    conn.commit()
-    conn.close()
+
+def insert_reviews_batch(reviews: List[Dict]) -> int:
+    """리뷰를 배치로 삽입합니다. 삽입된 개수 반환. 원본 데이터를 수정하지 않습니다."""
+    if not reviews:
+        return 0
+
+    now = datetime.now().isoformat()
+    inserted = 0
+
+    with db_cursor(commit=True) as cursor:
+        for data in reviews:
+            data_copy = data.copy()
+            data_copy['recorded_at'] = now
+
+            columns = ', '.join(data_copy.keys())
+            placeholders = ', '.join(['%s' for _ in data_copy])
+            cursor.execute(
+                f"INSERT INTO app_reviews ({columns}) VALUES ({placeholders}) "
+                "ON CONFLICT (app_id, platform, review_id) DO NOTHING",
+                list(data_copy.values())
+            )
+            if cursor.rowcount > 0:
+                inserted += 1
+
     return inserted
 
 
 def is_failed_app(app_id: str, platform: str) -> bool:
     """영구 실패 앱인지 확인합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT 1 FROM failed_apps WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
+    return _exists("SELECT 1 FROM failed_apps WHERE app_id = %s AND platform = %s",
+                   (app_id, platform))
 
 
 def mark_app_failed(app_id: str, platform: str, reason: str):
     """앱을 영구 실패로 표시합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
     now = datetime.now().isoformat()
-
-    cursor.execute("""
+    _execute("""
         INSERT INTO failed_apps (app_id, platform, reason, failed_at)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (app_id, platform) DO NOTHING
     """, (app_id, platform, reason, now))
 
-    conn.commit()
-    conn.close()
-
 
 def get_collection_status(app_id: str, platform: str) -> Optional[Dict]:
     """수집 상태를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM collection_status WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    return _fetch_one("SELECT * FROM collection_status WHERE app_id = %s AND platform = %s",
+                      (app_id, platform))
 
 
 def update_collection_status(app_id: str, platform: str,
@@ -635,95 +728,72 @@ def update_collection_status(app_id: str, platform: str,
                               reviews_count: int = None,
                               initial_review_done: bool = None):
     """수집 상태를 업데이트합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
     now = datetime.now().isoformat()
+    existing = get_collection_status(app_id, platform)
 
-    # 기존 상태 확인
-    cursor.execute("""
-        SELECT * FROM collection_status WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    existing = cursor.fetchone()
+    with db_cursor(commit=True) as cursor:
+        if existing:
+            updates = []
+            params = []
 
-    if existing:
-        updates = []
-        params = []
+            if details_collected:
+                updates.append("details_collected_at = %s")
+                params.append(now)
 
-        if details_collected:
-            updates.append("details_collected_at = %s")
-            params.append(now)
+            if reviews_collected:
+                updates.append("reviews_collected_at = %s")
+                params.append(now)
 
-        if reviews_collected:
-            updates.append("reviews_collected_at = %s")
-            params.append(now)
+            if reviews_count is not None:
+                updates.append("reviews_total_count = %s")
+                params.append(reviews_count)
 
-        if reviews_count is not None:
-            updates.append("reviews_total_count = %s")
-            params.append(reviews_count)
+            if initial_review_done is not None:
+                updates.append("initial_review_done = %s")
+                params.append(1 if initial_review_done else 0)
 
-        if initial_review_done is not None:
-            updates.append("initial_review_done = %s")
-            params.append(1 if initial_review_done else 0)
-
-        if updates:
-            params.extend([app_id, platform])
-            cursor.execute(f"""
-                UPDATE collection_status SET {', '.join(updates)}
-                WHERE app_id = %s AND platform = %s
-            """, params)
-    else:
-        cursor.execute("""
-            INSERT INTO collection_status (app_id, platform, details_collected_at, reviews_collected_at, reviews_total_count, initial_review_done)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            app_id, platform,
-            now if details_collected else None,
-            now if reviews_collected else None,
-            reviews_count or 0,
-            1 if initial_review_done else 0
-        ))
-
-    conn.commit()
-    conn.close()
+            if updates:
+                params.extend([app_id, platform])
+                cursor.execute(f"""
+                    UPDATE collection_status SET {', '.join(updates)}
+                    WHERE app_id = %s AND platform = %s
+                """, params)
+        else:
+            cursor.execute("""
+                INSERT INTO collection_status (app_id, platform, details_collected_at, reviews_collected_at, reviews_total_count, initial_review_done)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                app_id, platform,
+                now if details_collected else None,
+                now if reviews_collected else None,
+                reviews_count or 0,
+                1 if initial_review_done else 0
+            ))
 
 
 def get_review_count(app_id: str, platform: str) -> int:
     """앱의 수집된 리뷰 수를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT COUNT(*) as count FROM app_reviews WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    count = cursor.fetchone()['count']
-    conn.close()
-    return count
+    result = _fetch_one("SELECT COUNT(*) as count FROM app_reviews WHERE app_id = %s AND platform = %s",
+                        (app_id, platform))
+    return result['count'] if result else 0
 
 
 def get_latest_review_id(app_id: str, platform: str) -> Optional[str]:
     """가장 최근에 수집된 리뷰의 review_id를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
+    result = _fetch_one("""
         SELECT review_id FROM app_reviews
         WHERE app_id = %s AND platform = %s
         ORDER BY reviewed_at DESC
         LIMIT 1
     """, (app_id, platform))
-    row = cursor.fetchone()
-    conn.close()
-    return row['review_id'] if row else None
+    return result['review_id'] if result else None
 
 
 def get_all_review_ids(app_id: str, platform: str) -> set:
     """앱의 모든 리뷰 ID를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT review_id FROM app_reviews WHERE app_id = %s AND platform = %s
-    """, (app_id, platform))
-    ids = {row['review_id'] for row in cursor.fetchall()}
-    conn.close()
-    return ids
+    rows = _fetch_all("SELECT review_id FROM app_reviews WHERE app_id = %s AND platform = %s",
+                      (app_id, platform))
+    return {row['review_id'] for row in rows}
 
 
 # ============================================================
@@ -753,12 +823,8 @@ def parse_date(date_str: str) -> Optional[datetime]:
 
 def get_failed_app_ids(platform: str) -> set:
     """실패한 앱 ID 목록을 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT app_id FROM failed_apps WHERE platform = %s", (platform,))
-    ids = {row['app_id'] for row in cursor.fetchall()}
-    conn.close()
-    return ids
+    rows = _fetch_all("SELECT app_id FROM failed_apps WHERE platform = %s", (platform,))
+    return {row['app_id'] for row in rows}
 
 
 def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
@@ -767,12 +833,17 @@ def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
     Args:
         platform: 'app_store' or 'play_store'
         collected_at_field: 'details_collected_at' or 'reviews_collected_at'
+
+    Raises:
+        ValueError: collected_at_field가 허용되지 않은 값인 경우
     """
-    conn = get_connection()
-    cursor = conn.cursor()
+    # SQL 인젝션 방지: 화이트리스트 검증
+    if collected_at_field not in _VALID_COLLECTION_FIELDS:
+        raise ValueError(f"Invalid collected_at_field: {collected_at_field}. "
+                         f"Must be one of: {_VALID_COLLECTION_FIELDS}")
 
     # 7일 이내에 수집되었고, 2년 이상 업데이트 안 된 앱
-    cursor.execute(f"""
+    rows = _fetch_all(f"""
         SELECT cs.app_id
         FROM collection_status cs
         LEFT JOIN (
@@ -790,36 +861,31 @@ def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
           )
     """, (platform,))
 
-    ids = {row['app_id'] for row in cursor.fetchall()}
-    conn.close()
-    return ids
+    return {row['app_id'] for row in rows}
 
 
 def get_stats() -> Dict[str, Any]:
     """DB 통계를 반환합니다."""
-    conn = get_connection()
-    cursor = conn.cursor()
-
     stats = {}
 
-    # 각 테이블 레코드 수
-    for table in ['apps', 'apps_localized', 'apps_metrics', 'app_reviews', 'failed_apps', 'collection_status']:
-        cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
-        stats[table] = cursor.fetchone()['count']
+    # 각 테이블 레코드 수 (하드코딩된 테이블명 - SQL 인젝션 위험 없음)
+    with db_cursor() as cursor:
+        for table in _VALID_TABLES:
+            cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
+            stats[table] = cursor.fetchone()['count']
 
-    # 플랫폼별 앱 수 (unique)
-    cursor.execute("""
-        SELECT platform, COUNT(DISTINCT app_id) as count FROM apps GROUP BY platform
-    """)
-    stats['apps_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
+        # 플랫폼별 앱 수 (unique)
+        cursor.execute("""
+            SELECT platform, COUNT(DISTINCT app_id) as count FROM apps GROUP BY platform
+        """)
+        stats['apps_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
 
-    # 플랫폼별 리뷰 수
-    cursor.execute("""
-        SELECT platform, COUNT(*) as count FROM app_reviews GROUP BY platform
-    """)
-    stats['reviews_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
+        # 플랫폼별 리뷰 수
+        cursor.execute("""
+            SELECT platform, COUNT(*) as count FROM app_reviews GROUP BY platform
+        """)
+        stats['reviews_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
 
-    conn.close()
     return stats
 
 
