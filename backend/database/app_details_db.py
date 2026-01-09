@@ -378,7 +378,7 @@ def init_database():
     # app_reviews: 리뷰 (실행당 최대 20000건 수집, 이후 누적)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_reviews (
-            id BIGSERIAL PRIMARY KEY,
+            id BIGSERIAL,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
             review_id TEXT NOT NULL,            -- 외부 리뷰 ID
@@ -395,7 +395,8 @@ def init_database():
             reply_content TEXT,
             replied_at TEXT,
             recorded_at TEXT NOT NULL,
-            UNIQUE(app_id, platform, review_id)
+            UNIQUE(app_id, platform, review_id),
+            PRIMARY KEY (app_id, id)
         ) PARTITION BY HASH (app_id)
     """)
 
