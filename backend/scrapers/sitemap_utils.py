@@ -77,7 +77,13 @@ def fetch_and_hash(
     logger: Optional[logging.Logger] = None
 ) -> Tuple[Optional[bytes], Optional[str]]:
     """URL에서 데이터를 가져오고 MD5 해시를 계산합니다.
-    Returns: (decompressed_content, hash_of_original_compressed_data)
+
+    gzip 파일의 경우 압축 해제된 실제 데이터의 해시를 반환합니다.
+    gzip 헤더에는 mtime(압축 시간), OS 정보 등 메타데이터가 포함되어
+    동일 내용이라도 압축 시간이 다르면 해시가 달라지는 문제가 있습니다.
+    따라서 압축 해제된 데이터의 해시를 계산하여 진정한 변경 여부를 감지합니다.
+
+    Returns: (decompressed_content, hash_of_decompressed_data)
     """
     resolved_logger = _resolve_logger(logger)
     headers = {
@@ -89,17 +95,21 @@ def fetch_and_hash(
         response.raise_for_status()
 
         raw_content = response.content
-        # 원본 압축 데이터의 해시 계산
-        content_hash = calculate_md5(raw_content)
 
-        # .xml.gz 파일인 경우 압축 해제
+        # .xml.gz 파일인 경우 압축 해제 후 해시 계산
         if url.endswith('.gz'):
             try:
                 decompressed = gzip.decompress(raw_content)
+                # 압축 해제된 실제 데이터의 해시 계산 (gzip 헤더 제외)
+                content_hash = calculate_md5(decompressed)
                 return decompressed, content_hash
             except gzip.BadGzipFile:
+                # 압축되지 않은 파일인 경우 원본 데이터 해시
+                content_hash = calculate_md5(raw_content)
                 return raw_content, content_hash
 
+        # 비압축 파일인 경우 원본 데이터 해시
+        content_hash = calculate_md5(raw_content)
         return raw_content, content_hash
 
     except requests.exceptions.RequestException as e:

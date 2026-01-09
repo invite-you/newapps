@@ -11,7 +11,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from scrapers.sitemap_utils import (
     fetch_url, fetch_and_hash, parse_sitemap_index, parse_sitemap_urlset,
     extract_play_store_app_id, parse_hreflang, get_filename_from_url,
@@ -36,6 +36,8 @@ class PlayStoreSitemapCollector:
         self.verbose = verbose
         self.logger = get_timestamped_logger("play_store_sitemap", file_prefix=LOG_FILE_PREFIX)
         self.stats = {
+            'sitemap_indexes_processed': 0,   # 처리한 index 수
+            'sitemap_indexes_unchanged': 0,   # 변경 없는 index 수
             'sitemap_files_processed': 0,
             'sitemap_files_skipped': 0,
             'new_localizations': 0,
@@ -50,17 +52,35 @@ class PlayStoreSitemapCollector:
         if self.verbose:
             self.logger.info(f"[PlayStore] {message}")
 
-    def collect_sitemap_index(self, index_url: str) -> List[str]:
-        """sitemap index에서 개별 sitemap URL들을 가져옵니다."""
-        self.log(f"Fetching sitemap index: {index_url}")
-        content = fetch_url(index_url, logger=self.logger)
-        if not content:
-            self.log(f"Failed to fetch sitemap index: {index_url}")
-            return []
+    def collect_sitemap_index(self, index_url: str) -> Tuple[List[str], bool, bool]:
+        """sitemap index에서 개별 sitemap URL들을 가져옵니다.
 
+        Returns: (sitemap_urls, index_changed, success)
+            - sitemap_urls: 개별 sitemap URL 리스트
+            - index_changed: index가 변경되었는지 여부
+            - success: 다운로드 성공 여부 (False면 에러 발생)
+        """
+        self.log(f"Fetching sitemap index: {index_url}")
+        content, content_hash = fetch_and_hash(index_url, logger=self.logger)
+        if not content or not content_hash:
+            self.log(f"Failed to fetch sitemap index: {index_url}")
+            return [], False, False  # 실패
+
+        # 기존 해시와 비교하여 변경 여부 확인
+        existing_hash = get_sitemap_file_hash(index_url)
+        index_changed = existing_hash != content_hash
+
+        if not index_changed:
+            self.log(f"Sitemap index unchanged (hash={content_hash[:8]}...): {index_url}")
+            # index가 변경되지 않았어도 URL 목록은 반환 (개별 파일 해시 검사는 별도로 수행)
+            sitemap_urls = parse_sitemap_index(content, logger=self.logger)
+            return sitemap_urls, False, True  # 성공, 변경 없음
+
+        # index가 변경된 경우 해시 업데이트
         sitemap_urls = parse_sitemap_index(content, logger=self.logger)
-        self.log(f"Found {len(sitemap_urls)} sitemap files in index")
-        return sitemap_urls
+        update_sitemap_file(PLATFORM, index_url, content_hash, len(sitemap_urls))
+        self.log(f"Sitemap index updated (hash={content_hash[:8]}...): Found {len(sitemap_urls)} sitemap files")
+        return sitemap_urls, True, True  # 성공, 변경됨
 
     def process_sitemap_file(self, sitemap_url: str) -> int:
         """개별 sitemap 파일을 처리합니다. 새로 추가된 로컬라이제이션 수를 반환."""
@@ -160,7 +180,12 @@ class PlayStoreSitemapCollector:
 
         all_sitemap_urls = []
         for index_url in SITEMAP_INDEX_URLS:
-            sitemap_urls = self.collect_sitemap_index(index_url)
+            sitemap_urls, index_changed, success = self.collect_sitemap_index(index_url)
+            self.stats['sitemap_indexes_processed'] += 1
+            if not success:
+                self.stats['errors'] += 1
+            elif not index_changed:
+                self.stats['sitemap_indexes_unchanged'] += 1
             all_sitemap_urls.extend(sitemap_urls)
 
         self.log(f"Total sitemap files to process: {len(all_sitemap_urls)}")
