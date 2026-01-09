@@ -178,6 +178,15 @@ class AppStoreSitemapCollector:
                 self.stats['sitemap_indexes_unchanged'] += 1
             all_sitemap_urls.extend(sitemap_urls)
 
+        before_dedup_count = len(all_sitemap_urls)
+        unique_sitemap_urls = list(dict.fromkeys(all_sitemap_urls))
+        after_dedup_count = len(unique_sitemap_urls)
+        self.log(
+            "Sitemap URLs deduped (order preserved): "
+            f"{before_dedup_count} -> {after_dedup_count}"
+        )
+        all_sitemap_urls = unique_sitemap_urls
+
         self.log(f"Total sitemap files to process: {len(all_sitemap_urls)}")
 
         for i, sitemap_url in enumerate(all_sitemap_urls, 1):
