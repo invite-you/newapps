@@ -66,7 +66,7 @@ class AppStoreSitemapCollector:
             self.log(f"Failed to fetch sitemap index: {index_url}")
             return [], False, False  # 실패
 
-        # 콘텐츠 기반 해시 계산 (XML 헤더 제외, 데이터 엘리먼트만)
+        # 콘텐츠 기반 해시 계산 (파일 번호만 추출)
         content_hash = calculate_sitemap_index_content_hash(content, logger=self.logger)
 
         # URL 목록 파싱
@@ -100,8 +100,8 @@ class AppStoreSitemapCollector:
             log_sitemap_step_end(self.logger, filename, start_perf, "FAIL")
             return 0
 
-        # 콘텐츠 기반 해시 계산 (XML 헤더 제외, 데이터 엘리먼트만)
-        content_hash = calculate_sitemap_urlset_content_hash(content, logger=self.logger)
+        # 콘텐츠 기반 해시 계산 (앱 ID + hreflang만 추출)
+        content_hash = calculate_sitemap_urlset_content_hash(content, PLATFORM, logger=self.logger)
 
         # sitemap 파싱
         url_entries = parse_sitemap_urlset(content, logger=self.logger)

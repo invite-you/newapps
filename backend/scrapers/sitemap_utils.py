@@ -150,53 +150,65 @@ def parse_sitemap_index(
         return []
 
 
-def normalize_sitemap_url(url: str) -> str:
-    """sitemap URL에서 날짜/타임스탬프 등 가변 부분을 정규화합니다.
+def extract_file_id_from_sitemap_url(url: str) -> str:
+    """sitemap URL에서 파일 식별자만 추출합니다.
 
-    예: play_sitemaps_2026-01-09_1767978176-00000-of-77447.xml.gz
-        -> play_sitemaps_NORMALIZED-00000-of-77447.xml.gz
+    URL에서 날짜/타임스탬프 등 가변 부분을 제거하고 파일 번호만 추출합니다.
+    예: play_sitemaps_2026-01-09_1767978176-00000-of-77447.xml.gz -> 00000-of-77447
+        sitemaps_apps_app_61_5.xml.gz -> app_61_5
+        sitemaps_apps_new-app_1_1.xml.gz -> new-app_1_1
     """
-    # Play Store: play_sitemaps_날짜_타임스탬프-번호 패턴
-    normalized = re.sub(
-        r'play_sitemaps_\d{4}-\d{2}-\d{2}_\d+-',
-        'play_sitemaps_NORMALIZED-',
-        url
-    )
-    return normalized
+    filename = url.split('/')[-1]
+
+    # Play Store: play_sitemaps_날짜_타임스탬프-번호-of-총수.xml.gz
+    play_match = re.search(r'-(\d+-of-\d+)\.xml', filename)
+    if play_match:
+        return play_match.group(1)
+
+    # App Store: sitemaps_apps_new-app_XX_Y.xml.gz (new-app 먼저 체크)
+    new_app_match = re.search(r'(new-app_\d+_\d+)\.xml', filename)
+    if new_app_match:
+        return new_app_match.group(1)
+
+    # App Store: sitemaps_apps_app_XX_Y.xml.gz
+    app_match = re.search(r'(app_\d+_\d+)\.xml', filename)
+    if app_match:
+        return app_match.group(1)
+
+    # 기타: 파일명 전체 사용 (확장자 제외)
+    return re.sub(r'\.xml(\.gz)?$', '', filename)
 
 
 def calculate_sitemap_index_content_hash(
     xml_content: bytes,
     logger: Optional[logging.Logger] = None
 ) -> str:
-    """sitemap index XML의 콘텐츠 해시를 계산합니다.
+    """sitemap index의 콘텐츠 해시를 계산합니다.
 
-    XML 헤더(선언, 네임스페이스)를 제외하고 <sitemap> 엘리먼트들의
-    내용만 추출하여 해시합니다. URL의 날짜/타임스탬프는 정규화합니다.
+    각 sitemap URL에서 파일 번호만 추출하여 해시합니다.
+    날짜/타임스탬프가 바뀌어도 파일 구성이 같으면 같은 해시가 됩니다.
     """
     resolved_logger = _resolve_logger(logger)
     try:
         root = ET.fromstring(xml_content)
         namespace = {'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
 
-        # <sitemap><loc>URL</loc></sitemap> 엘리먼트들에서 URL 추출
-        urls = []
+        file_ids = []
         for sitemap in root.findall('.//sm:sitemap/sm:loc', namespace):
             if sitemap.text:
-                # URL 정규화 (날짜/타임스탬프 제거)
-                normalized_url = normalize_sitemap_url(sitemap.text.strip())
-                urls.append(normalized_url)
+                file_id = extract_file_id_from_sitemap_url(sitemap.text.strip())
+                file_ids.append(file_id)
 
         # namespace 없이 시도
-        if not urls:
+        if not file_ids:
             for sitemap in root.findall('.//sitemap/loc'):
                 if sitemap.text:
-                    normalized_url = normalize_sitemap_url(sitemap.text.strip())
-                    urls.append(normalized_url)
+                    file_id = extract_file_id_from_sitemap_url(sitemap.text.strip())
+                    file_ids.append(file_id)
 
         # 정렬하여 순서에 관계없이 동일한 해시 생성
-        sorted_urls = sorted(urls)
-        normalized = '\n'.join(sorted_urls)
+        sorted_ids = sorted(file_ids)
+        normalized = '\n'.join(sorted_ids)
         return calculate_content_hash(normalized)
 
     except ET.ParseError as e:
@@ -251,17 +263,17 @@ def parse_sitemap_urlset(
 
 def calculate_sitemap_urlset_content_hash(
     xml_content: bytes,
+    platform: str,
     logger: Optional[logging.Logger] = None
 ) -> str:
-    """sitemap urlset XML의 콘텐츠 해시를 계산합니다.
+    """sitemap urlset의 콘텐츠 해시를 계산합니다.
 
-    XML 헤더(선언, 네임스페이스)를 제외하고 <url> 엘리먼트들의
-    내용만 추출하여 해시합니다.
+    앱 ID + hreflang 정보만 추출하여 정렬 후 해시합니다.
+    앱이 아닌 데이터(books, movies 등)는 무시합니다.
 
-    각 <url> 엘리먼트에서:
-    - <loc> 텍스트
-    - <xhtml:link> 속성들 (hreflang, href)
-    을 정규화하여 해시합니다.
+    Args:
+        xml_content: sitemap XML 바이트
+        platform: 'app_store' 또는 'play_store'
     """
     resolved_logger = _resolve_logger(logger)
     try:
@@ -271,27 +283,43 @@ def calculate_sitemap_urlset_content_hash(
             'xhtml': 'http://www.w3.org/1999/xhtml'
         }
 
-        url_data = []
+        app_data = []
         for url_elem in root.findall('.//sm:url', namespace):
-            # <loc> 추출
-            loc_elem = url_elem.find('sm:loc', namespace)
-            loc = loc_elem.text.strip() if loc_elem is not None and loc_elem.text else ''
+            # <xhtml:link> 에서 hreflang과 href 추출
+            hreflangs = []
+            first_href = None
 
-            # <xhtml:link> 추출
-            links = []
             for link in url_elem.findall('xhtml:link', namespace):
+                rel = link.get('rel')
                 hreflang = link.get('hreflang', '')
                 href = link.get('href', '')
-                if hreflang and href:
-                    # hreflang만 사용 (href는 loc과 유사하므로 생략 가능)
-                    links.append(hreflang.lower())
 
-            # 정렬된 링크 목록과 함께 정규화
-            sorted_links = sorted(links)
-            url_data.append(f"{loc}|{','.join(sorted_links)}")
+                if rel == 'alternate' and hreflang and href:
+                    if first_href is None:
+                        first_href = href
+                    hreflangs.append(hreflang.lower())
 
-        # URL 기준 정렬
-        sorted_data = sorted(url_data)
+            if not first_href or not hreflangs:
+                continue
+
+            # 앱 ID 추출
+            if platform == 'app_store':
+                app_id = extract_app_store_app_id(first_href)
+            else:
+                # Play Store: 앱 URL이 아니면 무시 (books, movies 등)
+                if not is_play_store_app_url(first_href):
+                    continue
+                app_id = extract_play_store_app_id(first_href)
+
+            if not app_id:
+                continue
+
+            # "앱ID:lang1,lang2,lang3" 형태로 정규화
+            sorted_langs = sorted(hreflangs)
+            app_data.append(f"{app_id}:{','.join(sorted_langs)}")
+
+        # 앱 ID 기준 정렬
+        sorted_data = sorted(app_data)
         normalized = '\n'.join(sorted_data)
         return calculate_content_hash(normalized)
 
