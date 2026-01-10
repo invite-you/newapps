@@ -117,11 +117,11 @@ class AppStoreDetailsCollector:
         else:
             has_in_app_purchases_flag_value = bool(has_in_app_purchases_flag)
 
-        has_iap = 1 if any([
+        has_iap = any([
             has_iap_feature,
             has_in_app_purchases_value,
             has_in_app_purchases_flag_value
-        ]) else 0
+        ])
 
         genres = data.get('genres', [])
         genre_name = genres[0] if genres else data.get('primaryGenreName')
@@ -140,7 +140,7 @@ class AppStoreDetailsCollector:
             'screenshots': json.dumps(data.get('screenshotUrls', []), ensure_ascii=False),
             'price': data.get('price', 0),
             'currency': data.get('currency'),
-            'free': 1 if data.get('price', 0) == 0 else 0,
+            'free': data.get('price', 0) == 0,
             'has_iap': has_iap,
             'category_id': str(data.get('primaryGenreId', '')),
             'genre_id': str(data.get('primaryGenreId', '')),
