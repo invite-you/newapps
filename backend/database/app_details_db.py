@@ -361,7 +361,7 @@ def init_database():
             ratings INTEGER,
             reviews_count INTEGER,
             installs TEXT,                      -- "100,000+" 형태
-            installs_exact INTEGER,             -- 정확한 수치 (Play Store)
+            installs_exact BIGINT,              -- 정확한 수치 (Play Store), 68억+ 앱 지원
             histogram TEXT,                     -- JSON array [1점, 2점, 3점, 4점, 5점]
             recorded_at TEXT NOT NULL,
             PRIMARY KEY (app_id, id)
