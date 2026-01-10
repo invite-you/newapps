@@ -334,9 +334,11 @@ def get_apps_to_collect(limit: Optional[int] = None) -> List[str]:
     try:
         with sitemap_conn.cursor() as cursor:
             cursor.execute("""
-                SELECT DISTINCT app_id FROM app_localizations
+                SELECT app_id
+                FROM app_localizations
                 WHERE platform = 'app_store'
-                ORDER BY first_seen_at DESC
+                GROUP BY app_id
+                ORDER BY MAX(first_seen_at) DESC NULLS LAST, app_id ASC
             """)
 
             result = []
