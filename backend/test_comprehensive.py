@@ -389,7 +389,7 @@ def test_time_series(results: TestResults):
         'version': '1.0.0',
         'developer': 'Test Developer',
         'price': 0,
-        'free': 1
+        'free': True
     }
     is_new_v1, id_v1 = insert_app(app_data_v1)
     results.logger.info(f"  첫 번째 삽입 (v1.0.0): is_new={is_new_v1}, id={id_v1}")

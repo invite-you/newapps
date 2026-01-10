@@ -103,8 +103,8 @@ class PlayStoreDetailsCollector:
             'screenshots': json.dumps(data.get('screenshots', [])[:10], ensure_ascii=False),  # 최대 10개
             'price': data.get('price', 0),
             'currency': data.get('currency'),
-            'free': 1 if data.get('free', True) else 0,
-            'has_iap': 1 if data.get('offersIAP') else 0,
+            'free': bool(data.get('free', True)),
+            'has_iap': bool(data.get('offersIAP')),
             'category_id': data.get('genreId'),
             'genre_id': data.get('genreId'),
             'genre_name': data.get('genre'),
