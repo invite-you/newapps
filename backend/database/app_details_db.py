@@ -361,7 +361,7 @@ def init_database():
             ratings INTEGER,
             reviews_count INTEGER,
             installs TEXT,                      -- "100,000+" 형태
-            installs_exact INTEGER,             -- 정확한 수치 (Play Store)
+            installs_exact BIGINT,              -- 정확한 수치 (Play Store), 68억+ 앱 지원
             histogram TEXT,                     -- JSON array [1점, 2점, 3점, 4점, 5점]
             recorded_at TEXT NOT NULL,
             PRIMARY KEY (app_id, id)
@@ -854,7 +854,7 @@ def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
         ) a ON cs.app_id = a.app_id AND cs.platform = a.platform AND a.rn = 1
         WHERE cs.platform = %s
           AND cs.{collected_at_field} IS NOT NULL
-          AND cs.{collected_at_field} > (now() - interval '{ABANDONED_COLLECTION_INTERVAL_DAYS} days')
+          AND cs.{collected_at_field}::timestamptz > (now() - interval '{ABANDONED_COLLECTION_INTERVAL_DAYS} days')
           AND (
               -- 2년 이상 업데이트 안 됨 (버려진 앱)
               (a.updated_date IS NOT NULL AND a.updated_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
