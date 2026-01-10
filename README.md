@@ -182,6 +182,8 @@ python collect_full_pipeline.py --limit 10
 6) 두 번째 실행 (증분 수집)
 
 ```bash
+cd ~/newapps/backend/
+source .venv/bin/activate
 set -a
 source /etc/newapps.env
 set +a
