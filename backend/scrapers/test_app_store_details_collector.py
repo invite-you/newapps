@@ -17,7 +17,7 @@ class TestAppStoreDetailsCollector(unittest.TestCase):
 
         result = self.collector.parse_app_metadata(data, 'test.app')
 
-        self.assertEqual(result['has_iap'], 1)
+        self.assertTrue(result['has_iap'])
 
     def test_parse_app_metadata_detects_iap_from_boolean_flag(self):
         data = {
@@ -29,7 +29,7 @@ class TestAppStoreDetailsCollector(unittest.TestCase):
 
         result = self.collector.parse_app_metadata(data, 'test.app.flag')
 
-        self.assertEqual(result['has_iap'], 1)
+        self.assertTrue(result['has_iap'])
 
     def test_parse_app_metadata_sets_zero_when_iap_fields_empty(self):
         data = {
@@ -41,7 +41,7 @@ class TestAppStoreDetailsCollector(unittest.TestCase):
 
         result = self.collector.parse_app_metadata(data, 'test.app.none')
 
-        self.assertEqual(result['has_iap'], 0)
+        self.assertFalse(result['has_iap'])
 
 
 if __name__ == '__main__':
