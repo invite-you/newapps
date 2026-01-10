@@ -28,6 +28,11 @@ def calculate_md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
+def calculate_content_hash(normalized_content: str) -> str:
+    """정규화된 콘텐츠 문자열의 MD5 해시를 계산합니다."""
+    return hashlib.md5(normalized_content.encode('utf-8')).hexdigest()
+
+
 def _resolve_logger(logger: Optional[logging.Logger]) -> logging.Logger:
     return logger or DEFAULT_LOGGER
 
@@ -145,6 +150,48 @@ def parse_sitemap_index(
         return []
 
 
+def extract_sitemap_index_file_ids(sitemap_urls: List[str]) -> List[str]:
+    """sitemap URL 목록에서 파일 식별자만 추출합니다.
+
+    URL에서 날짜/타임스탬프 등 가변 부분을 제거하고 파일 번호만 추출합니다.
+    예: play_sitemaps_2026-01-09_1767978176-00000-of-77447.xml.gz -> 00000-of-77447
+        sitemaps_apps_app_61_5.xml.gz -> app_61_5
+    """
+    file_ids = []
+    for url in sitemap_urls:
+        filename = url.split('/')[-1]
+
+        # Play Store: play_sitemaps_날짜_타임스탬프-번호-of-총수.xml.gz
+        play_match = re.search(r'-(\d+-of-\d+)\.xml', filename)
+        if play_match:
+            file_ids.append(play_match.group(1))
+            continue
+
+        # App Store: sitemaps_apps_app_XX_Y.xml.gz
+        app_match = re.search(r'(app_\d+_\d+)\.xml', filename)
+        if app_match:
+            file_ids.append(app_match.group(1))
+            continue
+
+        # 기타: 파일명 전체 사용 (확장자 제외)
+        file_ids.append(re.sub(r'\.xml(\.gz)?$', '', filename))
+
+    return file_ids
+
+
+def calculate_sitemap_index_content_hash(sitemap_urls: List[str]) -> str:
+    """sitemap index의 콘텐츠 해시를 계산합니다.
+
+    URL에서 파일 식별자만 추출하여 정렬 후 해시합니다.
+    날짜/타임스탬프가 바뀌어도 파일 구성이 같으면 같은 해시가 됩니다.
+    """
+    file_ids = extract_sitemap_index_file_ids(sitemap_urls)
+    # 정렬하여 순서에 관계없이 동일한 해시 생성
+    sorted_ids = sorted(file_ids)
+    normalized = '\n'.join(sorted_ids)
+    return calculate_content_hash(normalized)
+
+
 def parse_sitemap_urlset(
     xml_content: bytes,
     logger: Optional[logging.Logger] = None
@@ -188,6 +235,50 @@ def parse_sitemap_urlset(
     except ET.ParseError as e:
         resolved_logger.error(f"Error parsing sitemap urlset: {e}")
         return []
+
+
+def calculate_sitemap_urlset_content_hash(
+    url_entries: List[Dict],
+    platform: str,
+    logger: Optional[logging.Logger] = None
+) -> str:
+    """sitemap urlset의 콘텐츠 해시를 계산합니다.
+
+    앱 ID + hreflang 정보만 추출하여 정렬 후 해시합니다.
+    URL의 도메인이나 기타 메타데이터는 무시하고 실제 앱 데이터만 비교합니다.
+
+    Args:
+        url_entries: parse_sitemap_urlset()의 결과
+        platform: 'app_store' 또는 'play_store'
+    """
+    # 앱별 hreflang 목록 추출
+    app_data = []
+
+    for entry in url_entries:
+        hreflangs = entry.get('hreflangs', [])
+        if not hreflangs:
+            continue
+
+        # 첫 번째 href에서 앱 ID 추출
+        first_href = hreflangs[0].get('href', '')
+        if platform == 'app_store':
+            app_id = extract_app_store_app_id(first_href)
+        else:
+            app_id = extract_play_store_app_id(first_href)
+
+        if not app_id:
+            continue
+
+        # hreflang만 추출하여 정렬
+        langs = sorted([h.get('hreflang', '').lower() for h in hreflangs if h.get('hreflang')])
+
+        # "앱ID:lang1,lang2,lang3" 형태로 정규화
+        app_data.append(f"{app_id}:{','.join(langs)}")
+
+    # 앱 ID 기준 정렬
+    sorted_data = sorted(app_data)
+    normalized = '\n'.join(sorted_data)
+    return calculate_content_hash(normalized)
 
 
 def extract_app_store_app_id(url: str) -> Optional[str]:

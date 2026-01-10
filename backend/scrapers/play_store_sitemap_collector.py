@@ -15,7 +15,8 @@ from typing import List, Dict, Any, Tuple
 from scrapers.sitemap_utils import (
     fetch_url, fetch_and_hash, parse_sitemap_index, parse_sitemap_urlset,
     extract_play_store_app_id, parse_hreflang, get_filename_from_url,
-    is_play_store_app_url, filter_best_country_per_language, log_sitemap_step_end
+    is_play_store_app_url, filter_best_country_per_language, log_sitemap_step_end,
+    calculate_sitemap_index_content_hash, calculate_sitemap_urlset_content_hash
 )
 from database.sitemap_apps_db import (
     get_sitemap_file_hash, update_sitemap_file, upsert_app_localizations_batch
@@ -61,25 +62,28 @@ class PlayStoreSitemapCollector:
             - success: 다운로드 성공 여부 (False면 에러 발생)
         """
         self.log(f"Fetching sitemap index: {index_url}")
-        content, content_hash = fetch_and_hash(index_url, logger=self.logger)
-        if not content or not content_hash:
+        content, _ = fetch_and_hash(index_url, logger=self.logger)
+        if not content:
             self.log(f"Failed to fetch sitemap index: {index_url}")
             return [], False, False  # 실패
+
+        # URL 목록 파싱
+        sitemap_urls = parse_sitemap_index(content, logger=self.logger)
+
+        # 콘텐츠 기반 해시 계산 (URL에서 파일 식별자만 추출하여 해시)
+        content_hash = calculate_sitemap_index_content_hash(sitemap_urls)
 
         # 기존 해시와 비교하여 변경 여부 확인
         existing_hash = get_sitemap_file_hash(index_url)
         index_changed = existing_hash != content_hash
 
         if not index_changed:
-            self.log(f"Sitemap index unchanged (hash={content_hash[:8]}...): {index_url}")
-            # index가 변경되지 않았어도 URL 목록은 반환 (개별 파일 해시 검사는 별도로 수행)
-            sitemap_urls = parse_sitemap_index(content, logger=self.logger)
+            self.log(f"Sitemap index unchanged (content_hash={content_hash[:8]}...): {index_url}")
             return sitemap_urls, False, True  # 성공, 변경 없음
 
         # index가 변경된 경우 해시 업데이트
-        sitemap_urls = parse_sitemap_index(content, logger=self.logger)
         update_sitemap_file(PLATFORM, index_url, content_hash, len(sitemap_urls))
-        self.log(f"Sitemap index updated (hash={content_hash[:8]}...): Found {len(sitemap_urls)} sitemap files")
+        self.log(f"Sitemap index updated (content_hash={content_hash[:8]}...): Found {len(sitemap_urls)} sitemap files")
         return sitemap_urls, True, True  # 성공, 변경됨
 
     def process_sitemap_file(self, sitemap_url: str) -> int:
@@ -89,13 +93,19 @@ class PlayStoreSitemapCollector:
         filename = get_filename_from_url(sitemap_url)
         self.logger.info(f"[STEP START] sitemap_file={filename} | {start_ts}")
 
-        # 파일 다운로드 및 해시 계산
-        content, content_hash = fetch_and_hash(sitemap_url, logger=self.logger)
-        if not content or not content_hash:
+        # 파일 다운로드
+        content, _ = fetch_and_hash(sitemap_url, logger=self.logger)
+        if not content:
             self.log(f"Failed to fetch: {filename}")
             self.stats['errors'] += 1
             log_sitemap_step_end(self.logger, filename, start_perf, "FAIL")
             return 0
+
+        # sitemap 파싱 (해시 계산 전에 먼저 파싱)
+        url_entries = parse_sitemap_urlset(content, logger=self.logger)
+
+        # 콘텐츠 기반 해시 계산 (앱 ID + hreflang 정보만 추출하여 해시)
+        content_hash = calculate_sitemap_urlset_content_hash(url_entries, PLATFORM, self.logger)
 
         # 기존 해시와 비교
         existing_hash = get_sitemap_file_hash(sitemap_url)
@@ -107,8 +117,6 @@ class PlayStoreSitemapCollector:
 
         self.log(f"Processing: {filename}")
 
-        # sitemap 파싱
-        url_entries = parse_sitemap_urlset(content, logger=self.logger)
         if not url_entries:
             self.log(f"No entries found in: {filename}")
             log_sitemap_step_end(self.logger, filename, start_perf, "EMPTY")
