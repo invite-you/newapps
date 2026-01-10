@@ -67,11 +67,11 @@ class PlayStoreSitemapCollector:
             self.log(f"Failed to fetch sitemap index: {index_url}")
             return [], False, False  # 실패
 
+        # 콘텐츠 기반 해시 계산 (XML 헤더 제외, 데이터 엘리먼트만)
+        content_hash = calculate_sitemap_index_content_hash(content, logger=self.logger)
+
         # URL 목록 파싱
         sitemap_urls = parse_sitemap_index(content, logger=self.logger)
-
-        # 콘텐츠 기반 해시 계산 (URL에서 파일 식별자만 추출하여 해시)
-        content_hash = calculate_sitemap_index_content_hash(sitemap_urls)
 
         # 기존 해시와 비교하여 변경 여부 확인
         existing_hash = get_sitemap_file_hash(index_url)
@@ -101,11 +101,11 @@ class PlayStoreSitemapCollector:
             log_sitemap_step_end(self.logger, filename, start_perf, "FAIL")
             return 0
 
-        # sitemap 파싱 (해시 계산 전에 먼저 파싱)
-        url_entries = parse_sitemap_urlset(content, logger=self.logger)
+        # 콘텐츠 기반 해시 계산 (XML 헤더 제외, 데이터 엘리먼트만)
+        content_hash = calculate_sitemap_urlset_content_hash(content, logger=self.logger)
 
-        # 콘텐츠 기반 해시 계산 (앱 ID + hreflang 정보만 추출하여 해시)
-        content_hash = calculate_sitemap_urlset_content_hash(url_entries, PLATFORM, self.logger)
+        # sitemap 파싱
+        url_entries = parse_sitemap_urlset(content, logger=self.logger)
 
         # 기존 해시와 비교
         existing_hash = get_sitemap_file_hash(sitemap_url)

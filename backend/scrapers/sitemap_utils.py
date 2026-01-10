@@ -150,46 +150,58 @@ def parse_sitemap_index(
         return []
 
 
-def extract_sitemap_index_file_ids(sitemap_urls: List[str]) -> List[str]:
-    """sitemap URL 목록에서 파일 식별자만 추출합니다.
+def normalize_sitemap_url(url: str) -> str:
+    """sitemap URL에서 날짜/타임스탬프 등 가변 부분을 정규화합니다.
 
-    URL에서 날짜/타임스탬프 등 가변 부분을 제거하고 파일 번호만 추출합니다.
-    예: play_sitemaps_2026-01-09_1767978176-00000-of-77447.xml.gz -> 00000-of-77447
-        sitemaps_apps_app_61_5.xml.gz -> app_61_5
+    예: play_sitemaps_2026-01-09_1767978176-00000-of-77447.xml.gz
+        -> play_sitemaps_NORMALIZED-00000-of-77447.xml.gz
     """
-    file_ids = []
-    for url in sitemap_urls:
-        filename = url.split('/')[-1]
-
-        # Play Store: play_sitemaps_날짜_타임스탬프-번호-of-총수.xml.gz
-        play_match = re.search(r'-(\d+-of-\d+)\.xml', filename)
-        if play_match:
-            file_ids.append(play_match.group(1))
-            continue
-
-        # App Store: sitemaps_apps_app_XX_Y.xml.gz
-        app_match = re.search(r'(app_\d+_\d+)\.xml', filename)
-        if app_match:
-            file_ids.append(app_match.group(1))
-            continue
-
-        # 기타: 파일명 전체 사용 (확장자 제외)
-        file_ids.append(re.sub(r'\.xml(\.gz)?$', '', filename))
-
-    return file_ids
+    # Play Store: play_sitemaps_날짜_타임스탬프-번호 패턴
+    normalized = re.sub(
+        r'play_sitemaps_\d{4}-\d{2}-\d{2}_\d+-',
+        'play_sitemaps_NORMALIZED-',
+        url
+    )
+    return normalized
 
 
-def calculate_sitemap_index_content_hash(sitemap_urls: List[str]) -> str:
-    """sitemap index의 콘텐츠 해시를 계산합니다.
+def calculate_sitemap_index_content_hash(
+    xml_content: bytes,
+    logger: Optional[logging.Logger] = None
+) -> str:
+    """sitemap index XML의 콘텐츠 해시를 계산합니다.
 
-    URL에서 파일 식별자만 추출하여 정렬 후 해시합니다.
-    날짜/타임스탬프가 바뀌어도 파일 구성이 같으면 같은 해시가 됩니다.
+    XML 헤더(선언, 네임스페이스)를 제외하고 <sitemap> 엘리먼트들의
+    내용만 추출하여 해시합니다. URL의 날짜/타임스탬프는 정규화합니다.
     """
-    file_ids = extract_sitemap_index_file_ids(sitemap_urls)
-    # 정렬하여 순서에 관계없이 동일한 해시 생성
-    sorted_ids = sorted(file_ids)
-    normalized = '\n'.join(sorted_ids)
-    return calculate_content_hash(normalized)
+    resolved_logger = _resolve_logger(logger)
+    try:
+        root = ET.fromstring(xml_content)
+        namespace = {'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+
+        # <sitemap><loc>URL</loc></sitemap> 엘리먼트들에서 URL 추출
+        urls = []
+        for sitemap in root.findall('.//sm:sitemap/sm:loc', namespace):
+            if sitemap.text:
+                # URL 정규화 (날짜/타임스탬프 제거)
+                normalized_url = normalize_sitemap_url(sitemap.text.strip())
+                urls.append(normalized_url)
+
+        # namespace 없이 시도
+        if not urls:
+            for sitemap in root.findall('.//sitemap/loc'):
+                if sitemap.text:
+                    normalized_url = normalize_sitemap_url(sitemap.text.strip())
+                    urls.append(normalized_url)
+
+        # 정렬하여 순서에 관계없이 동일한 해시 생성
+        sorted_urls = sorted(urls)
+        normalized = '\n'.join(sorted_urls)
+        return calculate_content_hash(normalized)
+
+    except ET.ParseError as e:
+        resolved_logger.error(f"Error parsing sitemap index for hash: {e}")
+        return ""
 
 
 def parse_sitemap_urlset(
@@ -238,47 +250,54 @@ def parse_sitemap_urlset(
 
 
 def calculate_sitemap_urlset_content_hash(
-    url_entries: List[Dict],
-    platform: str,
+    xml_content: bytes,
     logger: Optional[logging.Logger] = None
 ) -> str:
-    """sitemap urlset의 콘텐츠 해시를 계산합니다.
+    """sitemap urlset XML의 콘텐츠 해시를 계산합니다.
 
-    앱 ID + hreflang 정보만 추출하여 정렬 후 해시합니다.
-    URL의 도메인이나 기타 메타데이터는 무시하고 실제 앱 데이터만 비교합니다.
+    XML 헤더(선언, 네임스페이스)를 제외하고 <url> 엘리먼트들의
+    내용만 추출하여 해시합니다.
 
-    Args:
-        url_entries: parse_sitemap_urlset()의 결과
-        platform: 'app_store' 또는 'play_store'
+    각 <url> 엘리먼트에서:
+    - <loc> 텍스트
+    - <xhtml:link> 속성들 (hreflang, href)
+    을 정규화하여 해시합니다.
     """
-    # 앱별 hreflang 목록 추출
-    app_data = []
+    resolved_logger = _resolve_logger(logger)
+    try:
+        root = ET.fromstring(xml_content)
+        namespace = {
+            'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9',
+            'xhtml': 'http://www.w3.org/1999/xhtml'
+        }
 
-    for entry in url_entries:
-        hreflangs = entry.get('hreflangs', [])
-        if not hreflangs:
-            continue
+        url_data = []
+        for url_elem in root.findall('.//sm:url', namespace):
+            # <loc> 추출
+            loc_elem = url_elem.find('sm:loc', namespace)
+            loc = loc_elem.text.strip() if loc_elem is not None and loc_elem.text else ''
 
-        # 첫 번째 href에서 앱 ID 추출
-        first_href = hreflangs[0].get('href', '')
-        if platform == 'app_store':
-            app_id = extract_app_store_app_id(first_href)
-        else:
-            app_id = extract_play_store_app_id(first_href)
+            # <xhtml:link> 추출
+            links = []
+            for link in url_elem.findall('xhtml:link', namespace):
+                hreflang = link.get('hreflang', '')
+                href = link.get('href', '')
+                if hreflang and href:
+                    # hreflang만 사용 (href는 loc과 유사하므로 생략 가능)
+                    links.append(hreflang.lower())
 
-        if not app_id:
-            continue
+            # 정렬된 링크 목록과 함께 정규화
+            sorted_links = sorted(links)
+            url_data.append(f"{loc}|{','.join(sorted_links)}")
 
-        # hreflang만 추출하여 정렬
-        langs = sorted([h.get('hreflang', '').lower() for h in hreflangs if h.get('hreflang')])
+        # URL 기준 정렬
+        sorted_data = sorted(url_data)
+        normalized = '\n'.join(sorted_data)
+        return calculate_content_hash(normalized)
 
-        # "앱ID:lang1,lang2,lang3" 형태로 정규화
-        app_data.append(f"{app_id}:{','.join(langs)}")
-
-    # 앱 ID 기준 정렬
-    sorted_data = sorted(app_data)
-    normalized = '\n'.join(sorted_data)
-    return calculate_content_hash(normalized)
+    except ET.ParseError as e:
+        resolved_logger.error(f"Error parsing sitemap urlset for hash: {e}")
+        return ""
 
 
 def extract_app_store_app_id(url: str) -> Optional[str]:
