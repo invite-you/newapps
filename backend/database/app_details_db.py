@@ -7,8 +7,8 @@ import os
 import json
 import time
 from contextlib import contextmanager
-from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any, Tuple, Union
 
 import psycopg
 from psycopg.pq import TransactionStatus
@@ -188,6 +188,33 @@ def db_cursor(commit: bool = False):
             yield cursor
         if commit:
             conn.commit()
+    finally:
+        release_connection(conn)
+
+
+@contextmanager
+def db_transaction():
+    """명시적 트랜잭션 컨텍스트 매니저.
+
+    블록 내 모든 작업이 성공하면 커밋, 예외 발생 시 롤백.
+
+    Yields:
+        cursor: DB 커서
+
+    Example:
+        with db_transaction() as cursor:
+            cursor.execute("INSERT INTO ...")
+            cursor.execute("INSERT INTO ...")
+            # 블록 종료 시 자동 커밋
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            yield cursor
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         release_connection(conn)
 
@@ -412,16 +439,61 @@ def init_database():
         ON app_reviews (app_id, platform, reviewed_at DESC)
     """)
 
-    # failed_apps: 영구 실패 앱 (재시도 안 함)
+    # failed_apps: 실패 앱 관리 (일시적/영구적 실패 구분)
+    # 실행 횟수 기반 관리: 같은 세션에서는 재시도하지 않고,
+    # N번 연속 실패하면 영구 실패로 처리
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS failed_apps (
             id BIGSERIAL PRIMARY KEY,
             app_id TEXT NOT NULL,
             platform TEXT NOT NULL,
-            reason TEXT,                        -- not_found, removed, etc.
+            reason TEXT,                        -- not_found, removed, timeout, rate_limited, etc.
             failed_at TEXT NOT NULL,
+            is_permanent BOOLEAN DEFAULT FALSE, -- 영구 실패 여부
+            consecutive_fail_count INTEGER DEFAULT 1,  -- 연속 실패 실행 횟수
+            last_session_id TEXT,               -- 마지막 실패 세션 ID
+            last_error_detail TEXT,             -- 상세 에러 메시지
             UNIQUE(app_id, platform)
         )
+    """)
+
+    # 기존 테이블에 컬럼이 없으면 추가 (마이그레이션)
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'failed_apps' AND column_name = 'is_permanent'
+            ) THEN
+                ALTER TABLE failed_apps ADD COLUMN is_permanent BOOLEAN DEFAULT FALSE;
+            END IF;
+            -- retry_count를 consecutive_fail_count로 이름 변경 (기존 데이터 보존)
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'failed_apps' AND column_name = 'consecutive_fail_count'
+            ) THEN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'failed_apps' AND column_name = 'retry_count'
+                ) THEN
+                    ALTER TABLE failed_apps RENAME COLUMN retry_count TO consecutive_fail_count;
+                ELSE
+                    ALTER TABLE failed_apps ADD COLUMN consecutive_fail_count INTEGER DEFAULT 1;
+                END IF;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'failed_apps' AND column_name = 'last_session_id'
+            ) THEN
+                ALTER TABLE failed_apps ADD COLUMN last_session_id TEXT;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'failed_apps' AND column_name = 'last_error_detail'
+            ) THEN
+                ALTER TABLE failed_apps ADD COLUMN last_error_detail TEXT;
+            END IF;
+        END $$;
     """)
 
     # collection_status: 수집 상태 추적
@@ -888,6 +960,380 @@ def get_stats() -> Dict[str, Any]:
         stats['reviews_by_platform'] = {row['platform']: row['count'] for row in cursor.fetchall()}
 
     return stats
+
+
+# ============================================================
+# 원자적 저장 API (앱 단위 트랜잭션)
+# ============================================================
+
+
+def _insert_with_cursor(cursor, table: str, data: Dict, now: str) -> Tuple[bool, int]:
+    """커서를 사용하여 레코드를 삽입합니다. 트랜잭션 내에서 사용."""
+    _validate_table(table)
+
+    # 기존 레코드 조회
+    if table == 'apps_localized':
+        cursor.execute("""
+            SELECT * FROM apps_localized
+            WHERE app_id = %s AND platform = %s AND language = %s
+            ORDER BY recorded_at DESC LIMIT 1
+        """, (data['app_id'], data['platform'], data['language']))
+    else:
+        cursor.execute(f"""
+            SELECT * FROM {table}
+            WHERE app_id = %s AND platform = %s
+            ORDER BY recorded_at DESC LIMIT 1
+        """, (data['app_id'], data['platform']))
+
+    existing = cursor.fetchone()
+    existing_dict = dict(existing) if existing else None
+
+    # 변경 없으면 스킵
+    if existing_dict and compare_records(existing_dict, data):
+        return False, existing_dict['id']
+
+    # 새 레코드 삽입
+    data_copy = data.copy()
+    data_copy['recorded_at'] = now
+
+    columns = ', '.join(data_copy.keys())
+    placeholders = ', '.join(['%s' for _ in data_copy])
+
+    cursor.execute(
+        f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING id",
+        list(data_copy.values())
+    )
+    return True, cursor.fetchone()['id']
+
+
+def _upsert_collection_status_with_cursor(cursor, app_id: str, platform: str, now: str):
+    """커서를 사용하여 collection_status를 업데이트합니다."""
+    cursor.execute("""
+        INSERT INTO collection_status (app_id, platform, details_collected_at, reviews_total_count, initial_review_done)
+        VALUES (%s, %s, %s, 0, 0)
+        ON CONFLICT (app_id, platform) DO UPDATE SET details_collected_at = EXCLUDED.details_collected_at
+    """, (app_id, platform, now))
+
+
+def save_app_details_atomic(
+    app_id: str,
+    platform: str,
+    app_meta: Optional[Dict] = None,
+    metrics_data: Optional[Dict] = None,
+    localized_list: Optional[List[Dict]] = None,
+) -> Dict[str, Any]:
+    """앱 상세정보를 원자적으로 저장합니다.
+
+    모든 데이터가 성공적으로 저장되거나, 모두 롤백됩니다.
+    collection_status.details_collected_at도 함께 업데이트됩니다.
+
+    Args:
+        app_id: 앱 ID
+        platform: 플랫폼 ('app_store' 또는 'play_store')
+        app_meta: apps 테이블 데이터 (선택)
+        metrics_data: apps_metrics 테이블 데이터 (선택)
+        localized_list: apps_localized 테이블 데이터 목록 (선택)
+
+    Returns:
+        {
+            'app_inserted': bool,       # 새 앱 레코드 삽입 여부
+            'metrics_inserted': bool,   # 새 metrics 레코드 삽입 여부
+            'localized_inserted': int,  # 새로 삽입된 localized 수
+            'localized_skipped': int,   # 변경 없어 스킵된 localized 수
+        }
+
+    Raises:
+        Exception: DB 오류 발생 시 (모든 변경사항 롤백)
+    """
+    now = datetime.now().isoformat()
+    result = {
+        'app_inserted': False,
+        'metrics_inserted': False,
+        'localized_inserted': 0,
+        'localized_skipped': 0,
+    }
+
+    with db_transaction() as cursor:
+        # 1. apps 테이블 저장
+        if app_meta:
+            is_new, _ = _insert_with_cursor(cursor, 'apps', app_meta, now)
+            result['app_inserted'] = is_new
+
+        # 2. apps_metrics 테이블 저장
+        if metrics_data:
+            is_new, _ = _insert_with_cursor(cursor, 'apps_metrics', metrics_data, now)
+            result['metrics_inserted'] = is_new
+
+        # 3. apps_localized 테이블 저장 (여러 언어)
+        if localized_list:
+            for localized in localized_list:
+                is_new, _ = _insert_with_cursor(cursor, 'apps_localized', localized, now)
+                if is_new:
+                    result['localized_inserted'] += 1
+                else:
+                    result['localized_skipped'] += 1
+
+        # 4. collection_status 업데이트
+        _upsert_collection_status_with_cursor(cursor, app_id, platform, now)
+
+    return result
+
+
+# ============================================================
+# 개선된 실패 처리 API (실행 횟수 기반)
+# 프로그램이 매일 실행되므로, 같은 세션에서는 재시도하지 않고
+# N번 연속 프로그램 실행 시 실패하면 영구 실패로 처리
+# ============================================================
+
+# 영구 실패로 처리할 에러 유형 (첫 실패에서 즉시 영구 실패)
+PERMANENT_FAILURE_REASONS = frozenset({
+    'not_found',
+    'removed',
+    'invalid_app_id',
+    'invalid_response',  # 잘못된 응답 형식
+})
+
+# 연속 실패 실행 횟수 한계 (이 횟수 이상 연속 실패 시 영구 실패)
+MAX_CONSECUTIVE_FAIL_RUNS = 3
+
+
+def generate_session_id() -> str:
+    """현재 실행 세션의 고유 ID를 생성합니다.
+
+    프로그램 시작 시 한 번만 호출하여 전체 실행에서 동일한 세션 ID를 사용합니다.
+    날짜 기반 ID를 사용하여 하루에 한 번 실행되는 경우 같은 날 재실행 시
+    동일한 세션으로 처리됩니다.
+    """
+    import uuid
+    return f"{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+
+
+def _is_permanent_reason(reason: str) -> bool:
+    """영구 실패 사유인지 확인합니다."""
+    base_reason = reason.split(':')[0] if ':' in reason else reason
+    return base_reason in PERMANENT_FAILURE_REASONS
+
+
+def record_app_failure(
+    app_id: str,
+    platform: str,
+    reason: str,
+    session_id: str,
+    error_detail: Optional[str] = None
+) -> Dict[str, Any]:
+    """앱 수집 실패를 기록합니다. 실행 횟수 기반으로 영구 실패를 판정합니다.
+
+    - 영구 실패 사유(not_found, removed 등)는 첫 실패에서 즉시 영구 실패
+    - 일시적 실패는 연속 N번 프로그램 실행 시 실패하면 영구 실패
+    - 같은 세션에서는 연속 실패 카운트를 증가시키지 않음
+
+    Args:
+        app_id: 앱 ID
+        platform: 플랫폼
+        reason: 실패 사유 (not_found, timeout, rate_limited, server_error 등)
+        session_id: 현재 실행 세션 ID (generate_session_id()로 생성)
+        error_detail: 상세 에러 메시지 (선택)
+
+    Returns:
+        {
+            'is_permanent': bool,              # 영구 실패 여부
+            'consecutive_fail_count': int,     # 연속 실패 실행 횟수
+            'is_same_session': bool,           # 같은 세션에서 이미 실패했는지
+        }
+    """
+    now_iso = datetime.now().isoformat()
+    is_permanent = _is_permanent_reason(reason)
+
+    # 기존 레코드 조회
+    existing = _fetch_one(
+        "SELECT * FROM failed_apps WHERE app_id = %s AND platform = %s",
+        (app_id, platform)
+    )
+
+    if existing:
+        # 이미 영구 실패면 정보만 반환
+        if existing.get('is_permanent'):
+            return {
+                'is_permanent': True,
+                'consecutive_fail_count': existing.get('consecutive_fail_count', 1),
+                'is_same_session': existing.get('last_session_id') == session_id,
+            }
+
+        last_session_id = existing.get('last_session_id')
+        current_count = existing.get('consecutive_fail_count') or 1
+
+        # 같은 세션에서 이미 실패한 경우: 카운트 증가 안 함
+        if last_session_id == session_id:
+            return {
+                'is_permanent': False,
+                'consecutive_fail_count': current_count,
+                'is_same_session': True,
+            }
+
+        # 다른 세션에서 실패: 연속 실패 카운트 증가
+        new_count = current_count + 1
+
+        # 연속 실패 한계 도달 시 영구 실패로 전환
+        if new_count >= MAX_CONSECUTIVE_FAIL_RUNS:
+            is_permanent = True
+
+        _execute("""
+            UPDATE failed_apps SET
+                reason = %s,
+                failed_at = %s,
+                is_permanent = %s,
+                consecutive_fail_count = %s,
+                last_session_id = %s,
+                last_error_detail = %s
+            WHERE app_id = %s AND platform = %s
+        """, (
+            reason, now_iso, is_permanent, new_count,
+            session_id, error_detail, app_id, platform
+        ))
+
+        return {
+            'is_permanent': is_permanent,
+            'consecutive_fail_count': new_count,
+            'is_same_session': False,
+        }
+    else:
+        # 새 레코드 삽입 (첫 실패)
+        _execute("""
+            INSERT INTO failed_apps (app_id, platform, reason, failed_at, is_permanent, consecutive_fail_count, last_session_id, last_error_detail)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            app_id, platform, reason, now_iso, is_permanent, 1,
+            session_id, error_detail
+        ))
+
+        return {
+            'is_permanent': is_permanent,
+            'consecutive_fail_count': 1,
+            'is_same_session': False,
+        }
+
+
+def is_app_blocked(app_id: str, platform: str, session_id: Optional[str] = None) -> bool:
+    """앱이 수집 차단 상태인지 확인합니다.
+
+    차단 조건:
+    - 영구 실패 앱
+    - session_id가 제공된 경우: 이번 세션에서 이미 실패한 앱
+
+    Args:
+        app_id: 앱 ID
+        platform: 플랫폼
+        session_id: 현재 실행 세션 ID (None이면 영구 실패만 확인)
+
+    Returns:
+        True: 차단됨 (수집 건너뛰기)
+        False: 수집 가능
+    """
+    result = _fetch_one("""
+        SELECT is_permanent, last_session_id FROM failed_apps
+        WHERE app_id = %s AND platform = %s
+    """, (app_id, platform))
+
+    if not result:
+        return False
+
+    # 영구 실패
+    if result.get('is_permanent'):
+        return True
+
+    # 이번 세션에서 이미 실패한 앱
+    if session_id and result.get('last_session_id') == session_id:
+        return True
+
+    return False
+
+
+def clear_app_failure(app_id: str, platform: str) -> bool:
+    """앱의 실패 기록을 삭제합니다 (수집 성공 시 호출).
+
+    Returns:
+        True: 삭제됨
+        False: 삭제할 레코드 없음
+    """
+    rowcount = _execute(
+        "DELETE FROM failed_apps WHERE app_id = %s AND platform = %s AND is_permanent = FALSE",
+        (app_id, platform)
+    )
+    return rowcount > 0
+
+
+def get_retryable_failed_apps(platform: str, session_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict]:
+    """재시도 가능한 실패 앱 목록을 반환합니다.
+
+    조건:
+    - 영구 실패가 아님
+    - session_id가 제공된 경우: 이번 세션에서 실패하지 않은 앱
+
+    Args:
+        platform: 플랫폼
+        session_id: 현재 실행 세션 ID (None이면 모든 비영구 실패 앱 반환)
+        limit: 최대 반환 개수 (None이면 전체)
+
+    Returns:
+        List of {'app_id': str, 'reason': str, 'consecutive_fail_count': int}
+    """
+    if session_id:
+        query = """
+            SELECT app_id, reason, consecutive_fail_count, last_session_id
+            FROM failed_apps
+            WHERE platform = %s
+              AND is_permanent = FALSE
+              AND (last_session_id IS NULL OR last_session_id != %s)
+            ORDER BY failed_at ASC
+        """
+        params = (platform, session_id)
+    else:
+        query = """
+            SELECT app_id, reason, consecutive_fail_count, last_session_id
+            FROM failed_apps
+            WHERE platform = %s
+              AND is_permanent = FALSE
+            ORDER BY failed_at ASC
+        """
+        params = (platform,)
+
+    if limit:
+        query += f" LIMIT {int(limit)}"
+
+    return _fetch_all(query, params)
+
+
+def get_permanently_failed_app_ids(platform: str) -> set:
+    """영구 실패한 앱 ID 목록을 반환합니다."""
+    rows = _fetch_all(
+        "SELECT app_id FROM failed_apps WHERE platform = %s AND is_permanent = TRUE",
+        (platform,)
+    )
+    return {row['app_id'] for row in rows}
+
+
+def get_blocked_app_ids(platform: str, session_id: Optional[str] = None) -> set:
+    """현재 차단된 앱 ID 목록을 반환합니다.
+
+    Args:
+        platform: 플랫폼
+        session_id: 현재 실행 세션 ID (None이면 영구 실패만 반환)
+
+    Returns:
+        영구 실패 앱 ID 세트 (session_id가 제공되면 이번 세션 실패 앱도 포함)
+    """
+    if session_id:
+        rows = _fetch_all("""
+            SELECT app_id FROM failed_apps
+            WHERE platform = %s
+              AND (is_permanent = TRUE OR last_session_id = %s)
+        """, (platform, session_id))
+    else:
+        rows = _fetch_all("""
+            SELECT app_id FROM failed_apps
+            WHERE platform = %s AND is_permanent = TRUE
+        """, (platform,))
+    return {row['app_id'] for row in rows}
 
 
 if __name__ == '__main__':

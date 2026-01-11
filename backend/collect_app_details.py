@@ -20,7 +20,7 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from database.app_details_db import init_database, get_stats
+from database.app_details_db import init_database, get_stats, generate_session_id
 from utils.logger import get_timestamped_logger
 
 LOG_FILE_PREFIX = "collect_app_details"
@@ -48,62 +48,62 @@ def print_stats(logger):
     logger.info("=" * 60 + "\n")
 
 
-def collect_app_store_details(limit: Optional[int], logger):
+def collect_app_store_details(limit: Optional[int], session_id: str, logger):
     """App Store 상세정보를 수집합니다."""
     from scrapers.app_store_details_collector import (
         AppStoreDetailsCollector, get_apps_to_collect
     )
 
-    app_ids = get_apps_to_collect(limit=limit)
+    app_ids = get_apps_to_collect(limit=limit, session_id=session_id)
     logger.info(f"[App Store] Found {len(app_ids)} apps to collect details")
 
     if app_ids:
-        collector = AppStoreDetailsCollector(verbose=True)
+        collector = AppStoreDetailsCollector(verbose=True, session_id=session_id)
         return collector.collect_batch(app_ids)
     return {}
 
 
-def collect_app_store_reviews(limit: Optional[int], logger):
+def collect_app_store_reviews(limit: Optional[int], session_id: str, logger):
     """App Store 리뷰를 수집합니다."""
     from scrapers.app_store_reviews_collector import (
         AppStoreReviewsCollector, get_apps_for_review_collection
     )
 
-    app_ids = get_apps_for_review_collection(limit=limit)
+    app_ids = get_apps_for_review_collection(limit=limit, session_id=session_id)
     logger.info(f"[App Store] Found {len(app_ids)} apps to collect reviews")
 
     if app_ids:
-        collector = AppStoreReviewsCollector(verbose=True)
+        collector = AppStoreReviewsCollector(verbose=True, session_id=session_id)
         return collector.collect_batch(app_ids)
     return {}
 
 
-def collect_play_store_details(limit: Optional[int], logger):
+def collect_play_store_details(limit: Optional[int], session_id: str, logger):
     """Play Store 상세정보를 수집합니다."""
     from scrapers.play_store_details_collector import (
         PlayStoreDetailsCollector, get_apps_to_collect
     )
 
-    app_ids = get_apps_to_collect(limit=limit)
+    app_ids = get_apps_to_collect(limit=limit, session_id=session_id)
     logger.info(f"[Play Store] Found {len(app_ids)} apps to collect details")
 
     if app_ids:
-        collector = PlayStoreDetailsCollector(verbose=True)
+        collector = PlayStoreDetailsCollector(verbose=True, session_id=session_id)
         return collector.collect_batch(app_ids)
     return {}
 
 
-def collect_play_store_reviews(limit: Optional[int], logger):
+def collect_play_store_reviews(limit: Optional[int], session_id: str, logger):
     """Play Store 리뷰를 수집합니다."""
     from scrapers.play_store_reviews_collector import (
         PlayStoreReviewsCollector, get_apps_for_review_collection
     )
 
-    app_ids = get_apps_for_review_collection(limit=limit)
+    app_ids = get_apps_for_review_collection(limit=limit, session_id=session_id)
     logger.info(f"[Play Store] Found {len(app_ids)} apps to collect reviews")
 
     if app_ids:
-        collector = PlayStoreReviewsCollector(verbose=True)
+        collector = PlayStoreReviewsCollector(verbose=True, session_id=session_id)
         return collector.collect_batch(app_ids)
     return {}
 
@@ -140,6 +140,10 @@ def main():
         )
         return
 
+    # 세션 ID 생성 (전체 실행에서 동일한 ID 사용)
+    session_id = generate_session_id()
+    logger.info(f"Session ID: {session_id}")
+
     # 수집 대상 결정
     collect_app_store = args.app_store or (not args.app_store and not args.play_store)
     collect_play_store = args.play_store or (not args.app_store and not args.play_store)
@@ -158,21 +162,21 @@ def main():
     if collect_app_store:
         if collect_details:
             logger.info("\n>>> Collecting App Store Details...\n")
-            all_stats['app_store_details'] = collect_app_store_details(args.limit, logger)
+            all_stats['app_store_details'] = collect_app_store_details(args.limit, session_id, logger)
 
         if collect_reviews:
             logger.info("\n>>> Collecting App Store Reviews...\n")
-            all_stats['app_store_reviews'] = collect_app_store_reviews(args.limit, logger)
+            all_stats['app_store_reviews'] = collect_app_store_reviews(args.limit, session_id, logger)
 
     # Play Store 수집
     if collect_play_store:
         if collect_details:
             logger.info("\n>>> Collecting Play Store Details...\n")
-            all_stats['play_store_details'] = collect_play_store_details(args.limit, logger)
+            all_stats['play_store_details'] = collect_play_store_details(args.limit, session_id, logger)
 
         if collect_reviews:
             logger.info("\n>>> Collecting Play Store Reviews...\n")
-            all_stats['play_store_reviews'] = collect_play_store_reviews(args.limit, logger)
+            all_stats['play_store_reviews'] = collect_play_store_reviews(args.limit, session_id, logger)
 
     # 결과 요약
     logger.info(f"\n{'=' * 60}")

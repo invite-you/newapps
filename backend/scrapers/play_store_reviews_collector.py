@@ -16,7 +16,8 @@ from google_play_scraper.exceptions import NotFoundError
 from database.app_details_db import (
     init_database, insert_reviews_batch, get_all_review_ids,
     get_collection_status, update_collection_status, get_review_count,
-    is_failed_app, get_failed_app_ids, get_abandoned_apps_to_skip
+    is_app_blocked, get_blocked_app_ids, get_abandoned_apps_to_skip,
+    generate_session_id
 )
 from database.sitemap_apps_db import (
     get_connection as get_sitemap_connection,
@@ -32,10 +33,13 @@ BATCH_SIZE = 100  # 한 번에 가져올 리뷰 수
 
 
 class PlayStoreReviewsCollector:
-    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None):
+    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None,
+                 session_id: Optional[str] = None):
         self.verbose = verbose
         self.logger = get_collection_logger('PlayStoreReviews', verbose)
         self.error_tracker = error_tracker or ErrorTracker('play_store_reviews')
+        # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
+        self.session_id = session_id or generate_session_id()
         self.stats = {
             'apps_processed': 0,
             'apps_skipped': 0,
@@ -165,9 +169,9 @@ class PlayStoreReviewsCollector:
 
     def collect_reviews_for_app(self, app_id: str) -> int:
         """단일 앱의 리뷰를 수집합니다. 국가별 균등 분배 + 잔여 분배."""
-        # 실패한 앱인지 확인
-        if is_failed_app(app_id, PLATFORM):
-            self.log(f"  [{app_id}] 건너뜀: 실패 목록에 있음")
+        # 차단된 앱인지 확인 (영구 실패 또는 이번 세션에서 실패)
+        if is_app_blocked(app_id, PLATFORM, session_id=self.session_id):
+            self.log(f"  [{app_id}] 건너뜀: 차단 목록에 있음")
             self.stats['apps_skipped'] += 1
             return 0
 
@@ -311,19 +315,19 @@ class PlayStoreReviewsCollector:
         return self.error_tracker
 
 
-def get_apps_for_review_collection(limit: Optional[int] = None) -> List[str]:
+def get_apps_for_review_collection(limit: Optional[int] = None, session_id: Optional[str] = None) -> List[str]:
     """리뷰 수집할 앱 ID 목록을 가져옵니다.
 
     수집 정책:
     - 상세정보가 수집된 앱만 대상
     - 활성 앱: 매번 수집 (crontab으로 매일 실행)
     - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
-    - 실패한 앱: 제외
+    - 차단된 앱: 제외 (영구 실패 또는 이번 세션에서 실패)
     """
     from database.app_details_db import get_connection as get_details_connection
 
-    # 제외할 앱 ID: 실패한 앱 + 7일 이내 수집된 버려진 앱
-    exclude_ids = get_failed_app_ids(PLATFORM) | get_abandoned_apps_to_skip(PLATFORM, 'reviews_collected_at')
+    # 제외할 앱 ID: 차단된 앱 + 7일 이내 수집된 버려진 앱
+    exclude_ids = get_blocked_app_ids(PLATFORM, session_id=session_id) | get_abandoned_apps_to_skip(PLATFORM, 'reviews_collected_at')
 
     # 상세정보가 수집된 앱 목록
     details_conn = get_details_connection()
@@ -348,13 +352,17 @@ def get_apps_for_review_collection(limit: Optional[int] = None) -> List[str]:
 def main():
     init_database()
 
-    # 수집할 앱 목록
-    app_ids = get_apps_for_review_collection(limit=10)
+    # 세션 ID 생성 (전체 실행에서 동일한 ID 사용)
+    session_id = generate_session_id()
     logger = get_timestamped_logger("play_store_reviews_main", file_prefix="play_store_reviews_main")
+    logger.info(f"Session ID: {session_id}")
+
+    # 수집할 앱 목록 (이번 세션에서 실패한 앱 제외)
+    app_ids = get_apps_for_review_collection(limit=10, session_id=session_id)
     logger.info(f"Found {len(app_ids)} apps for review collection")
 
     if app_ids:
-        collector = PlayStoreReviewsCollector(verbose=True)
+        collector = PlayStoreReviewsCollector(verbose=True, session_id=session_id)
         stats = collector.collect_batch(app_ids)
         logger.info(f"\nFinal Stats: {stats}")
 

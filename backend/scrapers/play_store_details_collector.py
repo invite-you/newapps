@@ -16,9 +16,10 @@ from google_play_scraper.exceptions import NotFoundError
 from requests.exceptions import Timeout, ConnectionError as RequestsConnectionError
 
 from database.app_details_db import (
-    init_database, insert_app, insert_app_localized, insert_app_metrics,
-    is_failed_app, mark_app_failed, update_collection_status,
-    get_failed_app_ids, get_abandoned_apps_to_skip, normalize_date_format
+    init_database, save_app_details_atomic,
+    is_app_blocked, record_app_failure, clear_app_failure,
+    get_blocked_app_ids, get_abandoned_apps_to_skip, normalize_date_format,
+    generate_session_id
 )
 from database.sitemap_apps_db import (
     get_connection as get_sitemap_connection,
@@ -37,10 +38,13 @@ REQUEST_DELAY = 0.01  # 10ms
 
 
 class PlayStoreDetailsCollector:
-    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None):
+    def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None,
+                 session_id: Optional[str] = None):
         self.verbose = verbose
         self.logger = get_collection_logger('PlayStoreDetails', verbose)
         self.error_tracker = error_tracker or ErrorTracker('play_store_details')
+        # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
+        self.session_id = session_id or generate_session_id()
         self.stats = {
             'apps_processed': 0,
             'apps_skipped_failed': 0,
@@ -147,10 +151,10 @@ class PlayStoreDetailsCollector:
     def collect_app(self, app_id: str) -> bool:
         """단일 앱의 상세정보를 수집합니다."""
         self.logger.info(f"[APP START] app_id={app_id} | {datetime.now().isoformat()}")
-        # 실패한 앱인지 확인
-        if is_failed_app(app_id, PLATFORM):
+        # 차단된 앱인지 확인 (영구 실패 또는 이번 세션에서 실패)
+        if is_app_blocked(app_id, PLATFORM, session_id=self.session_id):
             self.stats['apps_skipped_failed'] += 1
-            self.logger.info(f"[APP SKIP] app_id={app_id} | status=failed_app")
+            self.logger.info(f"[APP SKIP] app_id={app_id} | status=blocked")
             return False
 
         # sitemap에서 (language, country) 쌍 가져오기
@@ -188,35 +192,33 @@ class PlayStoreDetailsCollector:
                     time.sleep(REQUEST_DELAY)
 
         if not data:
-            # 상세한 에러 사유로 기록
+            # 실패 기록 (실행 횟수 기반 영구 실패 판정)
             reason = last_error or 'unknown'
-            mark_app_failed(app_id, PLATFORM, reason)
+            failure_info = record_app_failure(app_id, PLATFORM, reason, session_id=self.session_id)
             self.stats['apps_not_found'] += 1
-            self.logger.info(f"[APP FAIL] app_id={app_id} | reason={reason}")
+            self.logger.info(
+                f"[APP FAIL] app_id={app_id} | reason={reason} | "
+                f"permanent={failure_info['is_permanent']} | fail_count={failure_info['consecutive_fail_count']}"
+            )
             return False
 
-        # 앱 메타데이터 저장
+        # 앱 메타데이터 준비
         app_meta = self.parse_app_metadata(data, app_id)
-        is_new, _ = insert_app(app_meta)
-        if is_new:
-            self.stats['new_records'] += 1
-        else:
-            self.stats['unchanged_records'] += 1
 
-        # 수치 데이터 저장
+        # 수치 데이터 준비
         metrics = self.parse_app_metrics(data, app_id)
-        insert_app_metrics(metrics)
 
         # 다국어 데이터 수집 - 우선순위 기반 최적화된 쌍 사용
         # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
         languages_collected = set()
         fetched_pairs = {primary_pair: data}  # 이미 가져온 데이터 캐시
+        localized_list = []
 
-        # 기준 언어 데이터 먼저 저장
+        # 기준 언어 데이터 먼저 추가
         base_localized = self.parse_app_localized(data, app_id, primary_pair[0])
         base_title = base_localized.get('title')
         base_description = base_localized.get('description')
-        insert_app_localized(base_localized)
+        localized_list.append(base_localized)
         languages_collected.add(primary_pair[0])
 
         for lang, country in optimized_pairs:
@@ -233,15 +235,33 @@ class PlayStoreDetailsCollector:
 
             if pair_data:
                 localized = self.parse_app_localized(pair_data, app_id, lang)
-                # 중복 체크: title과 description이 기준 언어와 다를 때만 저장
+                # 중복 체크: title과 description이 기준 언어와 다를 때만 추가
                 if localized.get('title') != base_title or localized.get('description') != base_description:
-                    insert_app_localized(localized)
+                    localized_list.append(localized)
                 languages_collected.add(lang)
 
-        # 수집 상태 업데이트
-        update_collection_status(app_id, PLATFORM, details_collected=True)
+        # 원자적 저장: 모든 데이터를 단일 트랜잭션으로 저장
+        result = save_app_details_atomic(
+            app_id=app_id,
+            platform=PLATFORM,
+            app_meta=app_meta,
+            metrics_data=metrics,
+            localized_list=localized_list
+        )
+
+        # 성공 시 실패 기록 삭제 (재시도로 성공한 경우)
+        clear_app_failure(app_id, PLATFORM)
+
+        if result['app_inserted']:
+            self.stats['new_records'] += 1
+        else:
+            self.stats['unchanged_records'] += 1
+
         self.stats['apps_processed'] += 1
-        self.logger.info(f"[APP END] app_id={app_id} | status=OK")
+        self.logger.info(
+            f"[APP END] app_id={app_id} | status=OK | "
+            f"app_new={result['app_inserted']} | localized={result['localized_inserted']}"
+        )
 
         return True
 
@@ -285,16 +305,16 @@ class PlayStoreDetailsCollector:
         return self.error_tracker
 
 
-def get_apps_to_collect(limit: Optional[int] = None) -> List[str]:
+def get_apps_to_collect(limit: Optional[int] = None, session_id: Optional[str] = None) -> List[str]:
     """수집할 앱 ID 목록을 가져옵니다.
 
     수집 정책:
     - 활성 앱: 매번 수집 (crontab으로 매일 실행)
     - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
-    - 실패한 앱: 제외
+    - 차단된 앱: 제외 (영구 실패 또는 이번 세션에서 실패)
     """
-    # 제외할 앱 ID: 실패한 앱 + 7일 이내 수집된 버려진 앱
-    exclude_ids = get_failed_app_ids(PLATFORM) | get_abandoned_apps_to_skip(PLATFORM, 'details_collected_at')
+    # 제외할 앱 ID: 차단된 앱 + 7일 이내 수집된 버려진 앱
+    exclude_ids = get_blocked_app_ids(PLATFORM, session_id=session_id) | get_abandoned_apps_to_skip(PLATFORM, 'details_collected_at')
 
     # sitemap에서 앱 목록 가져오기 (최근 발견 순)
     sitemap_conn = get_sitemap_connection()
@@ -320,13 +340,17 @@ def get_apps_to_collect(limit: Optional[int] = None) -> List[str]:
 def main():
     init_database()
 
-    # 수집할 앱 목록
-    app_ids = get_apps_to_collect(limit=10)
+    # 세션 ID 생성 (전체 실행에서 동일한 ID 사용)
+    session_id = generate_session_id()
     logger = get_timestamped_logger("play_store_details_main", file_prefix="play_store_details_main")
+    logger.info(f"Session ID: {session_id}")
+
+    # 수집할 앱 목록 (이번 세션에서 실패한 앱 제외)
+    app_ids = get_apps_to_collect(limit=10, session_id=session_id)
     logger.info(f"Found {len(app_ids)} apps to collect")
 
     if app_ids:
-        collector = PlayStoreDetailsCollector(verbose=True)
+        collector = PlayStoreDetailsCollector(verbose=True, session_id=session_id)
         stats = collector.collect_batch(app_ids)
         logger.info(f"\nFinal Stats: {stats}")
 
