@@ -21,7 +21,7 @@ from database.sitemap_apps_db import (
     get_connection as get_sitemap_connection,
     release_connection as release_sitemap_connection,
 )
-from utils.logger import get_collection_logger, get_timestamped_logger
+from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
 from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'app_store'
@@ -94,7 +94,7 @@ class AppStoreReviewsCollector:
             return reviews
 
         except (requests.exceptions.RequestException, ValueError) as e:
-            self.log(f"Error fetching reviews page {page} for {app_id}/{country}: {e}")
+            self.logger.warning(format_warning_log("fetch_error", f"app_id={app_id} country={country} page={page}", str(e)))
             return []
 
     def parse_review(self, entry: Dict, app_id: str, country: str) -> Optional[Dict]:
@@ -173,7 +173,7 @@ class AppStoreReviewsCollector:
         """단일 앱의 리뷰를 수집합니다. 국가별 균등 분배 + 잔여 분배."""
         # 차단된 앱인지 확인 (영구 실패 또는 이번 세션에서 실패)
         if is_app_blocked(app_id, PLATFORM, session_id=self.session_id):
-            self.log(f"  [{app_id}] 건너뜀: 차단 목록에 있음")
+            self.logger.debug(f"[APP SKIP] app_id={app_id} | status=blocked")
             self.stats['apps_skipped'] += 1
             return 0
 
@@ -192,10 +192,10 @@ class AppStoreReviewsCollector:
 
         # 수집할 수 있는 리뷰 수 계산 (실행당 최대 5만 건)
         remaining = MAX_REVIEWS_TOTAL
-        mode = "추가 수집" if initial_done else "초기 수집"
+        mode = "incremental" if initial_done else "initial"
 
         if remaining <= 0:
-            self.log(f"  [{app_id}] 건너뜀: 이번 실행 할당량 소진")
+            self.logger.debug(f"[APP SKIP] app_id={app_id} | quota exhausted")
             self.stats['apps_skipped'] += 1
             return 0
 
@@ -204,8 +204,7 @@ class AppStoreReviewsCollector:
         if per_country_quota < 1:
             per_country_quota = 1
 
-        self.log(f"  [{app_id}] {mode} 시작 | 국가: {len(countries)}개 | "
-                 f"기존: {current_count}건 | 목표: {remaining}건 (국가당 {per_country_quota}건)")
+        self.logger.debug(f"[APP START] app_id={app_id} | mode={mode} | countries={len(countries)} | existing={current_count}")
 
         collected_total = 0
         hit_existing_any = False
@@ -223,12 +222,12 @@ class AppStoreReviewsCollector:
 
             if hit_existing:
                 hit_existing_any = True
-                self.log(f"    [{country.upper()}] {collected}건 (기존 리뷰 발견, 중단)")
+                self.logger.debug(f"[COUNTRY] {country} | {collected} reviews | hit_existing")
             elif has_more:
                 countries_with_more.append(country)
-                self.log(f"    [{country.upper()}] {collected}건 (더 있음)")
+                self.logger.debug(f"[COUNTRY] {country} | {collected} reviews | has_more")
             elif collected > 0:
-                self.log(f"    [{country.upper()}] {collected}건")
+                self.logger.debug(f"[COUNTRY] {country} | {collected} reviews")
 
         # === 2차: 잔여 분배 (리뷰가 더 있는 국가에서 추가 수집) ===
         remaining_after_first = remaining - collected_total
@@ -238,7 +237,7 @@ class AppStoreReviewsCollector:
             if extra_per_country < 1:
                 extra_per_country = remaining_after_first
 
-            self.log(f"    [2차 분배] 잔여 {remaining_after_first}건 → {len(countries_with_more)}개 국가")
+            self.logger.debug(f"[2ND PASS] remaining={remaining_after_first} | countries={len(countries_with_more)}")
 
             for country in countries_with_more:
                 if collected_total >= remaining:
@@ -253,7 +252,7 @@ class AppStoreReviewsCollector:
                 country_results[country] = country_results.get(country, 0) + collected
 
                 if collected > 0:
-                    self.log(f"    [{country.upper()}] +{collected}건 (2차)")
+                    self.logger.debug(f"[COUNTRY 2ND] {country} | +{collected} reviews")
 
                 if hit_existing:
                     break
@@ -269,27 +268,22 @@ class AppStoreReviewsCollector:
 
         self.stats['apps_processed'] += 1
 
-        # 최종 결과 로그
-        if collected_total > 0:
-            self.log(f"  [{app_id}] 완료: +{collected_total}건 (누적 {new_total}건)")
-        else:
-            self.log(f"  [{app_id}] 완료: 신규 리뷰 없음 (누적 {new_total}건)")
+        # 최종 결과 로그 (DEBUG - 배치 요약에서 INFO로 출력)
+        self.logger.debug(f"[APP END] app_id={app_id} | +{collected_total} reviews | total={new_total}")
 
         return collected_total
 
     def collect_batch(self, app_ids: List[str]) -> Dict[str, Any]:
         """배치로 리뷰를 수집합니다."""
-        self.log(f"=== App Store 리뷰 수집 시작 ===")
-        self.log(f"대상 앱: {len(app_ids)}개 | 실행당 최대: {MAX_REVIEWS_TOTAL}건/앱")
-        self.log("")
+        progress = ProgressLogger(self.logger, len(app_ids), "collect_reviews")
+        progress.start(max_reviews_per_app=MAX_REVIEWS_TOTAL)
 
         for i, app_id in enumerate(app_ids, 1):
-            self.log(f"[{i}/{len(app_ids)}] 앱 처리 중...")
+            progress.tick(i, app_id)
 
             try:
                 self.collect_reviews_for_app(app_id)
             except Exception as e:
-                self.log(f"  [{app_id}] 오류 발생: {e}")
                 self.stats['errors'] += 1
                 # 상세 에러 추적
                 self.error_tracker.add_error(
@@ -299,15 +293,22 @@ class AppStoreReviewsCollector:
                     app_id=app_id,
                     include_traceback=True
                 )
+                self.logger.error(format_error_log(
+                    reason=type(e).__name__,
+                    target=f"app_id={app_id}",
+                    action="skip",
+                    detail=str(e)
+                ))
 
             time.sleep(REQUEST_DELAY)
 
-        self.log("")
-        self.log(f"=== App Store 리뷰 수집 완료 ===")
-        self.log(f"처리: {self.stats['apps_processed']}개 | "
-                 f"건너뜀: {self.stats['apps_skipped']}개 | "
-                 f"수집: {self.stats['reviews_collected']}건 | "
-                 f"오류: {self.stats['errors']}개")
+        progress.end(
+            status="OK",
+            processed=self.stats['apps_processed'],
+            skipped=self.stats['apps_skipped'],
+            reviews=self.stats['reviews_collected'],
+            errors=self.stats['errors']
+        )
         return self.stats
 
     def get_error_tracker(self) -> ErrorTracker:

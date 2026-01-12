@@ -161,3 +161,114 @@ class CollectorLogger:
     def error(self, message: str):
         """ERROR 레벨 로그"""
         self.logger.error(f"[{self.name}] {message}")
+
+
+class ProgressLogger:
+    """
+    배치 작업 진행률 로깅 유틸리티.
+
+    로그 정책:
+    - 10% 간격으로만 INFO 로그 출력 (불필요한 반복 최소화)
+    - 개별 항목은 DEBUG 레벨
+    - 전체 요약은 INFO 레벨
+    """
+
+    def __init__(self, logger: logging.Logger, total: int, step_name: str = "batch",
+                 interval_percent: int = 10):
+        """
+        Args:
+            logger: 사용할 로거
+            total: 전체 처리 대상 수
+            step_name: 스텝 이름 (예: 'collect_batch', 'collect_reviews')
+            interval_percent: 진행률 로그 출력 간격 (기본: 10%)
+        """
+        self.logger = logger
+        self.total = total
+        self.step_name = step_name
+        self.interval = max(1, total * interval_percent // 100)
+        self.last_logged = 0
+        self.start_time = None
+        self.stats = {}
+
+    def start(self, **context):
+        """스텝 시작 로깅"""
+        import time
+        self.start_time = time.perf_counter()
+        self.stats = {}
+        ctx = ' | '.join(f"{k}={v}" for k, v in context.items()) if context else ""
+        self.logger.info(f"[STEP START] {self.step_name} | total={self.total}" + (f" | {ctx}" if ctx else ""))
+
+    def tick(self, current: int, item_id: str = None):
+        """
+        진행률 체크 - 간격 도달 시에만 INFO 로그.
+        개별 항목은 DEBUG 레벨로 기록.
+        """
+        if item_id:
+            self.logger.debug(f"[ITEM] {current}/{self.total} | id={item_id}")
+
+        # 10% 간격 체크
+        if current - self.last_logged >= self.interval or current == self.total:
+            pct = current * 100 // self.total if self.total > 0 else 100
+            self.logger.info(f"[PROGRESS] {current}/{self.total} ({pct}%)")
+            self.last_logged = current
+
+    def end(self, status: str = "OK", **stats):
+        """스텝 종료 로깅 (소요시간 + 요약 통계)"""
+        import time
+        elapsed = time.perf_counter() - self.start_time if self.start_time else 0
+        self.stats.update(stats)
+
+        stats_str = ' | '.join(f"{k}={v}" for k, v in self.stats.items())
+        self.logger.info(
+            f"[STEP END] {self.step_name} | elapsed={elapsed:.2f}s | status={status}"
+            + (f" | {stats_str}" if stats_str else "")
+        )
+
+    def add_stat(self, key: str, value):
+        """통계 추가"""
+        self.stats[key] = value
+
+
+def format_error_log(reason: str, target: str, action: str, detail: str = None) -> str:
+    """
+    ERROR 로그 포맷: 원인 + 영향 + 조치를 한 줄에 포함.
+
+    Args:
+        reason: 원인 (예외/조건)
+        target: 영향 (어떤 스텝/대상)
+        action: 조치 (retry/skip/abort)
+        detail: 추가 상세 정보 (선택)
+
+    Returns:
+        포맷된 에러 메시지
+
+    Example:
+        format_error_log("NotFoundError", "app_id=com.example", "skip", "API returned 404")
+        -> "[ERROR] reason=NotFoundError | target=app_id=com.example | action=skip | API returned 404"
+    """
+    msg = f"reason={reason} | target={target} | action={action}"
+    if detail:
+        msg += f" | {detail}"
+    return msg
+
+
+def format_warning_log(issue: str, target: str, detail: str = None) -> str:
+    """
+    WARNING 로그 포맷: 이상 징후 요약.
+
+    Args:
+        issue: 이상 징후 유형 (retry, fallback, rate_limit, missing_data 등)
+        target: 대상 (앱ID, URL 등)
+        detail: 상세 정보
+
+    Returns:
+        포맷된 경고 메시지
+
+    Example:
+        format_warning_log("rate_limit", "app_id=com.example", "429 Too Many Requests")
+        -> "[WARN] issue=rate_limit | target=app_id=com.example | 429 Too Many Requests"
+    """
+    msg = f"issue={issue} | target={target}"
+    if detail:
+        msg += f" | {detail}"
+    return msg

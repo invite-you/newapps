@@ -30,7 +30,7 @@ from scrapers.collection_utils import (
     get_app_language_country_pairs,
     select_primary_pair
 )
-from utils.logger import get_collection_logger, get_timestamped_logger
+from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
 from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'play_store'
@@ -72,23 +72,23 @@ class PlayStoreDetailsCollector:
         except NotFoundError:
             return (None, 'not_found')
         except Timeout:
-            self.log(f"Timeout fetching app {app_id}")
+            self.logger.warning(format_warning_log("timeout", f"app_id={app_id}", "request timed out"))
             return (None, 'timeout')
         except RequestsConnectionError as e:
-            self.log(f"Network error fetching app {app_id}: {e}")
+            self.logger.warning(format_warning_log("network_error", f"app_id={app_id}", str(e)))
             return (None, 'network_error')
         except Exception as e:
             error_str = str(e).lower()
             # rate limit 감지
             if '429' in error_str or 'too many' in error_str or 'rate' in error_str:
-                self.log(f"Rate limited fetching app {app_id}: {e}")
+                self.logger.warning(format_warning_log("rate_limit", f"app_id={app_id}", str(e)))
                 return (None, 'rate_limited')
             # 서버 오류 감지
             if any(code in error_str for code in ['500', '502', '503', '504']):
-                self.log(f"Server error fetching app {app_id}: {e}")
+                self.logger.warning(format_warning_log("server_error", f"app_id={app_id}", str(e)))
                 return (None, 'server_error')
             # 기타 스크래퍼 오류
-            self.log(f"Scraper error fetching app {app_id}: {e}")
+            self.logger.warning(format_warning_log("scraper_error", f"app_id={app_id}", f"{type(e).__name__}: {e}"))
             return (None, f'scraper_error:{type(e).__name__}')
 
     def parse_app_metadata(self, data: Dict, app_id: str) -> Dict:
@@ -150,11 +150,11 @@ class PlayStoreDetailsCollector:
 
     def collect_app(self, app_id: str) -> bool:
         """단일 앱의 상세정보를 수집합니다."""
-        self.logger.info(f"[APP START] app_id={app_id} | {datetime.now().isoformat()}")
+        self.logger.debug(f"[APP START] app_id={app_id}")
         # 차단된 앱인지 확인 (영구 실패 또는 이번 세션에서 실패)
         if is_app_blocked(app_id, PLATFORM, session_id=self.session_id):
             self.stats['apps_skipped_failed'] += 1
-            self.logger.info(f"[APP SKIP] app_id={app_id} | status=blocked")
+            self.logger.debug(f"[APP SKIP] app_id={app_id} | status=blocked")
             return False
 
         # sitemap에서 (language, country) 쌍 가져오기
@@ -196,10 +196,10 @@ class PlayStoreDetailsCollector:
             reason = last_error or 'unknown'
             failure_info = record_app_failure(app_id, PLATFORM, reason, session_id=self.session_id)
             self.stats['apps_not_found'] += 1
-            self.logger.info(
-                f"[APP FAIL] app_id={app_id} | reason={reason} | "
-                f"permanent={failure_info['is_permanent']} | fail_count={failure_info['consecutive_fail_count']}"
-            )
+            self.logger.warning(format_warning_log(
+                "fetch_failed", f"app_id={app_id}",
+                f"reason={reason} | permanent={failure_info['is_permanent']} | fail_count={failure_info['consecutive_fail_count']}"
+            ))
             return False
 
         # 앱 메타데이터 준비
@@ -258,7 +258,7 @@ class PlayStoreDetailsCollector:
             self.stats['unchanged_records'] += 1
 
         self.stats['apps_processed'] += 1
-        self.logger.info(
+        self.logger.debug(
             f"[APP END] app_id={app_id} | status=OK | "
             f"app_new={result['app_inserted']} | localized={result['localized_inserted']}"
         )
@@ -267,18 +267,15 @@ class PlayStoreDetailsCollector:
 
     def collect_batch(self, app_ids: List[str]) -> Dict[str, Any]:
         """배치로 앱 상세정보를 수집합니다."""
-        start_ts = datetime.now().isoformat()
-        start_perf = time.perf_counter()
-        self.log(f"Starting batch collection for {len(app_ids)} apps...")
-        self.logger.info(f"[STEP START] collect_batch | {start_ts}")
+        progress = ProgressLogger(self.logger, len(app_ids), "collect_batch")
+        progress.start()
 
         for i, app_id in enumerate(app_ids, 1):
-            self.logger.info(f"[PROGRESS] {i}/{len(app_ids)} | app_id={app_id}")
+            progress.tick(i, app_id)
 
             try:
                 self.collect_app(app_id)
             except Exception as e:
-                self.log(f"Error processing app {app_id}: {e}")
                 self.stats['errors'] += 1
                 # 상세 에러 추적
                 self.error_tracker.add_error(
@@ -288,15 +285,22 @@ class PlayStoreDetailsCollector:
                     app_id=app_id,
                     include_traceback=True
                 )
-                self.logger.exception(f"[APP ERROR] app_id={app_id}")
+                self.logger.error(format_error_log(
+                    reason=type(e).__name__,
+                    target=f"app_id={app_id}",
+                    action="skip",
+                    detail=str(e)
+                ))
 
             time.sleep(REQUEST_DELAY)
 
-        self.log(f"Batch collection completed. Stats: {self.stats}")
-        elapsed = time.perf_counter() - start_perf
-        self.logger.info(
-            f"[STEP END] collect_batch | {datetime.now().isoformat()} | "
-            f"elapsed={elapsed:.2f}s | status=OK"
+        progress.end(
+            status="OK",
+            processed=self.stats['apps_processed'],
+            skipped=self.stats['apps_skipped_failed'],
+            not_found=self.stats['apps_not_found'],
+            new=self.stats['new_records'],
+            errors=self.stats['errors']
         )
         return self.stats
 
