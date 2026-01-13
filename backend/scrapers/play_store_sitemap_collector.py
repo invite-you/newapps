@@ -21,6 +21,7 @@ from database.sitemap_apps_db import (
     get_sitemap_file_hash, update_sitemap_file, upsert_app_localizations_batch
 )
 from utils.logger import get_timestamped_logger
+from utils.network_binding import configure_network_binding
 PLATFORM = 'play_store'
 LOG_FILE_PREFIX = "sitemap_play_store"
 
@@ -35,6 +36,7 @@ class PlayStoreSitemapCollector:
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
         self.logger = get_timestamped_logger("play_store_sitemap", file_prefix=LOG_FILE_PREFIX)
+        configure_network_binding(logger=self.logger)
         self.stats = {
             'sitemap_indexes_processed': 0,   # 처리한 index 수
             'sitemap_indexes_unchanged': 0,   # 변경 없는 index 수

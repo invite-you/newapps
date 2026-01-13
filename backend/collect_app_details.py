@@ -15,6 +15,7 @@ import sys
 import os
 import argparse
 import time
+import subprocess
 from datetime import datetime
 from typing import Optional
 
@@ -22,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database.app_details_db import init_database, get_stats, generate_session_id
 from utils.logger import get_timestamped_logger
+from utils.network_binding import list_active_ipv4_interfaces, select_store_interfaces
 
 LOG_FILE_PREFIX = "collect_app_details"
 
@@ -149,6 +151,62 @@ def main():
     collect_play_store = args.play_store or (not args.app_store and not args.play_store)
     collect_details = not args.reviews_only
     collect_reviews = not args.details_only
+
+    if os.getenv("SCRAPER_CHILD_PROCESS") != "1":
+        interfaces = list_active_ipv4_interfaces()
+        if collect_app_store and collect_play_store and len(interfaces) >= 2:
+            app_iface, play_iface = select_store_interfaces(interfaces)
+            if app_iface and play_iface:
+                logger.info(
+                    "[INFO] parallel app collection enabled | "
+                    f"app_store={app_iface} | play_store={play_iface}"
+                )
+                child_env = os.environ.copy()
+                child_env["SCRAPER_CHILD_PROCESS"] = "1"
+
+                app_args = [sys.executable, os.path.abspath(__file__), "--app-store"]
+                play_args = [sys.executable, os.path.abspath(__file__), "--play-store"]
+                if args.details_only:
+                    app_args.append("--details-only")
+                    play_args.append("--details-only")
+                if args.reviews_only:
+                    app_args.append("--reviews-only")
+                    play_args.append("--reviews-only")
+                if args.limit is not None:
+                    app_args.extend(["--limit", str(args.limit)])
+                    play_args.extend(["--limit", str(args.limit)])
+                if args.quiet:
+                    app_args.append("--quiet")
+                    play_args.append("--quiet")
+
+                app_env = child_env.copy()
+                play_env = child_env.copy()
+                app_env["SCRAPER_INTERFACE"] = app_iface
+                play_env["SCRAPER_INTERFACE"] = play_iface
+
+                app_proc = subprocess.Popen(app_args, env=app_env, cwd=os.path.dirname(os.path.abspath(__file__)))
+                play_proc = subprocess.Popen(play_args, env=play_env, cwd=os.path.dirname(os.path.abspath(__file__)))
+
+                app_code = app_proc.wait()
+                play_code = play_proc.wait()
+                if app_code != 0 or play_code != 0:
+                    logger.error(
+                        "[ERROR] parallel app collection failed | "
+                        f"app_store={app_code} | play_store={play_code}"
+                    )
+                    elapsed = time.perf_counter() - start_perf
+                    logger.info(
+                        f"[STEP END] collect_app_details | {datetime.now().isoformat()} | "
+                        f"elapsed={elapsed:.2f}s | status=FAIL"
+                    )
+                    return 1
+                logger.info("[INFO] parallel app collection finished successfully")
+                elapsed = time.perf_counter() - start_perf
+                logger.info(
+                    f"[STEP END] collect_app_details | {datetime.now().isoformat()} | "
+                    f"elapsed={elapsed:.2f}s | status=OK"
+                )
+                return 0
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"App Details Collection Started at {start_ts}")

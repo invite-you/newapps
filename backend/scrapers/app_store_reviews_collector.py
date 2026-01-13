@@ -22,12 +22,16 @@ from database.sitemap_apps_db import (
     release_connection as release_sitemap_connection,
 )
 from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
+from utils.network_binding import configure_network_binding
+from utils.network_binding import get_requests_session
 from utils.error_tracker import ErrorTracker, ErrorStep
+from config.language_country_priority import select_best_pairs_for_collection, sort_language_country_pairs
 
 PLATFORM = 'app_store'
 RSS_BASE_URL = 'https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json'
 REQUEST_DELAY = 0.01  # 10ms
-MAX_REVIEWS_TOTAL = 50000  # 실행당 최대 수집 리뷰 수 (무한루프 방지)
+MAX_REVIEWS_TOTAL = int(os.getenv("APP_REVIEWS_MAX_PER_RUN", "50000"))  # 실행당 최대 수집 리뷰 수
+MAX_LOCALE_PAIRS = int(os.getenv("APP_REVIEWS_MAX_PAIRS", "0"))  # 0이면 제한 없음
 
 
 class AppStoreReviewsCollector:
@@ -35,6 +39,7 @@ class AppStoreReviewsCollector:
                  session_id: Optional[str] = None):
         self.verbose = verbose
         self.logger = get_collection_logger('AppStoreReviews', verbose)
+        configure_network_binding(logger=self.logger)
         self.error_tracker = error_tracker or ErrorTracker('app_store_reviews')
         # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
         self.session_id = session_id or generate_session_id()
@@ -50,6 +55,19 @@ class AppStoreReviewsCollector:
         if self.verbose:
             self.logger.info(message)
 
+    def _prioritize_pairs(self, pairs: List[tuple]) -> List[tuple]:
+        """언어-국가 쌍을 우선순위와 제한에 맞게 정렬/축소합니다."""
+        if not pairs:
+            return [('en', 'us')]
+
+        normalized = [(lang.lower(), country.upper()) for lang, country in pairs]
+        max_languages = len({lang.split('-')[0] for lang, _ in normalized})
+        selected = select_best_pairs_for_collection(normalized, max_languages=max_languages)
+        prioritized = sort_language_country_pairs(selected)
+        if MAX_LOCALE_PAIRS > 0:
+            prioritized = prioritized[:MAX_LOCALE_PAIRS]
+        return [(lang, country.lower()) for lang, country in prioritized]
+
     def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
         """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
         conn = get_sitemap_connection()
@@ -59,8 +77,8 @@ class AppStoreReviewsCollector:
                     SELECT DISTINCT language, country FROM app_localizations
                     WHERE app_id = %s AND platform = %s
                 """, (app_id, PLATFORM))
-                pairs = [(row['language'], row['country'].lower()) for row in cursor.fetchall()]
-                return pairs if pairs else [('en', 'us')]
+                pairs = [(row['language'], row['country']) for row in cursor.fetchall()]
+                return self._prioritize_pairs(pairs)
         finally:
             release_sitemap_connection(conn)
 
@@ -69,7 +87,7 @@ class AppStoreReviewsCollector:
         url = RSS_BASE_URL.format(country=country, page=page, app_id=app_id)
 
         try:
-            response = requests.get(url, timeout=30)
+            response = get_requests_session().get(url, timeout=30)
             if response.status_code != 200:
                 return []
 
@@ -192,7 +210,9 @@ class AppStoreReviewsCollector:
 
         # 수집할 수 있는 리뷰 수 계산 (실행당 최대 5만 건)
         remaining = MAX_REVIEWS_TOTAL
-        mode = "incremental" if initial_done else "initial"
+        has_existing_reviews = current_count > 0
+        incremental_mode = bool(initial_done or has_existing_reviews)
+        mode = "incremental" if incremental_mode else "initial"
 
         if remaining <= 0:
             self.logger.debug(f"[APP SKIP] app_id={app_id} | quota exhausted")
@@ -204,7 +224,9 @@ class AppStoreReviewsCollector:
         if per_country_quota < 1:
             per_country_quota = 1
 
-        self.logger.debug(f"[APP START] app_id={app_id} | mode={mode} | countries={len(countries)} | existing={current_count}")
+        self.logger.debug(
+            f"[APP START] app_id={app_id} | mode={mode} | countries={len(countries)} | existing={current_count}"
+        )
 
         collected_total = 0
         hit_existing_any = False
@@ -215,7 +237,7 @@ class AppStoreReviewsCollector:
         for country in countries:
             collected, hit_existing, has_more = self.collect_reviews_for_country(
                 app_id, country, per_country_quota, existing_ids,
-                stop_on_existing=initial_done  # 추가 수집시에만 기존 리뷰에서 중단
+                stop_on_existing=incremental_mode  # 추가 수집시에만 기존 리뷰에서 중단
             )
             collected_total += collected
             country_results[country] = collected
@@ -246,7 +268,7 @@ class AppStoreReviewsCollector:
                 extra_quota = min(extra_per_country, remaining - collected_total)
                 collected, hit_existing, _ = self.collect_reviews_for_country(
                     app_id, country, extra_quota, existing_ids,
-                    stop_on_existing=initial_done
+                    stop_on_existing=incremental_mode
                 )
                 collected_total += collected
                 country_results[country] = country_results.get(country, 0) + collected
@@ -263,7 +285,9 @@ class AppStoreReviewsCollector:
             app_id, PLATFORM,
             reviews_collected=True,
             reviews_count=new_total,
-            initial_review_done=(not initial_done and (collected_total > 0 or hit_existing_any))
+            initial_review_done=bool(
+                initial_done or has_existing_reviews or collected_total > 0 or hit_existing_any
+            )
         )
 
         self.stats['apps_processed'] += 1

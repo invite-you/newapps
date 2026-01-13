@@ -102,7 +102,7 @@ def release_connection(conn: Optional[psycopg.Connection]):
         return
     if DB_REUSE_CONNECTION:
         if not conn.closed and conn.info.transaction_status != TransactionStatus.IDLE:
-            DB_LOGGER.info("DB 트랜잭션 정리: rollback 수행")
+            DB_LOGGER.debug("DB 트랜잭션 정리: rollback 수행")
             conn.rollback()
         return
     if not conn.closed:

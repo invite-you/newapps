@@ -31,6 +31,7 @@ from scrapers.collection_utils import (
     select_primary_pair
 )
 from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
+from utils.network_binding import configure_network_binding
 from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'play_store'
@@ -42,6 +43,7 @@ class PlayStoreDetailsCollector:
                  session_id: Optional[str] = None):
         self.verbose = verbose
         self.logger = get_collection_logger('PlayStoreDetails', verbose)
+        configure_network_binding(logger=self.logger)
         self.error_tracker = error_tracker or ErrorTracker('play_store_details')
         # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
         self.session_id = session_id or generate_session_id()

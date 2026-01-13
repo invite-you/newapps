@@ -15,6 +15,7 @@ import time
 
 from config.language_country_priority import get_best_country_for_language
 from utils.logger import get_timestamped_logger
+from utils.network_binding import get_requests_session
 
 # User-Agent 설정
 USER_AGENT = "Mozilla/5.0 (compatible; SitemapBot/1.0)"
@@ -47,7 +48,7 @@ def fetch_url(
 
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            response = get_requests_session().get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
 
             content = response.content
@@ -91,7 +92,7 @@ def fetch_and_hash(
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        response = get_requests_session().get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
 
         raw_content = response.content

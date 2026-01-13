@@ -28,6 +28,8 @@ from scrapers.collection_utils import (
     select_primary_country
 )
 from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
+from utils.network_binding import configure_network_binding
+from utils.network_binding import get_requests_session
 from utils.error_tracker import ErrorTracker, ErrorStep
 
 PLATFORM = 'app_store'
@@ -40,6 +42,7 @@ class AppStoreDetailsCollector:
                  session_id: Optional[str] = None):
         self.verbose = verbose
         self.logger = get_collection_logger('AppStoreDetails', verbose)
+        configure_network_binding(logger=self.logger)
         self.error_tracker = error_tracker or ErrorTracker('app_store_details')
         # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
         self.session_id = session_id or generate_session_id()
@@ -67,7 +70,7 @@ class AppStoreDetailsCollector:
         url = f"{API_BASE_URL}?id={app_id}&country={country}"
 
         try:
-            response = requests.get(url, timeout=30)
+            response = get_requests_session().get(url, timeout=30)
             response.raise_for_status()
             data = response.json()
 
