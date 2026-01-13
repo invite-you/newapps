@@ -35,8 +35,8 @@ def _resolve_logger(logger: Optional[logging.Logger]) -> logging.Logger:
 
 def fetch_url(
     url: str,
-    max_retries: int = 3,
-    retry_delay: float = 2.0,
+    max_retries: int = 1,
+    retry_delay: float = 0.0,
     logger: Optional[logging.Logger] = None
 ) -> Optional[bytes]:
     """URL에서 데이터를 가져옵니다. gzip 압축된 경우 자동 해제."""
@@ -64,11 +64,8 @@ def fetch_url(
             return content
 
         except requests.exceptions.RequestException as e:
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))  # 지수 백오프
-            else:
-                resolved_logger.error(f"Error fetching {url}: {e}")
-                return None
+            resolved_logger.error(f"Error fetching {url}: {e}")
+            return None
 
     return None
 

@@ -23,8 +23,11 @@ _BOUND_SOURCE_ADDRESS: Optional[str] = None
 _REQUESTS_SESSION: Optional[requests.Session] = None
 _REQUESTS_SESSION_SOURCE: Optional[str] = None
 _URLOPEN_PATCHED = False
+_URLOPEN_SOURCE_ADDRESS: Optional[str] = None
 _ORIGINAL_HTTP_CONNECTION = http.client.HTTPConnection
 _ORIGINAL_HTTPS_CONNECTION = http.client.HTTPSConnection
+_ORIGINAL_HTTP_CONNECT = http.client.HTTPConnection.connect
+_ORIGINAL_HTTPS_CONNECT = http.client.HTTPSConnection.connect
 
 
 def _read_operstate(interface: str) -> Optional[str]:
@@ -71,6 +74,27 @@ def list_active_ipv4_interfaces() -> List[Tuple[str, str]]:
     return interfaces
 
 
+def probe_interface_url(interface: str, url: str, timeout: float = 10.0) -> bool:
+    source_address = _get_ipv4_for_interface(interface)
+    if not source_address:
+        return False
+    try:
+        import urllib3.util.connection as urllib3_connection
+
+        urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
+    except Exception:
+        pass
+    session = requests.Session()
+    adapter = _SourceAddressAdapter(source_address)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    try:
+        response = session.get(url, timeout=timeout)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+
 def select_store_interfaces(interfaces: List[Tuple[str, str]]) -> Tuple[Optional[str], Optional[str]]:
     if len(interfaces) < 2:
         return None, None
@@ -111,22 +135,22 @@ def get_requests_session() -> requests.Session:
 
 
 def _patch_urllib_source_address(source_address: str) -> None:
-    global _URLOPEN_PATCHED
+    global _URLOPEN_PATCHED, _URLOPEN_SOURCE_ADDRESS
+    _URLOPEN_SOURCE_ADDRESS = source_address
     if _URLOPEN_PATCHED:
         return
+    def _http_connect(self):
+        if _URLOPEN_SOURCE_ADDRESS:
+            self.source_address = (_URLOPEN_SOURCE_ADDRESS, 0)
+        return _ORIGINAL_HTTP_CONNECT(self)
 
-    class BoundHTTPConnection(_ORIGINAL_HTTP_CONNECTION):
-        def __init__(self, *args, **kwargs):
-            kwargs["source_address"] = (source_address, 0)
-            super().__init__(*args, **kwargs)
+    def _https_connect(self):
+        if _URLOPEN_SOURCE_ADDRESS:
+            self.source_address = (_URLOPEN_SOURCE_ADDRESS, 0)
+        return _ORIGINAL_HTTPS_CONNECT(self)
 
-    class BoundHTTPSConnection(_ORIGINAL_HTTPS_CONNECTION):
-        def __init__(self, *args, **kwargs):
-            kwargs["source_address"] = (source_address, 0)
-            super().__init__(*args, **kwargs)
-
-    http.client.HTTPConnection = BoundHTTPConnection
-    http.client.HTTPSConnection = BoundHTTPSConnection
+    http.client.HTTPConnection.connect = _http_connect
+    http.client.HTTPSConnection.connect = _https_connect
     _URLOPEN_PATCHED = True
 
 
@@ -158,6 +182,13 @@ def configure_network_binding(
     _BOUND_SOURCE_ADDRESS = resolved_source
     _get_or_create_requests_session(_BOUND_SOURCE_ADDRESS)
     _patch_urllib_source_address(_BOUND_SOURCE_ADDRESS)
+    try:
+        import urllib3.util.connection as urllib3_connection
+
+        urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
+    except Exception:
+        if logger:
+            logger.warning("[WARN] failed to force IPv4 for urllib3")
     if logger:
         logger.info(f"[INFO] network binding enabled | source_address={_BOUND_SOURCE_ADDRESS}")
     return _BOUND_SOURCE_ADDRESS

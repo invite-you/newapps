@@ -15,6 +15,7 @@ import sys
 import os
 import argparse
 import time
+import signal
 import subprocess
 from datetime import datetime
 from typing import Optional
@@ -23,9 +24,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database.app_details_db import init_database, get_stats, generate_session_id
 from utils.logger import get_timestamped_logger
-from utils.network_binding import list_active_ipv4_interfaces, select_store_interfaces
+from utils.network_binding import list_active_ipv4_interfaces, select_store_interfaces, probe_interface_url
 
 LOG_FILE_PREFIX = "collect_app_details"
+
+
+def _terminate_process_group(proc: subprocess.Popen, logger, label: str) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=10)
+        logger.warning(f"[WARN] {label} terminated with SIGTERM")
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        logger.warning(f"[WARN] {label} terminated with SIGKILL")
+    except Exception as exc:
+        logger.warning(f"[WARN] {label} termination failed: {exc}")
 
 
 def print_stats(logger):
@@ -156,6 +171,18 @@ def main():
         interfaces = list_active_ipv4_interfaces()
         if collect_app_store and collect_play_store and len(interfaces) >= 2:
             app_iface, play_iface = select_store_interfaces(interfaces)
+            app_iface_ok = app_iface and probe_interface_url(
+                app_iface, "https://itunes.apple.com/lookup?id=284882215&country=US"
+            )
+            play_iface_ok = play_iface and probe_interface_url(
+                play_iface, "https://play.google.com/sitemaps/sitemaps-index-0.xml"
+            )
+            if not app_iface_ok:
+                logger.warning(f"[WARN] App Store interface healthcheck failed: {app_iface}")
+                app_iface = None
+            if not play_iface_ok:
+                logger.warning(f"[WARN] Play Store interface healthcheck failed: {play_iface}")
+                play_iface = None
             if app_iface and play_iface:
                 logger.info(
                     "[INFO] parallel app collection enabled | "
@@ -184,22 +211,40 @@ def main():
                 app_env["SCRAPER_INTERFACE"] = app_iface
                 play_env["SCRAPER_INTERFACE"] = play_iface
 
-                app_proc = subprocess.Popen(app_args, env=app_env, cwd=os.path.dirname(os.path.abspath(__file__)))
-                play_proc = subprocess.Popen(play_args, env=play_env, cwd=os.path.dirname(os.path.abspath(__file__)))
+                app_proc = subprocess.Popen(
+                    app_args,
+                    env=app_env,
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                    start_new_session=True,
+                )
+                play_proc = subprocess.Popen(
+                    play_args,
+                    env=play_env,
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                    start_new_session=True,
+                )
 
-                app_code = app_proc.wait()
-                play_code = play_proc.wait()
-                if app_code != 0 or play_code != 0:
-                    logger.error(
-                        "[ERROR] parallel app collection failed | "
-                        f"app_store={app_code} | play_store={play_code}"
-                    )
-                    elapsed = time.perf_counter() - start_perf
-                    logger.info(
-                        f"[STEP END] collect_app_details | {datetime.now().isoformat()} | "
-                        f"elapsed={elapsed:.2f}s | status=FAIL"
-                    )
-                    return 1
+                try:
+                    app_code = app_proc.wait()
+                    play_code = play_proc.wait()
+                    if app_code != 0 or play_code != 0:
+                        logger.error(
+                            "[ERROR] parallel app collection failed | "
+                            f"app_store={app_code} | play_store={play_code}"
+                        )
+                        _terminate_process_group(app_proc, logger, "app_store")
+                        _terminate_process_group(play_proc, logger, "play_store")
+                        elapsed = time.perf_counter() - start_perf
+                        logger.info(
+                            f"[STEP END] collect_app_details | {datetime.now().isoformat()} | "
+                            f"elapsed={elapsed:.2f}s | status=FAIL"
+                        )
+                        return 1
+                except KeyboardInterrupt:
+                    logger.warning("[WARN] interrupt received, terminating child processes")
+                    _terminate_process_group(app_proc, logger, "app_store")
+                    _terminate_process_group(play_proc, logger, "play_store")
+                    raise
                 logger.info("[INFO] parallel app collection finished successfully")
                 elapsed = time.perf_counter() - start_perf
                 logger.info(
@@ -207,6 +252,7 @@ def main():
                     f"elapsed={elapsed:.2f}s | status=OK"
                 )
                 return 0
+            logger.info("[INFO] parallel app collection disabled: interface healthcheck failed")
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"App Details Collection Started at {start_ts}")

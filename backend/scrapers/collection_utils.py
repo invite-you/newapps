@@ -2,15 +2,97 @@
 수집기 공통 유틸리티
 앱 로컬라이제이션 쌍 처리 및 기본 선택 로직을 제공합니다.
 """
+import os
 from typing import List, Tuple, Optional
 
 from database.sitemap_apps_db import (
     get_connection as get_sitemap_connection,
     release_connection as release_sitemap_connection,
 )
+from config.language_country_priority import (
+    select_best_pairs_for_collection,
+    sort_language_country_pairs,
+)
 
 DEFAULT_LANGUAGE = "en"
 DEFAULT_COUNTRY = "US"
+DEFAULT_MAX_PAIRS = 10
+DEFAULT_MAX_LANGUAGES = 10
+NETWORK_FAILURE_REASONS = frozenset({
+    "timeout",
+    "network_error",
+    "request_error",
+    "rate_limited",
+    "server_error",
+    "scraper_error",
+    "http_error",
+})
+
+
+class CollectionErrorPolicy:
+    """수집 실패 사유별 중단 여부를 결정합니다."""
+
+    def __init__(self, network_reasons: Optional[set] = None):
+        self.network_reasons = network_reasons or NETWORK_FAILURE_REASONS
+
+    @staticmethod
+    def _base_reason(reason: Optional[str]) -> Optional[str]:
+        if not reason:
+            return None
+        return reason.split(":")[0] if ":" in reason else reason
+
+    def should_abort(self, reason: Optional[str]) -> bool:
+        base = self._base_reason(reason)
+        if not base:
+            return False
+        return base in self.network_reasons
+
+
+class LocalePairPolicy:
+    """언어/국가 쌍 선택 정책을 관리합니다."""
+
+    def __init__(self, max_languages: int, max_pairs: int):
+        self.max_languages = max_languages
+        self.max_pairs = max_pairs
+
+    @classmethod
+    def from_env(cls) -> "LocalePairPolicy":
+        max_languages = int(os.getenv("APP_LOCALE_MAX_LANGUAGES", str(DEFAULT_MAX_LANGUAGES)))
+        max_pairs = int(os.getenv("APP_LOCALE_MAX_PAIRS", str(DEFAULT_MAX_PAIRS)))
+        return cls(max_languages=max_languages, max_pairs=max_pairs)
+
+    def select_pairs(
+        self,
+        pairs: List[Tuple[str, str]],
+        country_case: str = "upper",
+        default_pair: Optional[Tuple[str, str]] = None,
+    ) -> List[Tuple[str, str]]:
+        if not pairs:
+            return [default_pair] if default_pair else []
+
+        normalized = [
+            (lang.lower(), country.upper())
+            for lang, country in pairs
+            if lang and country
+        ]
+        if not normalized:
+            return [default_pair] if default_pair else []
+
+        languages = {lang.split("-")[0] for lang, _ in normalized}
+        max_languages = self.max_languages if self.max_languages > 0 else len(languages)
+        max_languages = min(max_languages, len(languages)) if languages else 0
+
+        selected = select_best_pairs_for_collection(
+            normalized,
+            max_languages=max_languages or len(languages),
+        )
+        prioritized = sort_language_country_pairs(selected)
+        if self.max_pairs > 0:
+            prioritized = prioritized[: self.max_pairs]
+
+        if country_case == "lower":
+            return [(lang, country.lower()) for lang, country in prioritized]
+        return [(lang, country.upper()) for lang, country in prioritized]
 
 
 def _normalize_country(country: str, target_case: str) -> str:

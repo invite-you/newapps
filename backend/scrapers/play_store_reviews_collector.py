@@ -19,19 +19,18 @@ from database.app_details_db import (
     is_app_blocked, get_blocked_app_ids, get_abandoned_apps_to_skip,
     generate_session_id
 )
-from database.sitemap_apps_db import (
-    get_connection as get_sitemap_connection,
-    release_connection as release_sitemap_connection,
-)
 from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
 from utils.network_binding import configure_network_binding
 from utils.error_tracker import ErrorTracker, ErrorStep
-from config.language_country_priority import select_best_pairs_for_collection, sort_language_country_pairs
+from scrapers.collection_utils import (
+    get_app_language_country_pairs,
+    LocalePairPolicy,
+    CollectionErrorPolicy,
+)
 
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
 MAX_REVIEWS_TOTAL = int(os.getenv("APP_REVIEWS_MAX_PER_RUN", "50000"))  # 실행당 최대 수집 리뷰 수
-MAX_LOCALE_PAIRS = int(os.getenv("APP_REVIEWS_MAX_PAIRS", "0"))  # 0이면 제한 없음
 BATCH_SIZE = 100  # 한 번에 가져올 리뷰 수
 
 
@@ -44,6 +43,8 @@ class PlayStoreReviewsCollector:
         self.error_tracker = error_tracker or ErrorTracker('play_store_reviews')
         # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
         self.session_id = session_id or generate_session_id()
+        self.locale_policy = LocalePairPolicy.from_env()
+        self.error_policy = CollectionErrorPolicy()
         self.stats = {
             'apps_processed': 0,
             'apps_skipped': 0,
@@ -56,32 +57,19 @@ class PlayStoreReviewsCollector:
         if self.verbose:
             self.logger.info(message)
 
-    def _prioritize_pairs(self, pairs: List[tuple]) -> List[tuple]:
-        """언어-국가 쌍을 우선순위와 제한에 맞게 정렬/축소합니다."""
-        if not pairs:
-            return [('en', 'us')]
-
-        normalized = [(lang.lower(), country.upper()) for lang, country in pairs]
-        max_languages = len({lang.split('-')[0] for lang, _ in normalized})
-        selected = select_best_pairs_for_collection(normalized, max_languages=max_languages)
-        prioritized = sort_language_country_pairs(selected)
-        if MAX_LOCALE_PAIRS > 0:
-            prioritized = prioritized[:MAX_LOCALE_PAIRS]
-        return [(lang, country.lower()) for lang, country in prioritized]
-
     def get_app_language_country_pairs(self, app_id: str) -> List[tuple]:
         """sitemap에서 앱의 (language, country) 쌍을 가져옵니다."""
-        conn = get_sitemap_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT DISTINCT language, country FROM app_localizations
-                    WHERE app_id = %s AND platform = %s
-                """, (app_id, PLATFORM))
-                pairs = [(row['language'], row['country']) for row in cursor.fetchall()]
-                return self._prioritize_pairs(pairs)
-        finally:
-            release_sitemap_connection(conn)
+        pairs = get_app_language_country_pairs(
+            app_id,
+            PLATFORM,
+            normalize_country_case="upper",
+            default_pair=("en", "US"),
+        )
+        return self.locale_policy.select_pairs(
+            pairs,
+            country_case="lower",
+            default_pair=("en", "us"),
+        )
 
     def fetch_reviews(self, app_id: str, lang: str = 'en', country: str = 'us',
                       count: int = BATCH_SIZE, continuation_token: str = None) -> tuple:
@@ -95,12 +83,12 @@ class PlayStoreReviewsCollector:
                 count=count,
                 continuation_token=continuation_token
             )
-            return result, token
+            return result, token, None
         except NotFoundError:
-            return [], None
+            return [], None, "not_found"
         except Exception as e:
             self.logger.warning(format_warning_log("fetch_error", f"app_id={app_id}", str(e)))
-            return [], None
+            return [], None, "network_error"
 
     def parse_review(self, data: Dict, app_id: str, country: str, language: str) -> Dict:
         """리뷰 데이터를 DB 형식으로 변환합니다."""
@@ -137,11 +125,14 @@ class PlayStoreReviewsCollector:
         continuation_token = None
 
         while collected < quota:
-            result, continuation_token = self.fetch_reviews(
+            result, continuation_token, error_reason = self.fetch_reviews(
                 app_id, lang=lang, country=country,
                 count=min(BATCH_SIZE, quota - collected),
                 continuation_token=continuation_token
             )
+            if error_reason and self.error_policy.should_abort(error_reason):
+                self.stats['errors'] += 1
+                return collected, hit_existing, has_more, True
 
             if not result:
                 break  # 더 이상 리뷰 없음
@@ -182,7 +173,7 @@ class PlayStoreReviewsCollector:
 
             time.sleep(REQUEST_DELAY)
 
-        return collected, hit_existing, has_more
+        return collected, hit_existing, has_more, False
 
     def collect_reviews_for_app(self, app_id: str) -> int:
         """단일 앱의 리뷰를 수집합니다. 국가별 균등 분배 + 잔여 분배."""
@@ -230,10 +221,15 @@ class PlayStoreReviewsCollector:
 
         # === 1차: 쌍별 균등 분배 ===
         for lang, country in pairs:
-            collected, hit_existing, has_more = self.collect_reviews_for_pair(
+            collected, hit_existing, has_more, aborted = self.collect_reviews_for_pair(
                 app_id, lang, country, per_pair_quota, existing_ids,
                 stop_on_existing=incremental_mode  # 추가 수집시에만 기존 리뷰에서 중단
             )
+            if aborted:
+                self.logger.warning(format_warning_log(
+                    "network_abort", f"app_id={app_id}", "network_error"
+                ))
+                return 0
             collected_total += collected
             pair_key = f"{lang}-{country}"
             pair_results[pair_key] = collected
@@ -262,10 +258,15 @@ class PlayStoreReviewsCollector:
                     break
 
                 extra_quota = min(extra_per_pair, remaining - collected_total)
-                collected, hit_existing, _ = self.collect_reviews_for_pair(
+                collected, hit_existing, _, aborted = self.collect_reviews_for_pair(
                     app_id, lang, country, extra_quota, existing_ids,
                     stop_on_existing=incremental_mode
                 )
+                if aborted:
+                    self.logger.warning(format_warning_log(
+                        "network_abort", f"app_id={app_id}", "network_error"
+                    ))
+                    return collected_total
                 collected_total += collected
                 pair_key = f"{lang}-{country}"
                 pair_results[pair_key] = pair_results.get(pair_key, 0) + collected

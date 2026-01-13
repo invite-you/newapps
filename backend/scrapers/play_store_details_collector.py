@@ -25,10 +25,11 @@ from database.sitemap_apps_db import (
     get_connection as get_sitemap_connection,
     release_connection as release_sitemap_connection,
 )
-from config.language_country_priority import select_best_pairs_for_collection
 from scrapers.collection_utils import (
     get_app_language_country_pairs,
-    select_primary_pair
+    select_primary_pair,
+    LocalePairPolicy,
+    CollectionErrorPolicy,
 )
 from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
 from utils.network_binding import configure_network_binding
@@ -47,6 +48,8 @@ class PlayStoreDetailsCollector:
         self.error_tracker = error_tracker or ErrorTracker('play_store_details')
         # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
         self.session_id = session_id or generate_session_id()
+        self.locale_policy = LocalePairPolicy.from_env()
+        self.error_policy = CollectionErrorPolicy()
         self.stats = {
             'apps_processed': 0,
             'apps_skipped_failed': 0,
@@ -169,7 +172,11 @@ class PlayStoreDetailsCollector:
 
         # 우선순위에 따라 최적의 (language, country) 쌍 선택
         # 각 언어당 가장 적합한 국가를 선택 (예: fr-FR > fr-CA)
-        optimized_pairs = select_best_pairs_for_collection(pairs, max_languages=10)
+        optimized_pairs = self.locale_policy.select_pairs(
+            pairs,
+            country_case="upper",
+            default_pair=("en", "US"),
+        )
 
         # 기본 정보 수집용 쌍 결정 (영어 US 우선)
         primary_pair = select_primary_pair(
@@ -182,6 +189,15 @@ class PlayStoreDetailsCollector:
         data, last_error = self.fetch_app_info(app_id, lang=primary_lang, country=primary_country.lower())
 
         if not data:
+            if self.error_policy.should_abort(last_error):
+                reason = last_error or 'unknown'
+                failure_info = record_app_failure(app_id, PLATFORM, reason, session_id=self.session_id)
+                self.stats['apps_not_found'] += 1
+                self.logger.warning(format_warning_log(
+                    "fetch_failed", f"app_id={app_id}",
+                    f"reason={reason} | permanent={failure_info['is_permanent']} | fail_count={failure_info['consecutive_fail_count']}"
+                ))
+                return False
             # 다른 쌍으로 재시도 (우선순위 순서대로)
             for lang, country in optimized_pairs:
                 if (lang, country) != primary_pair:

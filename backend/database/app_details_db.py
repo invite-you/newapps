@@ -36,6 +36,7 @@ PARTITION_COUNT = 64
 APP_REVIEWS_PARTITION_COUNT = 64
 LOG_FILE_PREFIX = "app_details_db"
 DB_LOGGER = get_timestamped_logger("app_details_db", file_prefix=LOG_FILE_PREFIX)
+INIT_DB_LOCK_ID = 915872341
 
 # 비교 제외 필드
 EXCLUDE_COMPARE_FIELDS = {'id', 'recorded_at'}
@@ -311,313 +312,317 @@ def init_database():
     """DB 테이블을 초기화합니다."""
     conn = get_connection()
     cursor = conn.cursor()
-
-    # apps: 앱 메타데이터 (변경 시에만 누적)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS apps (
-            id BIGSERIAL,
-            app_id TEXT NOT NULL,
-            platform TEXT NOT NULL,             -- 'app_store' or 'play_store'
-            bundle_id TEXT,
-            version TEXT,
-            developer TEXT,
-            developer_id TEXT,
-            developer_email TEXT,
-            developer_website TEXT,
-            icon_url TEXT,
-            header_image TEXT,
-            screenshots TEXT,                   -- JSON array
-            price REAL,
-            currency TEXT,
-            free BOOLEAN,
-            has_iap BOOLEAN,
-            category_id TEXT,
-            genre_id TEXT,
-            genre_name TEXT,                    -- 장르명 (현지화)
-            content_rating TEXT,
-            content_rating_description TEXT,
-            min_os_version TEXT,
-            file_size BIGINT,
-            supported_devices TEXT,             -- JSON array
-            release_date TEXT,
-            updated_date TEXT,
-            privacy_policy_url TEXT,
-            recorded_at TEXT NOT NULL,
-            PRIMARY KEY (app_id, id)
-        ) PARTITION BY HASH (app_id)
-    """)
-
-    for partition_index in range(PARTITION_COUNT):
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS apps_p{partition_index}
-            PARTITION OF apps
-            FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+    cursor.execute("SELECT pg_advisory_lock(%s)", (INIT_DB_LOCK_ID,))
+    try:
+        # apps: 앱 메타데이터 (변경 시에만 누적)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS apps (
+                id BIGSERIAL,
+                app_id TEXT NOT NULL,
+                platform TEXT NOT NULL,             -- 'app_store' or 'play_store'
+                bundle_id TEXT,
+                version TEXT,
+                developer TEXT,
+                developer_id TEXT,
+                developer_email TEXT,
+                developer_website TEXT,
+                icon_url TEXT,
+                header_image TEXT,
+                screenshots TEXT,                   -- JSON array
+                price REAL,
+                currency TEXT,
+                free BOOLEAN,
+                has_iap BOOLEAN,
+                category_id TEXT,
+                genre_id TEXT,
+                genre_name TEXT,                    -- 장르명 (현지화)
+                content_rating TEXT,
+                content_rating_description TEXT,
+                min_os_version TEXT,
+                file_size BIGINT,
+                supported_devices TEXT,             -- JSON array
+                release_date TEXT,
+                updated_date TEXT,
+                privacy_policy_url TEXT,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (app_id, id)
+            ) PARTITION BY HASH (app_id)
         """)
 
-    # apps_localized: 다국어 텍스트 (변경 시에만 누적)
-    # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS apps_localized (
-            id BIGSERIAL,
-            app_id TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            language TEXT NOT NULL,
-            title TEXT,
-            summary TEXT,
-            description TEXT,
-            release_notes TEXT,
-            recorded_at TEXT NOT NULL,
-            PRIMARY KEY (app_id, id)
-        ) PARTITION BY HASH (app_id)
-    """)
+        for partition_index in range(PARTITION_COUNT):
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS apps_p{partition_index}
+                PARTITION OF apps
+                FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+            """)
 
-    for partition_index in range(PARTITION_COUNT):
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS apps_localized_p{partition_index}
-            PARTITION OF apps_localized
-            FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+        # apps_localized: 다국어 텍스트 (변경 시에만 누적)
+        # 최적화: title+description이 기준 언어와 동일하면 저장하지 않음
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS apps_localized (
+                id BIGSERIAL,
+                app_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                language TEXT NOT NULL,
+                title TEXT,
+                summary TEXT,
+                description TEXT,
+                release_notes TEXT,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (app_id, id)
+            ) PARTITION BY HASH (app_id)
         """)
 
-    # apps_metrics: 수치 데이터 (변경 시에만 누적)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS apps_metrics (
-            id BIGSERIAL,
-            app_id TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            score REAL,
-            ratings INTEGER,
-            reviews_count INTEGER,
-            installs TEXT,                      -- "100,000+" 형태
-            installs_exact BIGINT,              -- 정확한 수치 (Play Store), 68억+ 앱 지원
-            histogram TEXT,                     -- JSON array [1점, 2점, 3점, 4점, 5점]
-            recorded_at TEXT NOT NULL,
-            PRIMARY KEY (app_id, id)
-        ) PARTITION BY HASH (app_id)
-    """)
+        for partition_index in range(PARTITION_COUNT):
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS apps_localized_p{partition_index}
+                PARTITION OF apps_localized
+                FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+            """)
 
-    for partition_index in range(PARTITION_COUNT):
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS apps_metrics_p{partition_index}
-            PARTITION OF apps_metrics
-            FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+        # apps_metrics: 수치 데이터 (변경 시에만 누적)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS apps_metrics (
+                id BIGSERIAL,
+                app_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                score REAL,
+                ratings INTEGER,
+                reviews_count INTEGER,
+                installs TEXT,                      -- "100,000+" 형태
+                installs_exact BIGINT,              -- 정확한 수치 (Play Store), 68억+ 앱 지원
+                histogram TEXT,                     -- JSON array [1점, 2점, 3점, 4점, 5점]
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (app_id, id)
+            ) PARTITION BY HASH (app_id)
         """)
 
-    # app_reviews: 리뷰 (실행당 최대 20000건 수집, 이후 누적)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS app_reviews (
-            id BIGSERIAL,
-            app_id TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            review_id TEXT NOT NULL,            -- 외부 리뷰 ID
-            country TEXT,
-            language TEXT,
-            user_name TEXT,
-            user_image TEXT,
-            score INTEGER,
-            title TEXT,                         -- App Store만
-            content TEXT,
-            thumbs_up_count INTEGER,
-            app_version TEXT,
-            reviewed_at TEXT,
-            reply_content TEXT,
-            replied_at TEXT,
-            recorded_at TEXT NOT NULL,
-            UNIQUE(app_id, platform, review_id),
-            PRIMARY KEY (app_id, id)
-        ) PARTITION BY HASH (app_id)
-    """)
+        for partition_index in range(PARTITION_COUNT):
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS apps_metrics_p{partition_index}
+                PARTITION OF apps_metrics
+                FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+            """)
 
-    for remainder in range(APP_REVIEWS_PARTITION_COUNT):
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS app_reviews_p{remainder}
-            PARTITION OF app_reviews
-            FOR VALUES WITH (MODULUS {APP_REVIEWS_PARTITION_COUNT}, REMAINDER {remainder})
+        # app_reviews: 리뷰 (실행당 최대 20000건 수집, 이후 누적)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_reviews (
+                id BIGSERIAL,
+                app_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                review_id TEXT NOT NULL,            -- 외부 리뷰 ID
+                country TEXT,
+                language TEXT,
+                user_name TEXT,
+                user_image TEXT,
+                score INTEGER,
+                title TEXT,                         -- App Store만
+                content TEXT,
+                thumbs_up_count INTEGER,
+                app_version TEXT,
+                reviewed_at TEXT,
+                reply_content TEXT,
+                replied_at TEXT,
+                recorded_at TEXT NOT NULL,
+                UNIQUE(app_id, platform, review_id),
+                PRIMARY KEY (app_id, id)
+            ) PARTITION BY HASH (app_id)
         """)
 
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS app_reviews_latest_idx
-        ON app_reviews (app_id, platform, reviewed_at DESC)
-    """)
+        for remainder in range(APP_REVIEWS_PARTITION_COUNT):
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS app_reviews_p{remainder}
+                PARTITION OF app_reviews
+                FOR VALUES WITH (MODULUS {APP_REVIEWS_PARTITION_COUNT}, REMAINDER {remainder})
+            """)
 
-    # failed_apps: 실패 앱 관리 (일시적/영구적 실패 구분)
-    # 실행 횟수 기반 관리: 같은 세션에서는 재시도하지 않고,
-    # N번 연속 실패하면 영구 실패로 처리
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS failed_apps (
-            id BIGSERIAL PRIMARY KEY,
-            app_id TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            reason TEXT,                        -- not_found, removed, timeout, rate_limited, etc.
-            failed_at TEXT NOT NULL,
-            is_permanent BOOLEAN DEFAULT FALSE, -- 영구 실패 여부
-            consecutive_fail_count INTEGER DEFAULT 1,  -- 연속 실패 실행 횟수
-            last_session_id TEXT,               -- 마지막 실패 세션 ID
-            last_error_detail TEXT,             -- 상세 에러 메시지
-            UNIQUE(app_id, platform)
-        )
-    """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS app_reviews_latest_idx
+            ON app_reviews (app_id, platform, reviewed_at DESC)
+        """)
 
-    # 기존 테이블에 컬럼이 없으면 추가 (마이그레이션)
-    cursor.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'failed_apps' AND column_name = 'is_permanent'
-            ) THEN
-                ALTER TABLE failed_apps ADD COLUMN is_permanent BOOLEAN DEFAULT FALSE;
-            END IF;
-            -- retry_count를 consecutive_fail_count로 이름 변경 (기존 데이터 보존)
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'failed_apps' AND column_name = 'consecutive_fail_count'
-            ) THEN
-                IF EXISTS (
+        # failed_apps: 실패 앱 관리 (일시적/영구적 실패 구분)
+        # 실행 횟수 기반 관리: 같은 세션에서는 재시도하지 않고,
+        # N번 연속 실패하면 영구 실패로 처리
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS failed_apps (
+                id BIGSERIAL PRIMARY KEY,
+                app_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                reason TEXT,                        -- not_found, removed, timeout, rate_limited, etc.
+                failed_at TEXT NOT NULL,
+                is_permanent BOOLEAN DEFAULT FALSE, -- 영구 실패 여부
+                consecutive_fail_count INTEGER DEFAULT 1,  -- 연속 실패 실행 횟수
+                last_session_id TEXT,               -- 마지막 실패 세션 ID
+                last_error_detail TEXT,             -- 상세 에러 메시지
+                UNIQUE(app_id, platform)
+            )
+        """)
+
+        # 기존 테이블에 컬럼이 없으면 추가 (마이그레이션)
+        cursor.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'failed_apps' AND column_name = 'retry_count'
+                    WHERE table_name = 'failed_apps' AND column_name = 'is_permanent'
                 ) THEN
-                    ALTER TABLE failed_apps RENAME COLUMN retry_count TO consecutive_fail_count;
-                ELSE
-                    ALTER TABLE failed_apps ADD COLUMN consecutive_fail_count INTEGER DEFAULT 1;
+                    ALTER TABLE failed_apps ADD COLUMN is_permanent BOOLEAN DEFAULT FALSE;
                 END IF;
-            END IF;
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'failed_apps' AND column_name = 'last_session_id'
-            ) THEN
-                ALTER TABLE failed_apps ADD COLUMN last_session_id TEXT;
-            END IF;
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'failed_apps' AND column_name = 'last_error_detail'
-            ) THEN
-                ALTER TABLE failed_apps ADD COLUMN last_error_detail TEXT;
-            END IF;
-        END $$;
-    """)
-
-    # collection_status: 수집 상태 추적
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS collection_status (
-            id BIGSERIAL,
-            app_id TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            details_collected_at TEXT,          -- 상세정보 마지막 수집 시각
-            reviews_collected_at TEXT,          -- 리뷰 마지막 수집 시각
-            reviews_total_count INTEGER DEFAULT 0,  -- 현재 수집된 총 리뷰 수
-            initial_review_done INTEGER DEFAULT 0,  -- 최초 수집 완료 여부 (이후 중복 리뷰 발견 시 중단)
-            UNIQUE(app_id, platform),
-            PRIMARY KEY (app_id, id)
-        ) PARTITION BY HASH (app_id)
-    """)
-
-    for partition_index in range(PARTITION_COUNT):
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS collection_status_p{partition_index}
-            PARTITION OF collection_status
-            FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+                -- retry_count를 consecutive_fail_count로 이름 변경 (기존 데이터 보존)
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'failed_apps' AND column_name = 'consecutive_fail_count'
+                ) THEN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'failed_apps' AND column_name = 'retry_count'
+                    ) THEN
+                        ALTER TABLE failed_apps RENAME COLUMN retry_count TO consecutive_fail_count;
+                    ELSE
+                        ALTER TABLE failed_apps ADD COLUMN consecutive_fail_count INTEGER DEFAULT 1;
+                    END IF;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'failed_apps' AND column_name = 'last_session_id'
+                ) THEN
+                    ALTER TABLE failed_apps ADD COLUMN last_session_id TEXT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'failed_apps' AND column_name = 'last_error_detail'
+                ) THEN
+                    ALTER TABLE failed_apps ADD COLUMN last_error_detail TEXT;
+                END IF;
+            END $$;
         """)
 
-    comment_sqls = [
-        "COMMENT ON TABLE apps IS '앱 스토어/플레이 스토어 메타데이터의 변경 이력을 누적 저장하는 테이블로, 수집 원본 응답을 기록해 추후 비교/분석에 사용한다.'",
-        "COMMENT ON COLUMN apps.id IS '내부 기본키로 각 수집 기록을 식별하며 조인/추적에 사용한다. BIGSERIAL 자동 생성이므로 NULL을 허용하지 않는다.'",
-        "COMMENT ON COLUMN apps.app_id IS '스토어에서 제공하는 앱 고유 식별자(앱스토어 numeric ID 또는 플레이스토어 패키지명)로 수집 응답에서 가져오며 모든 조회의 기준 키이므로 NULL 불가.'",
-        "COMMENT ON COLUMN apps.platform IS 'app_store 또는 play_store 구분값으로 수집 파이프라인의 소스 식별에 사용하며 필수 필드이므로 NULL 불가.'",
-        "COMMENT ON COLUMN apps.bundle_id IS '앱 번들/패키지 식별자(주로 iOS bundle id)로 원본 응답에 존재할 때만 사용하며 일부 스토어에서 미제공될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.version IS '스토어에 표시되는 앱 버전 문자열로 업데이트 이력 비교에 사용하며 원본에 없을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.developer IS '개발사/개발자명으로 스토어 응답에서 수집되어 화면 표시/필터링에 사용하며 미제공 가능성이 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.developer_id IS '스토어의 개발자 계정/퍼블리셔 식별자이며 개발자 기준 집계에 사용하지만 일부 스토어에서 제공되지 않아 NULL 허용.'",
-        "COMMENT ON COLUMN apps.developer_email IS '개발자 연락 이메일로 스토어 메타데이터에서 수집되며 연락처 표시/검증에 사용하나 미기재 가능성이 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.developer_website IS '개발자 공식 웹사이트 URL로 스토어 응답에서 수집되며 외부 링크 제공에 사용하고 선택 항목이라 NULL 허용.'",
-        "COMMENT ON COLUMN apps.icon_url IS '앱 아이콘 이미지 URL로 스토어 응답에서 수집되며 UI 표시용으로 사용하나 간혹 누락될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.header_image IS '앱 상단 헤더 이미지 URL(주로 플레이스토어)로 수집 응답에서 가져오며 없는 경우가 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.screenshots IS '스크린샷 URL 목록(JSON 배열)으로 원본 응답에서 수집하여 UI 갤러리 표시에 사용하며 미제공 시 NULL 허용.'",
-        "COMMENT ON COLUMN apps.price IS '현재 가격(숫자)으로 스토어 응답에서 수집하여 결제/가격 분석에 사용하며 무료만 제공되거나 누락될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.currency IS '가격 통화 코드로 스토어 응답에서 수집되며 가격 표시/환산에 사용하나 가격 정보가 없으면 NULL 허용.'",
-        "COMMENT ON COLUMN apps.free IS '무료 여부 플래그로 스토어 응답에서 추출하며 가격 분석에 사용하고 일부 응답에서 미제공될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.has_iap IS '인앱결제 존재 여부 플래그로 스토어 응답에서 수집해 과금 분석에 사용하지만 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.category_id IS '스토어 카테고리 ID로 원본 응답에서 수집되어 분류/필터링에 사용하며 스토어별 제공 방식 차이로 NULL 허용.'",
-        "COMMENT ON COLUMN apps.genre_id IS '장르 ID로 스토어 응답에서 수집되어 분류에 사용하며 미제공 가능성이 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.genre_name IS '현지화된 장르명 문자열로 스토어 응답에서 수집되어 UI 표시/검색에 사용하며 없을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.content_rating IS '연령 등급 코드로 스토어에서 제공되며 연령 제한 표시/정책 분석에 사용하지만 일부 앱은 미제공되어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.content_rating_description IS '연령 등급 설명 문구로 스토어 응답에서 수집되며 상세 표시/분석에 사용하고 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.min_os_version IS '지원 최소 OS 버전으로 스토어 메타데이터에서 수집되어 호환성 분석에 사용하나 누락될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.file_size IS '설치 파일 크기(바이트)로 스토어 응답에서 수집되어 용량 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.supported_devices IS '지원 기기 목록(JSON 배열)으로 스토어 응답에서 수집되며 호환성 표시/분석에 사용하고 미제공 시 NULL 허용.'",
-        "COMMENT ON COLUMN apps.release_date IS '최초 출시일로 스토어 응답에서 수집되어 연혁 분석에 사용하며 오래된 앱은 누락될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.updated_date IS '마지막 업데이트 일자로 스토어 응답에서 수집되어 버려진 앱 판단 등에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.privacy_policy_url IS '개인정보처리방침 URL로 스토어 응답에서 수집되어 법적 링크 제공에 사용하며 미기재 가능성이 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps.recorded_at IS '본 레코드를 수집/기록한 시각으로 변경 이력 정렬에 사용되며 시스템에서 항상 기록하므로 NULL 불가.'",
-        "COMMENT ON TABLE apps_localized IS '앱의 다국어 텍스트(제목/설명/릴리즈 노트) 변경 이력을 누적 저장하는 테이블로, 현지화 비교 및 UI 표시용으로 사용한다.'",
-        "COMMENT ON COLUMN apps_localized.id IS '내부 기본키로 다국어 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
-        "COMMENT ON COLUMN apps_localized.app_id IS '앱 고유 식별자로 원본 스토어 응답에서 수집되며 앱별 로컬라이즈 이력 조회에 필수이므로 NULL 불가.'",
-        "COMMENT ON COLUMN apps_localized.platform IS '스토어 구분값(app_store/play_store)으로 수집 소스를 명확히 하기 위해 사용하며 NULL 불가.'",
-        "COMMENT ON COLUMN apps_localized.language IS '언어 코드(예: en-US, ko-KR)로 스토어 응답에서 수집되어 언어별 표시/비교에 사용하며 NULL 불가.'",
-        "COMMENT ON COLUMN apps_localized.title IS '로컬라이즈된 앱 제목으로 스토어 응답에서 수집되어 UI 표시에 사용하고 일부 언어에서 누락될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_localized.summary IS '로컬라이즈된 요약 문구로 스토어 응답에서 수집되어 목록 표시에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_localized.description IS '로컬라이즈된 상세 설명으로 스토어 응답에서 수집되어 상세 페이지에 사용하고 일부 언어에서 누락될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_localized.release_notes IS '로컬라이즈된 릴리즈 노트로 스토어 응답에서 수집되어 업데이트 내용 표시에 사용하며 없는 경우가 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_localized.recorded_at IS '본 로컬라이즈 레코드의 수집 시각으로 이력 정렬에 사용되며 시스템에서 항상 기록하므로 NULL 불가.'",
-        "COMMENT ON TABLE apps_metrics IS '앱의 평점/리뷰 수 등 수치 지표의 변경 이력을 저장하는 테이블로, 시계열 분석과 품질 평가에 사용한다.'",
-        "COMMENT ON COLUMN apps_metrics.id IS '내부 기본키로 수치 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
-        "COMMENT ON COLUMN apps_metrics.app_id IS '앱 고유 식별자로 스토어 응답에서 수집되어 앱별 지표 조회에 필수이므로 NULL 불가.'",
-        "COMMENT ON COLUMN apps_metrics.platform IS '스토어 구분값으로 수집 소스 식별에 사용하며 NULL 불가.'",
-        "COMMENT ON COLUMN apps_metrics.score IS '평균 평점(예: 4.5)으로 스토어 응답에서 수집되어 품질 지표로 사용하고 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_metrics.ratings IS '평점 개수로 스토어 응답에서 수집되어 규모 파악에 사용하며 일부 응답에서 누락되어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_metrics.reviews_count IS '리뷰 총 개수로 스토어 응답에서 수집되어 수집 범위 판단에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_metrics.installs IS '설치 수 구간 문자열(예: \"100,000+\")로 플레이스토어에서 제공되며 마케팅 분석에 사용하고 앱스토어에는 없어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_metrics.installs_exact IS '설치 수 정확 값(플레이스토어 제공 시)으로 정밀 분석에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_metrics.histogram IS '별점 분포(JSON 배열 [1~5])로 스토어 응답에서 수집되어 평점 구조 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN apps_metrics.recorded_at IS '수치 데이터 수집 시각으로 변경 이력 분석에 사용되며 항상 기록하므로 NULL 불가.'",
-        "COMMENT ON TABLE app_reviews IS '앱 리뷰 원문을 누적 저장하는 테이블로, 정성 분석/모니터링 및 중복 수집 방지에 사용한다.'",
-        "COMMENT ON COLUMN app_reviews.id IS '내부 기본키로 리뷰 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
-        "COMMENT ON COLUMN app_reviews.app_id IS '앱 고유 식별자로 스토어 응답에서 수집되어 리뷰를 앱과 연결하는 핵심 키이므로 NULL 불가.'",
-        "COMMENT ON COLUMN app_reviews.platform IS '스토어 구분값으로 리뷰 출처를 구분하는 데 사용하며 NULL 불가.'",
-        "COMMENT ON COLUMN app_reviews.review_id IS '스토어가 부여한 리뷰 고유 ID로 중복 수집 방지에 사용하며 필수이므로 NULL 불가.'",
-        "COMMENT ON COLUMN app_reviews.country IS '리뷰 작성 국가 코드로 스토어 응답에서 수집되어 국가별 분석에 사용하고 일부 리뷰는 미제공되어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.language IS '리뷰 언어 코드로 스토어 응답에서 수집되어 언어별 분석에 사용하며 미제공 가능성이 있어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.user_name IS '리뷰 작성자 표시명으로 스토어 응답에서 수집되어 UI 표시/분석에 사용하나 익명화될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.user_image IS '리뷰 작성자 프로필 이미지 URL로 스토어 응답에서 수집되어 UI에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.score IS '리뷰 평점(정수)로 스토어 응답에서 수집되어 품질 분석에 사용하며 일부 리뷰에서 누락될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.title IS '리뷰 제목(App Store 전용)으로 스토어 응답에서 수집되어 표시/분석에 사용하고 Play Store에는 없어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.content IS '리뷰 본문 텍스트로 스토어 응답에서 수집되어 감성/키워드 분석에 사용하며 비어 있을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.thumbs_up_count IS '도움돼요/좋아요 수로 스토어 응답에서 수집되어 영향력 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.app_version IS '리뷰 작성 시점의 앱 버전으로 스토어 응답에서 수집되어 버전별 이슈 분석에 사용하며 누락될 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.reviewed_at IS '리뷰 작성 시각으로 스토어 응답에서 수집되어 시계열 분석에 사용하나 일부 리뷰는 누락되어 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.reply_content IS '개발자 답변 내용으로 스토어 응답에서 수집되어 대응 분석에 사용하며 답변이 없으면 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.replied_at IS '개발자 답변 시각으로 스토어 응답에서 수집되어 응답 속도 분석에 사용하고 답변이 없으면 NULL 허용.'",
-        "COMMENT ON COLUMN app_reviews.recorded_at IS '리뷰 레코드 수집 시각으로 중복 수집 관리에 사용되며 항상 기록하므로 NULL 불가.'",
-        "COMMENT ON TABLE failed_apps IS '수집 불가로 판단된 앱을 영구 실패 목록으로 관리하는 테이블로, 반복 수집 시도를 방지하는 데 사용한다.'",
-        "COMMENT ON COLUMN failed_apps.id IS '내부 기본키로 실패 레코드 식별에 사용하며 자동 생성이므로 NULL 불가.'",
-        "COMMENT ON COLUMN failed_apps.app_id IS '실패한 앱의 고유 식별자로 스토어 응답/오류에서 추출되며 재시도 차단에 사용하므로 NULL 불가.'",
-        "COMMENT ON COLUMN failed_apps.platform IS '스토어 구분값으로 실패 출처를 구분하며 NULL 불가.'",
-        "COMMENT ON COLUMN failed_apps.reason IS '실패 사유(예: not_found, removed)로 수집 로직에서 기록되어 진단/리포트에 사용하며 정보가 없을 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN failed_apps.failed_at IS '실패 판정 시각으로 수집 로직에서 기록되어 이력 관리에 사용하며 NULL 불가.'",
-        "COMMENT ON TABLE collection_status IS '앱별 상세/리뷰 수집 상태를 관리하는 테이블로, 수집 스케줄링과 중복 수집 방지에 사용한다.'",
-        "COMMENT ON COLUMN collection_status.id IS '내부 기본키로 상태 레코드 식별에 사용하며 자동 생성이므로 NULL 불가.'",
-        "COMMENT ON COLUMN collection_status.app_id IS '앱 고유 식별자로 상태를 앱에 매핑하기 위한 핵심 키이므로 NULL 불가.'",
-        "COMMENT ON COLUMN collection_status.platform IS '스토어 구분값으로 수집 상태의 출처를 구분하며 NULL 불가.'",
-        "COMMENT ON COLUMN collection_status.details_collected_at IS '상세정보 마지막 수집 시각으로 수집 스케줄 판단에 사용하며 아직 수집 전일 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN collection_status.reviews_collected_at IS '리뷰 마지막 수집 시각으로 수집 스케줄 판단에 사용하며 아직 수집 전일 수 있어 NULL 허용.'",
-        "COMMENT ON COLUMN collection_status.reviews_total_count IS '현재까지 수집된 리뷰 총수로 진행률 계산에 사용하며 초기에는 0으로 유지되므로 NULL 허용하지 않고 기본값을 둔다.'",
-        "COMMENT ON COLUMN collection_status.initial_review_done IS '최초 리뷰 수집 완료 여부(0/1)로 이후 중복 수집 중단 판단에 사용하며 기본값 0을 사용하므로 NULL 허용하지 않는다.'",
-    ]
+        # collection_status: 수집 상태 추적
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS collection_status (
+                id BIGSERIAL,
+                app_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                details_collected_at TEXT,          -- 상세정보 마지막 수집 시각
+                reviews_collected_at TEXT,          -- 리뷰 마지막 수집 시각
+                reviews_total_count INTEGER DEFAULT 0,  -- 현재 수집된 총 리뷰 수
+                initial_review_done INTEGER DEFAULT 0,  -- 최초 수집 완료 여부 (이후 중복 리뷰 발견 시 중단)
+                UNIQUE(app_id, platform),
+                PRIMARY KEY (app_id, id)
+            ) PARTITION BY HASH (app_id)
+        """)
 
-    for comment_sql in comment_sqls:
-        cursor.execute(comment_sql)
+        for partition_index in range(PARTITION_COUNT):
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS collection_status_p{partition_index}
+                PARTITION OF collection_status
+                FOR VALUES WITH (MODULUS {PARTITION_COUNT}, REMAINDER {partition_index})
+            """)
 
-    # 인덱스 생성
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_latest ON apps(app_id, platform, recorded_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_localized_latest ON apps_localized(app_id, platform, language, recorded_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_metrics_latest ON apps_metrics(app_id, platform, recorded_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_app_id ON app_reviews(app_id, platform)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_review_id ON app_reviews(review_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_reviewed_at ON app_reviews(reviewed_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_apps_app_id ON failed_apps(app_id, platform)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_status_app_platform ON collection_status(app_id, platform)")
+        comment_sqls = [
+            "COMMENT ON TABLE apps IS '앱 스토어/플레이 스토어 메타데이터의 변경 이력을 누적 저장하는 테이블로, 수집 원본 응답을 기록해 추후 비교/분석에 사용한다.'",
+            "COMMENT ON COLUMN apps.id IS '내부 기본키로 각 수집 기록을 식별하며 조인/추적에 사용한다. BIGSERIAL 자동 생성이므로 NULL을 허용하지 않는다.'",
+            "COMMENT ON COLUMN apps.app_id IS '스토어에서 제공하는 앱 고유 식별자(앱스토어 numeric ID 또는 플레이스토어 패키지명)로 수집 응답에서 가져오며 모든 조회의 기준 키이므로 NULL 불가.'",
+            "COMMENT ON COLUMN apps.platform IS 'app_store 또는 play_store 구분값으로 수집 파이프라인의 소스 식별에 사용하며 필수 필드이므로 NULL 불가.'",
+            "COMMENT ON COLUMN apps.bundle_id IS '앱 번들/패키지 식별자(주로 iOS bundle id)로 원본 응답에 존재할 때만 사용하며 일부 스토어에서 미제공될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.version IS '스토어에 표시되는 앱 버전 문자열로 업데이트 이력 비교에 사용하며 원본에 없을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.developer IS '개발사/개발자명으로 스토어 응답에서 수집되어 화면 표시/필터링에 사용하며 미제공 가능성이 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.developer_id IS '스토어의 개발자 계정/퍼블리셔 식별자이며 개발자 기준 집계에 사용하지만 일부 스토어에서 제공되지 않아 NULL 허용.'",
+            "COMMENT ON COLUMN apps.developer_email IS '개발자 연락 이메일로 스토어 메타데이터에서 수집되며 연락처 표시/검증에 사용하나 미기재 가능성이 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.developer_website IS '개발자 공식 웹사이트 URL로 스토어 응답에서 수집되며 외부 링크 제공에 사용하고 선택 항목이라 NULL 허용.'",
+            "COMMENT ON COLUMN apps.icon_url IS '앱 아이콘 이미지 URL로 스토어 응답에서 수집되며 UI 표시용으로 사용하나 간혹 누락될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.header_image IS '앱 상단 헤더 이미지 URL(주로 플레이스토어)로 수집 응답에서 가져오며 없는 경우가 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.screenshots IS '스크린샷 URL 목록(JSON 배열)으로 원본 응답에서 수집하여 UI 갤러리 표시에 사용하며 미제공 시 NULL 허용.'",
+            "COMMENT ON COLUMN apps.price IS '현재 가격(숫자)으로 스토어 응답에서 수집하여 결제/가격 분석에 사용하며 무료만 제공되거나 누락될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.currency IS '가격 통화 코드로 스토어 응답에서 수집되며 가격 표시/환산에 사용하나 가격 정보가 없으면 NULL 허용.'",
+            "COMMENT ON COLUMN apps.free IS '무료 여부 플래그로 스토어 응답에서 추출하며 가격 분석에 사용하고 일부 응답에서 미제공될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.has_iap IS '인앱결제 존재 여부 플래그로 스토어 응답에서 수집해 과금 분석에 사용하지만 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.category_id IS '스토어 카테고리 ID로 원본 응답에서 수집되어 분류/필터링에 사용하며 스토어별 제공 방식 차이로 NULL 허용.'",
+            "COMMENT ON COLUMN apps.genre_id IS '장르 ID로 스토어 응답에서 수집되어 분류에 사용하며 미제공 가능성이 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.genre_name IS '현지화된 장르명 문자열로 스토어 응답에서 수집되어 UI 표시/검색에 사용하며 없을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.content_rating IS '연령 등급 코드로 스토어에서 제공되며 연령 제한 표시/정책 분석에 사용하지만 일부 앱은 미제공되어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.content_rating_description IS '연령 등급 설명 문구로 스토어 응답에서 수집되며 상세 표시/분석에 사용하고 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.min_os_version IS '지원 최소 OS 버전으로 스토어 메타데이터에서 수집되어 호환성 분석에 사용하나 누락될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.file_size IS '설치 파일 크기(바이트)로 스토어 응답에서 수집되어 용량 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.supported_devices IS '지원 기기 목록(JSON 배열)으로 스토어 응답에서 수집되며 호환성 표시/분석에 사용하고 미제공 시 NULL 허용.'",
+            "COMMENT ON COLUMN apps.release_date IS '최초 출시일로 스토어 응답에서 수집되어 연혁 분석에 사용하며 오래된 앱은 누락될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.updated_date IS '마지막 업데이트 일자로 스토어 응답에서 수집되어 버려진 앱 판단 등에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.privacy_policy_url IS '개인정보처리방침 URL로 스토어 응답에서 수집되어 법적 링크 제공에 사용하며 미기재 가능성이 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps.recorded_at IS '본 레코드를 수집/기록한 시각으로 변경 이력 정렬에 사용되며 시스템에서 항상 기록하므로 NULL 불가.'",
+            "COMMENT ON TABLE apps_localized IS '앱의 다국어 텍스트(제목/설명/릴리즈 노트) 변경 이력을 누적 저장하는 테이블로, 현지화 비교 및 UI 표시용으로 사용한다.'",
+            "COMMENT ON COLUMN apps_localized.id IS '내부 기본키로 다국어 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
+            "COMMENT ON COLUMN apps_localized.app_id IS '앱 고유 식별자로 원본 스토어 응답에서 수집되며 앱별 로컬라이즈 이력 조회에 필수이므로 NULL 불가.'",
+            "COMMENT ON COLUMN apps_localized.platform IS '스토어 구분값(app_store/play_store)으로 수집 소스를 명확히 하기 위해 사용하며 NULL 불가.'",
+            "COMMENT ON COLUMN apps_localized.language IS '언어 코드(예: en-US, ko-KR)로 스토어 응답에서 수집되어 언어별 표시/비교에 사용하며 NULL 불가.'",
+            "COMMENT ON COLUMN apps_localized.title IS '로컬라이즈된 앱 제목으로 스토어 응답에서 수집되어 UI 표시에 사용하고 일부 언어에서 누락될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_localized.summary IS '로컬라이즈된 요약 문구로 스토어 응답에서 수집되어 목록 표시에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_localized.description IS '로컬라이즈된 상세 설명으로 스토어 응답에서 수집되어 상세 페이지에 사용하고 일부 언어에서 누락될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_localized.release_notes IS '로컬라이즈된 릴리즈 노트로 스토어 응답에서 수집되어 업데이트 내용 표시에 사용하며 없는 경우가 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_localized.recorded_at IS '본 로컬라이즈 레코드의 수집 시각으로 이력 정렬에 사용되며 시스템에서 항상 기록하므로 NULL 불가.'",
+            "COMMENT ON TABLE apps_metrics IS '앱의 평점/리뷰 수 등 수치 지표의 변경 이력을 저장하는 테이블로, 시계열 분석과 품질 평가에 사용한다.'",
+            "COMMENT ON COLUMN apps_metrics.id IS '내부 기본키로 수치 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
+            "COMMENT ON COLUMN apps_metrics.app_id IS '앱 고유 식별자로 스토어 응답에서 수집되어 앱별 지표 조회에 필수이므로 NULL 불가.'",
+            "COMMENT ON COLUMN apps_metrics.platform IS '스토어 구분값으로 수집 소스 식별에 사용하며 NULL 불가.'",
+            "COMMENT ON COLUMN apps_metrics.score IS '평균 평점(예: 4.5)으로 스토어 응답에서 수집되어 품질 지표로 사용하고 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_metrics.ratings IS '평점 개수로 스토어 응답에서 수집되어 규모 파악에 사용하며 일부 응답에서 누락되어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_metrics.reviews_count IS '리뷰 총 개수로 스토어 응답에서 수집되어 수집 범위 판단에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_metrics.installs IS '설치 수 구간 문자열(예: \"100,000+\")로 플레이스토어에서 제공되며 마케팅 분석에 사용하고 앱스토어에는 없어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_metrics.installs_exact IS '설치 수 정확 값(플레이스토어 제공 시)으로 정밀 분석에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_metrics.histogram IS '별점 분포(JSON 배열 [1~5])로 스토어 응답에서 수집되어 평점 구조 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN apps_metrics.recorded_at IS '수치 데이터 수집 시각으로 변경 이력 분석에 사용되며 항상 기록하므로 NULL 불가.'",
+            "COMMENT ON TABLE app_reviews IS '앱 리뷰 원문을 누적 저장하는 테이블로, 정성 분석/모니터링 및 중복 수집 방지에 사용한다.'",
+            "COMMENT ON COLUMN app_reviews.id IS '내부 기본키로 리뷰 레코드 식별 및 조인에 사용하며 자동 생성이므로 NULL 불가.'",
+            "COMMENT ON COLUMN app_reviews.app_id IS '앱 고유 식별자로 스토어 응답에서 수집되어 리뷰를 앱과 연결하는 핵심 키이므로 NULL 불가.'",
+            "COMMENT ON COLUMN app_reviews.platform IS '스토어 구분값으로 리뷰 출처를 구분하는 데 사용하며 NULL 불가.'",
+            "COMMENT ON COLUMN app_reviews.review_id IS '스토어가 부여한 리뷰 고유 ID로 중복 수집 방지에 사용하며 필수이므로 NULL 불가.'",
+            "COMMENT ON COLUMN app_reviews.country IS '리뷰 작성 국가 코드로 스토어 응답에서 수집되어 국가별 분석에 사용하고 일부 리뷰는 미제공되어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.language IS '리뷰 언어 코드로 스토어 응답에서 수집되어 언어별 분석에 사용하며 미제공 가능성이 있어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.user_name IS '리뷰 작성자 표시명으로 스토어 응답에서 수집되어 UI 표시/분석에 사용하나 익명화될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.user_image IS '리뷰 작성자 프로필 이미지 URL로 스토어 응답에서 수집되어 UI에 사용하며 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.score IS '리뷰 평점(정수)로 스토어 응답에서 수집되어 품질 분석에 사용하며 일부 리뷰에서 누락될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.title IS '리뷰 제목(App Store 전용)으로 스토어 응답에서 수집되어 표시/분석에 사용하고 Play Store에는 없어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.content IS '리뷰 본문 텍스트로 스토어 응답에서 수집되어 감성/키워드 분석에 사용하며 비어 있을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.thumbs_up_count IS '도움돼요/좋아요 수로 스토어 응답에서 수집되어 영향력 분석에 사용하나 제공되지 않을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.app_version IS '리뷰 작성 시점의 앱 버전으로 스토어 응답에서 수집되어 버전별 이슈 분석에 사용하며 누락될 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.reviewed_at IS '리뷰 작성 시각으로 스토어 응답에서 수집되어 시계열 분석에 사용하나 일부 리뷰는 누락되어 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.reply_content IS '개발자 답변 내용으로 스토어 응답에서 수집되어 대응 분석에 사용하며 답변이 없으면 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.replied_at IS '개발자 답변 시각으로 스토어 응답에서 수집되어 응답 속도 분석에 사용하고 답변이 없으면 NULL 허용.'",
+            "COMMENT ON COLUMN app_reviews.recorded_at IS '리뷰 레코드 수집 시각으로 중복 수집 관리에 사용되며 항상 기록하므로 NULL 불가.'",
+            "COMMENT ON TABLE failed_apps IS '수집 불가로 판단된 앱을 영구 실패 목록으로 관리하는 테이블로, 반복 수집 시도를 방지하는 데 사용한다.'",
+            "COMMENT ON COLUMN failed_apps.id IS '내부 기본키로 실패 레코드 식별에 사용하며 자동 생성이므로 NULL 불가.'",
+            "COMMENT ON COLUMN failed_apps.app_id IS '실패한 앱의 고유 식별자로 스토어 응답/오류에서 추출되며 재시도 차단에 사용하므로 NULL 불가.'",
+            "COMMENT ON COLUMN failed_apps.platform IS '스토어 구분값으로 실패 출처를 구분하며 NULL 불가.'",
+            "COMMENT ON COLUMN failed_apps.reason IS '실패 사유(예: not_found, removed)로 수집 로직에서 기록되어 진단/리포트에 사용하며 정보가 없을 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN failed_apps.failed_at IS '실패 판정 시각으로 수집 로직에서 기록되어 이력 관리에 사용하며 NULL 불가.'",
+            "COMMENT ON TABLE collection_status IS '앱별 상세/리뷰 수집 상태를 관리하는 테이블로, 수집 스케줄링과 중복 수집 방지에 사용한다.'",
+            "COMMENT ON COLUMN collection_status.id IS '내부 기본키로 상태 레코드 식별에 사용하며 자동 생성이므로 NULL 불가.'",
+            "COMMENT ON COLUMN collection_status.app_id IS '앱 고유 식별자로 상태를 앱에 매핑하기 위한 핵심 키이므로 NULL 불가.'",
+            "COMMENT ON COLUMN collection_status.platform IS '스토어 구분값으로 수집 상태의 출처를 구분하며 NULL 불가.'",
+            "COMMENT ON COLUMN collection_status.details_collected_at IS '상세정보 마지막 수집 시각으로 수집 스케줄 판단에 사용하며 아직 수집 전일 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN collection_status.reviews_collected_at IS '리뷰 마지막 수집 시각으로 수집 스케줄 판단에 사용하며 아직 수집 전일 수 있어 NULL 허용.'",
+            "COMMENT ON COLUMN collection_status.reviews_total_count IS '현재까지 수집된 리뷰 총수로 진행률 계산에 사용하며 초기에는 0으로 유지되므로 NULL 허용하지 않고 기본값을 둔다.'",
+            "COMMENT ON COLUMN collection_status.initial_review_done IS '최초 리뷰 수집 완료 여부(0/1)로 이후 중복 수집 중단 판단에 사용하며 기본값 0을 사용하므로 NULL 허용하지 않는다.'",
+        ]
 
-    conn.commit()
-    release_connection(conn)
+        for comment_sql in comment_sqls:
+            cursor.execute(comment_sql)
+
+        # 인덱스 생성
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_latest ON apps(app_id, platform, recorded_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_localized_latest ON apps_localized(app_id, platform, language, recorded_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_apps_metrics_latest ON apps_metrics(app_id, platform, recorded_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_app_id ON app_reviews(app_id, platform)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_review_id ON app_reviews(review_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_reviews_reviewed_at ON app_reviews(reviewed_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_apps_app_id ON failed_apps(app_id, platform)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_status_app_platform ON collection_status(app_id, platform)")
+
+        conn.commit()
+    finally:
+        cursor.execute("SELECT pg_advisory_unlock(%s)", (INIT_DB_LOCK_ID,))
+        cursor.close()
+        release_connection(conn)
     DB_LOGGER.info("Database initialized.")
 
 
@@ -1094,7 +1099,17 @@ PERMANENT_FAILURE_REASONS = frozenset({
 })
 
 # 연속 실패 실행 횟수 한계 (이 횟수 이상 연속 실패 시 영구 실패)
-MAX_CONSECUTIVE_FAIL_RUNS = 3
+MAX_CONSECUTIVE_FAIL_RUNS = 5
+MAX_TRANSIENT_FAIL_RUNS = 8
+TRANSIENT_FAILURE_REASONS = frozenset({
+    'timeout',
+    'network_error',
+    'rate_limited',
+    'server_error',
+    'request_error',
+    'scraper_error',
+    'http_error',
+})
 
 
 def generate_session_id() -> str:
@@ -1112,6 +1127,12 @@ def _is_permanent_reason(reason: str) -> bool:
     """영구 실패 사유인지 확인합니다."""
     base_reason = reason.split(':')[0] if ':' in reason else reason
     return base_reason in PERMANENT_FAILURE_REASONS
+
+
+def _is_transient_reason(reason: str) -> bool:
+    """일시적 실패 사유인지 확인합니다."""
+    base_reason = reason.split(':')[0] if ':' in reason else reason
+    return base_reason in TRANSIENT_FAILURE_REASONS
 
 
 def record_app_failure(
@@ -1174,7 +1195,8 @@ def record_app_failure(
         new_count = current_count + 1
 
         # 연속 실패 한계 도달 시 영구 실패로 전환
-        if new_count >= MAX_CONSECUTIVE_FAIL_RUNS:
+        max_fail_runs = MAX_TRANSIENT_FAIL_RUNS if _is_transient_reason(reason) else MAX_CONSECUTIVE_FAIL_RUNS
+        if new_count >= max_fail_runs:
             is_permanent = True
 
         _execute("""
