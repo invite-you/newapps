@@ -3,7 +3,7 @@
 앱 로컬라이제이션 쌍 처리 및 기본 선택 로직을 제공합니다.
 """
 import os
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set
 
 from database.sitemap_apps_db import (
     get_connection as get_sitemap_connection,
@@ -131,6 +131,23 @@ def get_app_language_country_pairs(
     if default_pair:
         return [default_pair]
     return []
+
+
+def collect_app_ids_from_cursor(
+    cursor,
+    exclude_ids: Set[str],
+    limit: Optional[int],
+) -> List[str]:
+    """커서에서 앱 ID를 스트리밍으로 수집하면서 제외/제한을 적용합니다."""
+    result = []
+    for row in cursor:
+        app_id = row["app_id"]
+        if app_id in exclude_ids:
+            continue
+        result.append(app_id)
+        if limit is not None and len(result) >= limit:
+            break
+    return result
 
 
 def select_primary_country(

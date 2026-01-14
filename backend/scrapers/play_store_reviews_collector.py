@@ -26,6 +26,7 @@ from scrapers.collection_utils import (
     get_app_language_country_pairs,
     LocalePairPolicy,
     CollectionErrorPolicy,
+    collect_app_ids_from_cursor,
 )
 
 PLATFORM = 'play_store'
@@ -347,28 +348,27 @@ def get_apps_for_review_collection(limit: Optional[int] = None, session_id: Opti
     - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
     - 차단된 앱: 제외 (영구 실패 또는 이번 세션에서 실패)
     """
-    from database.app_details_db import get_connection as get_details_connection
+    from database.app_details_db import (
+        get_connection as get_details_connection,
+        release_connection as release_details_connection,
+    )
 
     # 제외할 앱 ID: 차단된 앱 + 7일 이내 수집된 버려진 앱
     exclude_ids = get_blocked_app_ids(PLATFORM, session_id=session_id) | get_abandoned_apps_to_skip(PLATFORM, 'reviews_collected_at')
 
     # 상세정보가 수집된 앱 목록
     details_conn = get_details_connection()
-    cursor = details_conn.cursor()
-    cursor.execute("""
-        SELECT app_id FROM collection_status
-        WHERE platform = 'play_store' AND details_collected_at IS NOT NULL
-        ORDER BY details_collected_at DESC
-    """)
+    try:
+        with details_conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT app_id FROM collection_status
+                WHERE platform = 'play_store' AND details_collected_at IS NOT NULL
+                ORDER BY details_collected_at DESC
+            """)
 
-    result = []
-    for row in cursor.fetchall():
-        if row['app_id'] not in exclude_ids:
-            result.append(row['app_id'])
-            if limit is not None and len(result) >= limit:
-                break
-
-    details_conn.close()
+            result = collect_app_ids_from_cursor(cursor, exclude_ids, limit)
+    finally:
+        release_details_connection(details_conn)
     return result
 
 

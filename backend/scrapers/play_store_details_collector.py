@@ -30,6 +30,7 @@ from scrapers.collection_utils import (
     select_primary_pair,
     LocalePairPolicy,
     CollectionErrorPolicy,
+    collect_app_ids_from_cursor,
 )
 from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
 from utils.network_binding import configure_network_binding
@@ -343,17 +344,14 @@ def get_apps_to_collect(limit: Optional[int] = None, session_id: Optional[str] =
     try:
         with sitemap_conn.cursor() as cursor:
             cursor.execute("""
-                SELECT DISTINCT app_id FROM app_localizations
+                SELECT app_id
+                FROM app_localizations
                 WHERE platform = 'play_store'
-                ORDER BY first_seen_at DESC
+                GROUP BY app_id
+                ORDER BY MAX(first_seen_at) DESC NULLS LAST, app_id ASC
             """)
 
-            result = []
-            for row in cursor.fetchall():
-                if row['app_id'] not in exclude_ids:
-                    result.append(row['app_id'])
-                    if limit is not None and len(result) >= limit:
-                        break
+            result = collect_app_ids_from_cursor(cursor, exclude_ids, limit)
     finally:
         release_sitemap_connection(sitemap_conn)
     return result
