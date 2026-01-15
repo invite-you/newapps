@@ -6,6 +6,7 @@ App Details Database
 import os
 import json
 import time
+import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple, Union
@@ -41,6 +42,72 @@ INIT_DB_LOCK_ID = 915872341
 # 비교 제외 필드
 EXCLUDE_COMPARE_FIELDS = {'id', 'recorded_at'}
 
+_LOCALIZED_MONTHS = {
+    # English
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+    # Russian
+    "янв": 1,
+    "январь": 1,
+    "января": 1,
+    "фев": 2,
+    "февр": 2,
+    "февраль": 2,
+    "февраля": 2,
+    "мар": 3,
+    "март": 3,
+    "марта": 3,
+    "апр": 4,
+    "апрель": 4,
+    "апреля": 4,
+    "май": 5,
+    "мая": 5,
+    "июн": 6,
+    "июнь": 6,
+    "июня": 6,
+    "июл": 7,
+    "июль": 7,
+    "июля": 7,
+    "авг": 8,
+    "август": 8,
+    "августа": 8,
+    "сен": 9,
+    "сент": 9,
+    "сентябрь": 9,
+    "сентября": 9,
+    "окт": 10,
+    "октябрь": 10,
+    "октября": 10,
+    "нояб": 11,
+    "ноябрь": 11,
+    "ноября": 11,
+    "дек": 12,
+    "декабрь": 12,
+    "декабря": 12,
+}
+
 
 def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     """날짜 문자열을 ISO 8601 형식 (YYYY-MM-DDTHH:MM:SS)으로 정규화합니다.
@@ -49,7 +116,14 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     - ISO 8601: "2024-01-15T10:30:00Z", "2024-01-15T10:30:00-07:00"
     - 날짜만: "2024-01-15"
     - 영문: "Mar 15, 2024"
+    - 로케일 문자열: "5 июн. 2020 г."
     """
+    if not date_str:
+        return None
+    if isinstance(date_str, datetime):
+        return date_str.replace(tzinfo=None).isoformat()
+
+    date_str = str(date_str).strip()
     if not date_str:
         return None
 
@@ -62,10 +136,11 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
             pass
 
     # "Mar 15, 2024" 형식
-    try:
-        return datetime.strptime(date_str, "%b %d, %Y").isoformat()
-    except (ValueError, TypeError):
-        pass
+    for fmt in ("%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(date_str, fmt).isoformat()
+        except (ValueError, TypeError):
+            pass
 
     # "2024-03-15" 형식
     try:
@@ -73,7 +148,24 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     except (ValueError, TypeError):
         pass
 
-    return date_str
+    cleaned = date_str.replace('\u202f', ' ').replace('\u00a0', ' ')
+    cleaned = cleaned.replace(',', ' ')
+    cleaned = cleaned.lower()
+    cleaned = re.sub(r'\bг\.?\b', ' ', cleaned)
+    cleaned = re.sub(r'\bгод\b', ' ', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    match = re.match(r'^(\d{1,2})[.\s]+([^\d\s]+)\s+(\d{4})$', cleaned)
+    if match:
+        day = int(match.group(1))
+        month_token = match.group(2).strip('.').lower()
+        month = _LOCALIZED_MONTHS.get(month_token)
+        if month:
+            try:
+                return datetime(int(match.group(3)), month, day).isoformat()
+            except ValueError:
+                pass
+
+    return None
 
 
 def _build_dsn() -> str:
@@ -925,7 +1017,20 @@ def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
         SELECT cs.app_id
         FROM collection_status cs
         LEFT JOIN (
-            SELECT app_id, platform, updated_date, release_date,
+            SELECT app_id,
+                   platform,
+                   updated_date,
+                   release_date,
+                   CASE
+                       WHEN updated_date ~ '^\\d{4}-\\d{2}-\\d{2}'
+                           THEN updated_date::date
+                       ELSE NULL
+                   END AS updated_date_parsed,
+                   CASE
+                       WHEN release_date ~ '^\\d{4}-\\d{2}-\\d{2}'
+                           THEN release_date::date
+                       ELSE NULL
+                   END AS release_date_parsed,
                    ROW_NUMBER() OVER (PARTITION BY app_id, platform ORDER BY recorded_at DESC) as rn
             FROM apps
         ) a ON cs.app_id = a.app_id AND cs.platform = a.platform AND a.rn = 1
@@ -934,8 +1039,9 @@ def get_abandoned_apps_to_skip(platform: str, collected_at_field: str) -> set:
           AND cs.{collected_at_field}::timestamptz > (now() - interval '{ABANDONED_COLLECTION_INTERVAL_DAYS} days')
           AND (
               -- 2년 이상 업데이트 안 됨 (버려진 앱)
-              (a.updated_date IS NOT NULL AND a.updated_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
-              OR (a.updated_date IS NULL AND a.release_date IS NOT NULL AND a.release_date::date < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
+              (a.updated_date_parsed IS NOT NULL AND a.updated_date_parsed < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
+              OR (a.updated_date_parsed IS NULL AND a.release_date_parsed IS NOT NULL
+                  AND a.release_date_parsed < (now() - interval '{ABANDONED_THRESHOLD_DAYS} days')::date)
           )
     """, (platform,))
 

@@ -344,6 +344,7 @@ def get_apps_for_review_collection(limit: Optional[int] = None, session_id: Opti
 
     수집 정책:
     - 상세정보가 수집된 앱만 대상
+    - 상세정보 최신 지표(apps_metrics.reviews_count)에서 0으로 표시된 앱은 실제 리뷰가 없다고 판단해 제외
     - 활성 앱: 매번 수집 (crontab으로 매일 실행)
     - 버려진 앱 (2년 이상 업데이트 안 됨): 7일에 1번 수집
     - 차단된 앱: 제외 (영구 실패 또는 이번 세션에서 실패)
@@ -361,9 +362,20 @@ def get_apps_for_review_collection(limit: Optional[int] = None, session_id: Opti
     try:
         with details_conn.cursor() as cursor:
             cursor.execute("""
-                SELECT app_id FROM collection_status
-                WHERE platform = 'play_store' AND details_collected_at IS NOT NULL
-                ORDER BY details_collected_at DESC
+                SELECT cs.app_id
+                FROM collection_status cs
+                LEFT JOIN LATERAL (
+                    SELECT reviews_count
+                    FROM apps_metrics am
+                    WHERE am.app_id = cs.app_id
+                      AND am.platform = cs.platform
+                    ORDER BY am.recorded_at DESC
+                    LIMIT 1
+                ) latest_metrics ON true
+                WHERE cs.platform = 'play_store'
+                  AND cs.details_collected_at IS NOT NULL
+                  AND (latest_metrics.reviews_count IS NULL OR latest_metrics.reviews_count > 0)
+                ORDER BY cs.details_collected_at DESC
             """)
 
             result = collect_app_ids_from_cursor(cursor, exclude_ids, limit)
