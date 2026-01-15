@@ -64,10 +64,23 @@ _LOCALIZED_MONTHS = {
     "september": 9,
     "oct": 10,
     "october": 10,
+    "okt": 10,
+    "oktober": 10,
     "nov": 11,
     "november": 11,
     "dec": 12,
     "december": 12,
+    # Spanish/Portuguese/Indonesian (common abbreviations)
+    "ene": 1,
+    "abr": 4,
+    "ago": 8,
+    "dic": 12,
+    "mei": 5,
+    "agu": 8,
+    "des": 12,
+    "set": 9,
+    "out": 10,
+    "dez": 12,
     # Russian
     "янв": 1,
     "январь": 1,
@@ -106,7 +119,52 @@ _LOCALIZED_MONTHS = {
     "дек": 12,
     "декабрь": 12,
     "декабря": 12,
+    # French (ASCII-friendly + accented variants)
+    "janv": 1,
+    "fevr": 2,
+    "avr": 4,
+    "juin": 6,
+    "juil": 7,
+    "aout": 8,
+    "sept": 9,
+    "decembre": 12,
+    "déc": 12,
+    "décembre": 12,
+    "août": 8,
+    "févr": 2,
+    "février": 2,
+    "mars": 3,
+    # German (ASCII-friendly variants)
+    "maerz": 3,
+    "januar": 1,
+    "februar": 2,
+    "mai": 5,
+    "juni": 6,
+    "juli": 7,
+    # Greek (abbrev)
+    "ιαν": 1,
+    # Hindi (common)
+    "मई": 5,
+    "जून": 6,
+    "अप्रैल": 4,
+    "दिस": 12,
+    "फ़र": 2,
+    "फर": 2,
+    # Tamil (common)
+    "மே": 5,
+    "நவ": 11,
+    "டிச": 12,
+    # Khmer (June)
+    "មិថុនា": 6,
+    # Romanian (June)
+    "iun": 6,
+    # Other abbreviations observed
+    "yan": 1,
+    "iyl": 7,
+    "nvb": 11,
+    "apl": 4,
 }
+
 
 
 def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
@@ -116,6 +174,9 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     - ISO 8601: "2024-01-15T10:30:00Z", "2024-01-15T10:30:00-07:00"
     - 날짜만: "2024-01-15"
     - 영문: "Mar 15, 2024"
+    - 숫자형: "2025/10/02", "2025. 10. 15."
+    - CJK: "2025년 10월 2일", "2025年10月2日"
+    - 베트남어: "11 thg 10, 2024"
     - 로케일 문자열: "5 июн. 2020 г."
     """
     if not date_str:
@@ -126,6 +187,7 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     date_str = str(date_str).strip()
     if not date_str:
         return None
+    date_str = re.sub(r'[\u200e\u200f\u202a-\u202e]', '', date_str)
 
     # ISO 형식 (T 포함)
     if 'T' in date_str:
@@ -142,6 +204,30 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
         except (ValueError, TypeError):
             pass
 
+    # "YYYY/MM/DD" or "YYYY. M. D." 형식
+    match = re.match(r"^(\d{4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})\.?$", date_str)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).isoformat()
+        except ValueError:
+            pass
+
+    # "DD/MM/YYYY" or "DD. M. YYYY" 형식
+    match = re.match(r"^(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{4})\.?$", date_str)
+    if match:
+        try:
+            return datetime(int(match.group(3)), int(match.group(2)), int(match.group(1))).isoformat()
+        except ValueError:
+            pass
+
+    # "YYYY년 M월 D일" 또는 "YYYY年M月D日" 형식
+    match = re.match(r"^(\d{4})\s*[년年]\s*(\d{1,2})\s*[월月]\s*(\d{1,2})\s*[일日]?$", date_str)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).isoformat()
+        except ValueError:
+            pass
+
     # "2024-03-15" 형식
     try:
         return datetime.strptime(date_str, "%Y-%m-%d").isoformat()
@@ -153,8 +239,18 @@ def normalize_date_format(date_str: Optional[str]) -> Optional[str]:
     cleaned = cleaned.lower()
     cleaned = re.sub(r'\bг\.?\b', ' ', cleaned)
     cleaned = re.sub(r'\bгод\b', ' ', cleaned)
+    cleaned = re.sub(r'[.\u0970]', ' ', cleaned)
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    match = re.match(r'^(\d{1,2})[.\s]+([^\d\s]+)\s+(\d{4})$', cleaned)
+
+    # "11 thg 10 2024" (Vietnamese)
+    match = re.match(r'^(\d{1,2})\s*thg\s*(\d{1,2})\s*(\d{4})$', cleaned)
+    if match:
+        try:
+            return datetime(int(match.group(3)), int(match.group(2)), int(match.group(1))).isoformat()
+        except ValueError:
+            pass
+
+    match = re.match(r'^(\d{1,2})\s+([^\d\s]+)\s+(\d{4})$', cleaned)
     if match:
         day = int(match.group(1))
         month_token = match.group(2).strip('.').lower()
