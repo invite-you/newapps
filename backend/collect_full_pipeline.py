@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -10,6 +11,16 @@ import psycopg
 from psycopg import sql
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 데몬 모드 관련 설정
+LOOP_INTERVAL_SECONDS = 10  # 파이프라인 완료 후 대기 시간 (초)
+_shutdown_requested = False
+
+
+def _signal_handler(signum, frame):
+    """시그널 핸들러: SIGTERM/SIGINT 수신 시 graceful shutdown 요청"""
+    global _shutdown_requested
+    _shutdown_requested = True
 PYTHON_BIN = sys.executable
 DEFAULT_LIMIT = None
 DEFAULT_RUN_TESTS = False
@@ -188,7 +199,77 @@ def ensure_current_month_partition(logger) -> None:
         log_step_end(step_name, start_perf, status, logger)
 
 
+def run_pipeline(limit: int | None, run_tests: bool, logger) -> bool:
+    """
+    단일 파이프라인 사이클을 실행합니다.
+
+    Returns:
+        bool: 성공 시 True, 실패 시 False
+    """
+    global _shutdown_requested
+
+    start_ts = datetime.now().isoformat()
+    start_perf = time.perf_counter()
+    logger.info(f"[STEP START] collect_full_pipeline | {start_ts}")
+
+    logger.info("=" * 70)
+    logger.info(f"Full Pipeline Started at {start_ts}")
+    logger.info("=" * 70)
+    logger.info(f"Limit: {limit if limit is not None else 'unlimited'}")
+    logger.info(f"Run tests: {run_tests}")
+    logger.info("")
+
+    try:
+        if _shutdown_requested:
+            logger.info("[INFO] 종료 요청 감지, 파이프라인 중단")
+            return False
+
+        ensure_current_month_partition(logger)
+
+        if _shutdown_requested:
+            logger.info("[INFO] 종료 요청 감지, 파이프라인 중단")
+            return False
+
+        run_script("SITEMAP_COLLECTION_ALL", "collect_sitemaps.py", [], logger)
+
+        if _shutdown_requested:
+            logger.info("[INFO] 종료 요청 감지, 파이프라인 중단")
+            return False
+
+        details_args = ["--limit", str(limit)] if limit is not None else []
+        run_script(
+            "DETAILS_AND_REVIEWS_ALL",
+            "collect_app_details.py",
+            details_args,
+            logger,
+        )
+
+        if run_tests and not _shutdown_requested:
+            run_script("COMPREHENSIVE_TESTS", "test_comprehensive.py", [], logger)
+
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info(f"Full Pipeline Completed at {datetime.now().isoformat()}")
+        logger.info("=" * 70)
+        elapsed = time.perf_counter() - start_perf
+        logger.info(
+            f"[STEP END] collect_full_pipeline | {datetime.now().isoformat()} | "
+            f"elapsed={elapsed:.2f}s | status=OK"
+        )
+        return True
+
+    except Exception:
+        elapsed = time.perf_counter() - start_perf
+        logger.exception(
+            f"[STEP END] collect_full_pipeline | {datetime.now().isoformat()} | "
+            f"elapsed={elapsed:.2f}s | status=FAIL"
+        )
+        return False
+
+
 def main() -> int:
+    global _shutdown_requested
+
     parser = argparse.ArgumentParser(
         description="Run full sitemap/details/reviews collection (tests optional)"
     )
@@ -203,46 +284,65 @@ def main() -> int:
         action="store_true",
         help="Run comprehensive tests at the end",
     )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run in daemon mode (continuous loop with restarts)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=LOOP_INTERVAL_SECONDS,
+        help=f"Seconds to wait between pipeline cycles in daemon mode (default: {LOOP_INTERVAL_SECONDS})",
+    )
     args = parser.parse_args()
+
     from utils.logger import get_timestamped_logger
     logger = get_timestamped_logger("collect_full_pipeline", file_prefix=LOG_FILE_PREFIX)
-    start_ts = datetime.now().isoformat()
-    start_perf = time.perf_counter()
-    logger.info(f"[STEP START] collect_full_pipeline | {start_ts}")
 
     limit = args.limit
     run_tests = args.run_tests if args.run_tests else DEFAULT_RUN_TESTS
+    daemon_mode = args.daemon
+    interval = args.interval
 
+    # 시그널 핸들러 등록 (graceful shutdown 지원)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
+    if not daemon_mode:
+        # 단일 실행 모드 (기존 동작)
+        success = run_pipeline(limit, run_tests, logger)
+        return 0 if success else 1
+
+    # 데몬 모드: 무한 루프로 파이프라인 반복 실행
     logger.info("=" * 70)
-    logger.info(f"Full Pipeline Started at {start_ts}")
+    logger.info("[DAEMON] 데몬 모드로 시작합니다.")
+    logger.info(f"[DAEMON] 파이프라인 완료 후 {interval}초 대기 후 재시작")
     logger.info("=" * 70)
-    logger.info(f"Limit: {limit if limit is not None else 'unlimited'}")
-    logger.info(f"Run tests: {run_tests}")
-    logger.info("")
 
-    ensure_current_month_partition(logger)
+    cycle_count = 0
+    while not _shutdown_requested:
+        cycle_count += 1
+        logger.info(f"[DAEMON] ===== 사이클 #{cycle_count} 시작 =====")
 
-    run_script("SITEMAP_COLLECTION_ALL", "collect_sitemaps.py", [], logger)
-    details_args = ["--limit", str(limit)] if limit is not None else []
-    run_script(
-        "DETAILS_AND_REVIEWS_ALL",
-        "collect_app_details.py",
-        details_args,
-        logger,
-    )
+        try:
+            run_pipeline(limit, run_tests, logger)
+        except Exception:
+            logger.exception("[DAEMON] 파이프라인 실행 중 예외 발생 (다음 사이클에서 재시도)")
 
-    if run_tests:
-        run_script("COMPREHENSIVE_TESTS", "test_comprehensive.py", [], logger)
+        if _shutdown_requested:
+            logger.info("[DAEMON] 종료 요청 감지, 루프 종료")
+            break
 
-    logger.info("")
-    logger.info("=" * 70)
-    logger.info(f"Full Pipeline Completed at {datetime.now().isoformat()}")
-    logger.info("=" * 70)
-    elapsed = time.perf_counter() - start_perf
-    logger.info(
-        f"[STEP END] collect_full_pipeline | {datetime.now().isoformat()} | "
-        f"elapsed={elapsed:.2f}s | status=OK"
-    )
+        logger.info(f"[DAEMON] 사이클 #{cycle_count} 완료, {interval}초 대기 후 재시작...")
+
+        # 대기 시간 동안에도 종료 요청 확인 (1초 단위)
+        for _ in range(interval):
+            if _shutdown_requested:
+                break
+            time.sleep(1)
+
+    logger.info("[DAEMON] 데몬이 정상 종료되었습니다.")
     return 0
 
 
