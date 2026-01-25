@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import traceback
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,7 +21,15 @@ from database.app_details_db import (
     generate_session_id
 )
 from database.db_errors import DatabaseUnavailableError
-from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
+from utils.logger import (
+    get_collection_logger,
+    get_collection_run_logger,
+    get_timestamped_logger,
+    ProgressLogger,
+    close_logger_handlers,
+    format_warning_log,
+    format_error_log,
+)
 from utils.network_binding import configure_network_binding
 from utils.error_tracker import ErrorTracker, ErrorStep
 from scrapers.collection_utils import (
@@ -34,13 +43,22 @@ PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
 MAX_REVIEWS_TOTAL = int(os.getenv("APP_REVIEWS_MAX_PER_RUN", "50000"))  # 실행당 최대 수집 리뷰 수
 BATCH_SIZE = 100  # 한 번에 가져올 리뷰 수
+REVIEW_LOG_RETENTION_DAYS = int(os.getenv("APP_REVIEWS_LOG_RETENTION_DAYS", "365"))
 
 
 class PlayStoreReviewsCollector:
     def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None,
                  session_id: Optional[str] = None):
         self.verbose = verbose
-        self.logger = get_collection_logger('PlayStoreReviews', verbose)
+        self.run_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        collector_name = 'PlayStoreReviews'
+        log_prefix = f"collector_{collector_name.lower()}"
+        self.logger = get_collection_run_logger(
+            collector_name,
+            verbose=verbose,
+            cleanup_prefixes=[log_prefix],
+            cleanup_max_age_days=REVIEW_LOG_RETENTION_DAYS,
+        )
         configure_network_binding(logger=self.logger)
         self.error_tracker = error_tracker or ErrorTracker('play_store_reviews')
         # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
@@ -301,40 +319,68 @@ class PlayStoreReviewsCollector:
         """배치로 리뷰를 수집합니다."""
         progress = ProgressLogger(self.logger, len(app_ids), "collect_reviews")
         progress.start(max_reviews_per_app=MAX_REVIEWS_TOTAL)
-
-        for i, app_id in enumerate(app_ids, 1):
-            progress.tick(i, app_id)
-
-            try:
-                self.collect_reviews_for_app(app_id)
-            except DatabaseUnavailableError:
-                raise
-            except Exception as e:
-                self.stats['errors'] += 1
-                # 상세 에러 추적
-                self.error_tracker.add_error(
-                    platform=PLATFORM,
-                    step=ErrorStep.COLLECT_REVIEW,
-                    error=e,
-                    app_id=app_id,
-                    include_traceback=True
-                )
-                self.logger.error(format_error_log(
-                    reason=type(e).__name__,
-                    target=f"app_id={app_id}",
-                    action="skip",
-                    detail=str(e)
-                ))
-
-            time.sleep(REQUEST_DELAY)
-
-        progress.end(
-            status="OK",
-            processed=self.stats['apps_processed'],
-            skipped=self.stats['apps_skipped'],
-            reviews=self.stats['reviews_collected'],
-            errors=self.stats['errors']
+        run_status = "OK"
+        run_start = time.perf_counter()
+        self.logger.info(
+            "[RUN START] reviews_collection | platform=%s | session_id=%s | run_id=%s | total_apps=%s | max_reviews_total=%s",
+            PLATFORM,
+            self.session_id,
+            self.run_id,
+            len(app_ids),
+            MAX_REVIEWS_TOTAL,
         )
+
+        try:
+            for i, app_id in enumerate(app_ids, 1):
+                progress.tick(i, app_id)
+
+                try:
+                    self.collect_reviews_for_app(app_id)
+                except DatabaseUnavailableError:
+                    run_status = "FAIL"
+                    raise
+                except Exception as e:
+                    self.stats['errors'] += 1
+                    # 상세 에러 추적
+                    self.error_tracker.add_error(
+                        platform=PLATFORM,
+                        step=ErrorStep.COLLECT_REVIEW,
+                        error=e,
+                        app_id=app_id,
+                        include_traceback=True
+                    )
+                    self.logger.error(format_error_log(
+                        reason=type(e).__name__,
+                        target=f"app_id={app_id}",
+                        action="skip",
+                        detail=str(e)
+                    ))
+
+                time.sleep(REQUEST_DELAY)
+        except Exception:
+            run_status = "FAIL"
+            raise
+        finally:
+            progress.end(
+                status=run_status,
+                processed=self.stats['apps_processed'],
+                skipped=self.stats['apps_skipped'],
+                reviews=self.stats['reviews_collected'],
+                errors=self.stats['errors']
+            )
+            duration = time.perf_counter() - run_start
+            self.logger.info(
+                "[RUN END] reviews_collection | platform=%s | session_id=%s | run_id=%s | duration_s=%.2f | apps_processed=%s | reviews_collected=%s | errors=%s | status=%s",
+                PLATFORM,
+                self.session_id,
+                self.run_id,
+                duration,
+                self.stats['apps_processed'],
+                self.stats['reviews_collected'],
+                self.stats['errors'],
+                run_status,
+            )
+            close_logger_handlers(self.logger)
         return self.stats
 
     def get_error_tracker(self) -> ErrorTracker:

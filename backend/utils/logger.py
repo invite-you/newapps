@@ -7,7 +7,7 @@ import sys
 import logging
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
-from typing import Optional
+from typing import Optional, List
 
 # 로그 디렉토리 설정
 LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
@@ -19,10 +19,12 @@ DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 DEFAULT_BACKUP_COUNT = 5
 
 
-def ensure_log_dir():
+def ensure_log_dir(log_dir: Optional[str] = None) -> str:
     """로그 디렉토리 생성"""
-    if not os.path.exists(LOG_DIR):
-        os.makedirs(LOG_DIR)
+    target_dir = log_dir or LOG_DIR
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+    return target_dir
 
 
 def _build_timestamped_log_file(prefix: str, timestamp: Optional[str] = None) -> str:
@@ -36,7 +38,10 @@ def get_logger(
     log_file: Optional[str] = None,
     level: int = logging.INFO,
     console: bool = True,
-    file_logging: bool = True
+    file_logging: bool = True,
+    log_dir: Optional[str] = None,
+    rotate: bool = True,
+    force_new_handlers: bool = False
 ) -> logging.Logger:
     """
     로거를 생성하거나 가져옵니다.
@@ -54,8 +59,14 @@ def get_logger(
     logger = logging.getLogger(name)
 
     # 이미 핸들러가 있으면 기존 로거 반환
-    if logger.handlers:
+    if logger.handlers and not force_new_handlers:
         return logger
+    if logger.handlers and force_new_handlers:
+        for handler in list(logger.handlers):
+            try:
+                handler.close()
+            finally:
+                logger.removeHandler(handler)
 
     logger.setLevel(level)
     formatter = logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT)
@@ -69,19 +80,22 @@ def get_logger(
 
     # 파일 핸들러
     if file_logging:
-        ensure_log_dir()
+        log_dir = ensure_log_dir(log_dir)
 
         if log_file is None:
             log_file = f"{name}.log"
 
-        log_path = os.path.join(LOG_DIR, log_file)
+        log_path = os.path.join(log_dir, log_file)
 
-        file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=DEFAULT_MAX_BYTES,
-            backupCount=DEFAULT_BACKUP_COUNT,
-            encoding='utf-8'
-        )
+        if rotate:
+            file_handler = RotatingFileHandler(
+                log_path,
+                maxBytes=DEFAULT_MAX_BYTES,
+                backupCount=DEFAULT_BACKUP_COUNT,
+                encoding='utf-8'
+            )
+        else:
+            file_handler = logging.FileHandler(log_path, encoding='utf-8')
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -98,7 +112,37 @@ def get_timestamped_logger(
 ) -> logging.Logger:
     """타임스탬프 파일명을 사용하는 로거를 생성합니다."""
     log_file = _build_timestamped_log_file(file_prefix)
-    return get_logger(name, log_file=log_file, level=level, console=console, file_logging=file_logging)
+    return get_logger(
+        name,
+        log_file=log_file,
+        level=level,
+        console=console,
+        file_logging=file_logging
+    )
+
+
+def get_run_logger(
+    name: str,
+    file_prefix: str,
+    level: int = logging.INFO,
+    console: bool = True,
+    file_logging: bool = True,
+    log_dir: Optional[str] = None,
+    timestamp: Optional[str] = None
+) -> logging.Logger:
+    """실행 단위로 분리된 로거를 생성합니다."""
+    resolved_timestamp = timestamp or datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    log_file = _build_timestamped_log_file(file_prefix, resolved_timestamp)
+    return get_logger(
+        name,
+        log_file=log_file,
+        level=level,
+        console=console,
+        file_logging=file_logging,
+        log_dir=log_dir,
+        rotate=False,
+        force_new_handlers=True
+    )
 
 
 def get_collection_logger(collector_name: str, verbose: bool = True) -> logging.Logger:
@@ -115,6 +159,32 @@ def get_collection_logger(collector_name: str, verbose: bool = True) -> logging.
     level = logging.DEBUG if verbose else logging.WARNING
     log_prefix = f"collector_{collector_name.lower()}"
     return get_timestamped_logger(collector_name, file_prefix=log_prefix, level=level)
+
+
+def get_collection_run_logger(
+    collector_name: str,
+    verbose: bool = True,
+    log_dir: Optional[str] = None,
+    cleanup_prefixes: Optional[List[str]] = None,
+    cleanup_max_age_days: int = 365,
+    timestamp: Optional[str] = None
+) -> logging.Logger:
+    """실행 단위 로거를 생성하고 오래된 로그를 정리합니다."""
+    level = logging.DEBUG if verbose else logging.WARNING
+    log_prefix = f"collector_{collector_name.lower()}"
+    if cleanup_prefixes:
+        cleanup_old_logs(
+            prefixes=cleanup_prefixes,
+            max_age_days=cleanup_max_age_days,
+            log_dir=log_dir
+        )
+    return get_run_logger(
+        collector_name,
+        file_prefix=log_prefix,
+        level=level,
+        log_dir=log_dir,
+        timestamp=timestamp
+    )
 
 
 def get_test_logger(test_name: str = 'long_running_test') -> logging.Logger:
@@ -161,6 +231,47 @@ class CollectorLogger:
     def error(self, message: str):
         """ERROR 레벨 로그"""
         self.logger.error(f"[{self.name}] {message}")
+
+
+def cleanup_old_logs(
+    prefixes: List[str],
+    max_age_days: int = 365,
+    log_dir: Optional[str] = None
+) -> int:
+    """지정된 접두어 로그 중 보관 기간을 지난 파일을 삭제합니다."""
+    target_dir = log_dir or LOG_DIR
+    if not os.path.isdir(target_dir):
+        return 0
+
+    import time
+
+    cutoff = time.time() - (max_age_days * 24 * 60 * 60)
+    removed = 0
+    for entry in os.scandir(target_dir):
+        if not entry.is_file():
+            continue
+        if not any(entry.name.startswith(prefix) for prefix in prefixes):
+            continue
+        try:
+            if entry.stat().st_mtime < cutoff:
+                os.remove(entry.path)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def close_logger_handlers(logger: logging.Logger) -> None:
+    """로거 핸들러를 닫고 해제합니다."""
+    for handler in list(logger.handlers):
+        try:
+            handler.flush()
+        except Exception:
+            pass
+        try:
+            handler.close()
+        finally:
+            logger.removeHandler(handler)
 
 
 class ProgressLogger:
