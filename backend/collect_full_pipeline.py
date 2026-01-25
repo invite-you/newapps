@@ -9,6 +9,7 @@ from datetime import datetime
 
 import psycopg
 from psycopg import sql
+from database.db_errors import DatabaseUnavailableError, DB_UNAVAILABLE_EXIT_CODE
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -71,6 +72,9 @@ def run_script(step_name: str, script_name: str, args: list, logger) -> None:
         cmd = [PYTHON_BIN, os.path.join(BASE_DIR, script_name), *args]
         logger.info(f"[RUN] {' '.join(cmd)}")
         result = subprocess.run(cmd, check=False, cwd=BASE_DIR)
+        if result.returncode == DB_UNAVAILABLE_EXIT_CODE:
+            status = "FAIL"
+            raise DatabaseUnavailableError(f"{script_name} DB unavailable")
         if result.returncode != 0:
             status = "FAIL"
             raise RuntimeError(f"{script_name} failed with exit code {result.returncode}")
@@ -258,6 +262,13 @@ def run_pipeline(limit: int | None, run_tests: bool, logger) -> bool:
         )
         return True
 
+    except DatabaseUnavailableError:
+        elapsed = time.perf_counter() - start_perf
+        logger.exception(
+            f"[STEP END] collect_full_pipeline | {datetime.now().isoformat()} | "
+            f"elapsed={elapsed:.2f}s | status=DB_UNAVAILABLE"
+        )
+        raise
     except Exception:
         elapsed = time.perf_counter() - start_perf
         logger.exception(
@@ -311,7 +322,10 @@ def main() -> int:
 
     if not daemon_mode:
         # 단일 실행 모드 (기존 동작)
-        success = run_pipeline(limit, run_tests, logger)
+        try:
+            success = run_pipeline(limit, run_tests, logger)
+        except DatabaseUnavailableError:
+            return DB_UNAVAILABLE_EXIT_CODE
         return 0 if success else 1
 
     # 데몬 모드: 무한 루프로 파이프라인 반복 실행
@@ -327,6 +341,17 @@ def main() -> int:
 
         try:
             run_pipeline(limit, run_tests, logger)
+        except DatabaseUnavailableError:
+            cooldown = max(60, interval)
+            logger.error(
+                "[DAEMON] DB unavailable; %s초 대기 후 다음 사이클 재시도",
+                cooldown,
+            )
+            for _ in range(cooldown):
+                if _shutdown_requested:
+                    break
+                time.sleep(1)
+            continue
         except Exception:
             logger.exception("[DAEMON] 파이프라인 실행 중 예외 발생 (다음 사이클에서 재시도)")
 

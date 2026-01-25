@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from database.sitemap_apps_db import init_database, get_stats
 from scrapers.app_store_sitemap_collector import AppStoreSitemapCollector
 from scrapers.play_store_sitemap_collector import PlayStoreSitemapCollector
+from database.db_errors import DatabaseUnavailableError, DB_UNAVAILABLE_EXIT_CODE
 from utils.logger import get_timestamped_logger
 from utils.network_binding import list_active_ipv4_interfaces, select_store_interfaces, probe_interface_url
 
@@ -70,22 +71,7 @@ def _terminate_process_group(proc: subprocess.Popen, logger, label: str) -> None
         logger.warning(f"[WARN] {label} termination failed: {exc}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Collect app localizations from App Store and Play Store sitemaps'
-    )
-    parser.add_argument('--app-store', action='store_true', help='Collect from App Store only')
-    parser.add_argument('--play-store', action='store_true', help='Collect from Play Store only')
-    parser.add_argument('--stats', action='store_true', help='Print statistics only')
-    parser.add_argument('--quiet', '-q', action='store_true', help='Quiet mode (less output)')
-
-    args = parser.parse_args()
-    logger = get_timestamped_logger("collect_sitemaps", file_prefix=LOG_FILE_PREFIX)
-    start_ts = datetime.now().isoformat()
-    start_perf = time.perf_counter()
-
-    logger.info(f"[STEP START] collect_sitemaps | {start_ts}")
-
+def _run_collect_sitemaps(args, logger, start_ts: str, start_perf: float) -> int:
     # DB 초기화
     init_database()
 
@@ -97,7 +83,7 @@ def main():
             f"[STEP END] collect_sitemaps | {datetime.now().isoformat()} | "
             f"elapsed={elapsed:.2f}s | status=STATS_ONLY"
         )
-        return
+        return 0
 
     # 수집할 스토어 결정
     collect_app_store = args.app_store or (not args.app_store and not args.play_store)
@@ -156,6 +142,19 @@ def main():
                 try:
                     app_code = app_proc.wait()
                     play_code = play_proc.wait()
+                    if app_code == DB_UNAVAILABLE_EXIT_CODE or play_code == DB_UNAVAILABLE_EXIT_CODE:
+                        logger.error(
+                            "[ERROR] parallel sitemap collection DB unavailable | "
+                            f"app_store={app_code} | play_store={play_code}"
+                        )
+                        _terminate_process_group(app_proc, logger, "app_store")
+                        _terminate_process_group(play_proc, logger, "play_store")
+                        elapsed = time.perf_counter() - start_perf
+                        logger.info(
+                            f"[STEP END] collect_sitemaps | {datetime.now().isoformat()} | "
+                            f"elapsed={elapsed:.2f}s | status=DB_UNAVAILABLE"
+                        )
+                        return DB_UNAVAILABLE_EXIT_CODE
                     if app_code != 0 or play_code != 0:
                         logger.error(
                             "[ERROR] parallel sitemap collection failed | "
@@ -223,7 +222,31 @@ def main():
         f"[STEP END] collect_sitemaps | {datetime.now().isoformat()} | "
         f"elapsed={elapsed:.2f}s | status=OK"
     )
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Collect app localizations from App Store and Play Store sitemaps'
+    )
+    parser.add_argument('--app-store', action='store_true', help='Collect from App Store only')
+    parser.add_argument('--play-store', action='store_true', help='Collect from Play Store only')
+    parser.add_argument('--stats', action='store_true', help='Print statistics only')
+    parser.add_argument('--quiet', '-q', action='store_true', help='Quiet mode (less output)')
+
+    args = parser.parse_args()
+    logger = get_timestamped_logger("collect_sitemaps", file_prefix=LOG_FILE_PREFIX)
+    start_ts = datetime.now().isoformat()
+    start_perf = time.perf_counter()
+
+    logger.info(f"[STEP START] collect_sitemaps | {start_ts}")
+
+    try:
+        return _run_collect_sitemaps(args, logger, start_ts, start_perf)
+    except DatabaseUnavailableError:
+        logger.error("[ERROR] DB unavailable; aborting sitemap collection")
+        return DB_UNAVAILABLE_EXIT_CODE
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

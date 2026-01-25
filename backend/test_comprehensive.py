@@ -19,6 +19,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.logger import get_test_logger
 
+if "pytest" in sys.modules:
+    import pytest
+
+    pytest.skip("comprehensive test script; run directly, not under pytest", allow_module_level=True)
+
 # 테스트 결과 저장용
 class TestResults:
     def __init__(self):

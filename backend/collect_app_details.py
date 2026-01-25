@@ -23,6 +23,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database.app_details_db import init_database, get_stats, generate_session_id
+from database.db_errors import DatabaseUnavailableError, DB_UNAVAILABLE_EXIT_CODE
 from utils.logger import get_timestamped_logger
 from utils.network_binding import list_active_ipv4_interfaces, select_store_interfaces, probe_interface_url
 
@@ -125,25 +126,7 @@ def collect_play_store_reviews(limit: Optional[int], session_id: str, logger):
     return {}
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Collect app details and reviews from App Store and Play Store'
-    )
-    parser.add_argument('--app-store', action='store_true', help='Collect from App Store only')
-    parser.add_argument('--play-store', action='store_true', help='Collect from Play Store only')
-    parser.add_argument('--details-only', action='store_true', help='Collect details only (no reviews)')
-    parser.add_argument('--reviews-only', action='store_true', help='Collect reviews only (no details)')
-    parser.add_argument('--limit', type=int, default=None, help='Max apps to process (default: unlimited)')
-    parser.add_argument('--stats', action='store_true', help='Print statistics only')
-    parser.add_argument('--quiet', '-q', action='store_true', help='Quiet mode')
-
-    args = parser.parse_args()
-    logger = get_timestamped_logger("collect_app_details", file_prefix=LOG_FILE_PREFIX)
-    start_ts = datetime.now().isoformat()
-    start_perf = time.perf_counter()
-
-    logger.info(f"[STEP START] collect_app_details | {start_ts}")
-
+def _run_collect_app_details(args, logger, start_ts: str, start_perf: float) -> int:
     # DB 초기화
     init_database()
 
@@ -155,7 +138,7 @@ def main():
             f"[STEP END] collect_app_details | {datetime.now().isoformat()} | "
             f"elapsed={elapsed:.2f}s | status=STATS_ONLY"
         )
-        return
+        return 0
 
     # 세션 ID 생성 (전체 실행에서 동일한 ID 사용)
     session_id = generate_session_id()
@@ -227,6 +210,19 @@ def main():
                 try:
                     app_code = app_proc.wait()
                     play_code = play_proc.wait()
+                    if app_code == DB_UNAVAILABLE_EXIT_CODE or play_code == DB_UNAVAILABLE_EXIT_CODE:
+                        logger.error(
+                            "[ERROR] parallel app collection DB unavailable | "
+                            f"app_store={app_code} | play_store={play_code}"
+                        )
+                        _terminate_process_group(app_proc, logger, "app_store")
+                        _terminate_process_group(play_proc, logger, "play_store")
+                        elapsed = time.perf_counter() - start_perf
+                        logger.info(
+                            f"[STEP END] collect_app_details | {datetime.now().isoformat()} | "
+                            f"elapsed={elapsed:.2f}s | status=DB_UNAVAILABLE"
+                        )
+                        return DB_UNAVAILABLE_EXIT_CODE
                     if app_code != 0 or play_code != 0:
                         logger.error(
                             "[ERROR] parallel app collection failed | "
@@ -300,7 +296,34 @@ def main():
         f"[STEP END] collect_app_details | {datetime.now().isoformat()} | "
         f"elapsed={elapsed:.2f}s | status=OK"
     )
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Collect app details and reviews from App Store and Play Store'
+    )
+    parser.add_argument('--app-store', action='store_true', help='Collect from App Store only')
+    parser.add_argument('--play-store', action='store_true', help='Collect from Play Store only')
+    parser.add_argument('--details-only', action='store_true', help='Collect details only (no reviews)')
+    parser.add_argument('--reviews-only', action='store_true', help='Collect reviews only (no details)')
+    parser.add_argument('--limit', type=int, default=None, help='Max apps to process (default: unlimited)')
+    parser.add_argument('--stats', action='store_true', help='Print statistics only')
+    parser.add_argument('--quiet', '-q', action='store_true', help='Quiet mode')
+
+    args = parser.parse_args()
+    logger = get_timestamped_logger("collect_app_details", file_prefix=LOG_FILE_PREFIX)
+    start_ts = datetime.now().isoformat()
+    start_perf = time.perf_counter()
+
+    logger.info(f"[STEP START] collect_app_details | {start_ts}")
+
+    try:
+        return _run_collect_app_details(args, logger, start_ts, start_perf)
+    except DatabaseUnavailableError:
+        logger.error("[ERROR] DB unavailable; aborting app details collection")
+        return DB_UNAVAILABLE_EXIT_CODE
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

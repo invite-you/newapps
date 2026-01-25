@@ -15,6 +15,7 @@ import psycopg
 from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from utils.logger import get_timestamped_logger
+from database.db_errors import DatabaseUnavailableError
 
 # psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
 DB_DSN = os.getenv("APP_DETAILS_DB_DSN")
@@ -30,6 +31,10 @@ DB_CONNECT_RETRY_DELAY_SEC = float(os.getenv("APP_DETAILS_DB_CONNECT_RETRY_DELAY
 
 # 연결 재사용 설정 (기본값: true)
 DB_REUSE_CONNECTION = os.getenv("APP_DETAILS_DB_REUSE_CONNECTION", "true").lower() in ("1", "true", "yes")
+
+# DB 장애 재시도 설정
+DB_OUTAGE_MAX_RETRIES = int(os.getenv("APP_DETAILS_DB_OUTAGE_MAX_RETRIES", "3"))
+DB_OUTAGE_BACKOFFS_RAW = os.getenv("APP_DETAILS_DB_OUTAGE_BACKOFFS_SEC", "5,10,20")
 
 # 전역 싱글톤 연결
 _DB_CONNECTION: Optional[psycopg.Connection] = None
@@ -272,6 +277,92 @@ def _build_dsn() -> str:
     )
 
 
+def _connect_once() -> psycopg.Connection:
+    """단일 DB 연결 시도입니다."""
+    dsn = _build_dsn()
+    return psycopg.connect(dsn, row_factory=dict_row)
+
+
+def _get_db_outage_backoffs() -> List[float]:
+    """DB 장애 재시도 백오프 목록을 반환합니다."""
+    backoffs = []
+    for item in DB_OUTAGE_BACKOFFS_RAW.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            backoffs.append(float(item))
+        except ValueError:
+            continue
+    if not backoffs:
+        backoffs = [5.0, 10.0, 20.0]
+    if DB_OUTAGE_MAX_RETRIES <= 0:
+        return backoffs[:1]
+    if len(backoffs) < DB_OUTAGE_MAX_RETRIES:
+        backoffs.extend([backoffs[-1]] * (DB_OUTAGE_MAX_RETRIES - len(backoffs)))
+    return backoffs[:DB_OUTAGE_MAX_RETRIES]
+
+
+def _is_db_unavailable_error(exc: BaseException) -> bool:
+    """DB 연결 불가/종료 오류인지 판단합니다."""
+    if isinstance(exc, DatabaseUnavailableError):
+        return True
+    if isinstance(exc, psycopg.OperationalError):
+        return True
+    if isinstance(exc, psycopg.errors.AdminShutdown):
+        return True
+    message = str(exc).lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "connection refused",
+            "connection to server",
+            "server closed the connection unexpectedly",
+            "the connection is lost",
+            "terminating connection due to administrator command",
+            "the database system is shutting down",
+        )
+    )
+
+
+def _reset_connection():
+    """재시도를 위해 기존 연결을 정리합니다."""
+    global _DB_CONNECTION
+    if _DB_CONNECTION and not _DB_CONNECTION.closed:
+        _DB_CONNECTION.close()
+    _DB_CONNECTION = None
+
+
+def _raise_db_unavailable(context: str, exc: BaseException) -> None:
+    """DB 장애로 판단되면 재시도 후 예외를 발생시킵니다."""
+    backoffs = _get_db_outage_backoffs()
+    for attempt, backoff in enumerate(backoffs, 1):
+        DB_LOGGER.error(
+            "[DB UNAVAILABLE] context=%s attempt=%s/%s backoff=%.1fs error=%s",
+            context,
+            attempt,
+            len(backoffs),
+            backoff,
+            type(exc).__name__,
+        )
+        _reset_connection()
+        try:
+            conn = _connect_once()
+        except psycopg.OperationalError as retry_exc:
+            exc = retry_exc
+            if attempt < len(backoffs):
+                time.sleep(backoff)
+            continue
+        else:
+            conn.close()
+            DB_LOGGER.warning(
+                "[DB UNAVAILABLE] recovered during retry check | context=%s",
+                context,
+            )
+            return
+    raise DatabaseUnavailableError(f"Database unavailable during {context}") from exc
+
+
 def _connect_with_retry() -> psycopg.Connection:
     """DB 연결을 생성합니다. 실패 시 재시도합니다."""
     dsn = _build_dsn()
@@ -282,7 +373,7 @@ def _connect_with_retry() -> psycopg.Connection:
         start_monotonic = time.monotonic()
         DB_LOGGER.info("[STEP START] %s | %s", step_label, start_ts)
         try:
-            conn = psycopg.connect(dsn, row_factory=dict_row)
+            conn = _connect_once()
             elapsed = time.monotonic() - start_monotonic
             end_ts = datetime.now().isoformat()
             DB_LOGGER.info(
@@ -325,9 +416,18 @@ def get_connection() -> psycopg.Connection:
             return _DB_CONNECTION
         if _DB_CONNECTION and _DB_CONNECTION.closed:
             DB_LOGGER.info("닫힌 DB 연결 감지: 재연결을 시도합니다.")
-        _DB_CONNECTION = _connect_with_retry()
-        return _DB_CONNECTION
-    return _connect_with_retry()
+        try:
+            _DB_CONNECTION = _connect_with_retry()
+            return _DB_CONNECTION
+        except psycopg.OperationalError as exc:
+            _raise_db_unavailable("get_connection", exc)
+            _DB_CONNECTION = _connect_with_retry()
+            return _DB_CONNECTION
+    try:
+        return _connect_with_retry()
+    except psycopg.OperationalError as exc:
+        _raise_db_unavailable("get_connection", exc)
+        return _connect_with_retry()
 
 
 def release_connection(conn: Optional[psycopg.Connection]):
@@ -377,6 +477,13 @@ def db_cursor(commit: bool = False):
             yield cursor
         if commit:
             conn.commit()
+    except Exception as exc:
+        if isinstance(exc, DatabaseUnavailableError):
+            raise
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("db_cursor", exc)
+            raise DatabaseUnavailableError("Database unavailable during db_cursor") from exc
+        raise
     finally:
         release_connection(conn)
 
@@ -401,8 +508,13 @@ def db_transaction():
         with conn.cursor() as cursor:
             yield cursor
         conn.commit()
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        if isinstance(exc, DatabaseUnavailableError):
+            raise
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("db_transaction", exc)
+            raise DatabaseUnavailableError("Database unavailable during db_transaction") from exc
         raise
     finally:
         release_connection(conn)
@@ -499,9 +611,10 @@ def _insert_if_changed(table: str, data: Dict, existing: Optional[Dict]) -> Tupl
 def init_database():
     """DB 테이블을 초기화합니다."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT pg_advisory_lock(%s)", (INIT_DB_LOCK_ID,))
+    cursor = None
     try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT pg_advisory_lock(%s)", (INIT_DB_LOCK_ID,))
         # apps: 앱 메타데이터 (변경 시에만 누적)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS apps (
@@ -807,9 +920,18 @@ def init_database():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_status_app_platform ON collection_status(app_id, platform)")
 
         conn.commit()
+    except Exception as exc:
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("init_database", exc)
+            raise DatabaseUnavailableError("Database unavailable during init_database") from exc
+        raise
     finally:
-        cursor.execute("SELECT pg_advisory_unlock(%s)", (INIT_DB_LOCK_ID,))
-        cursor.close()
+        if cursor is not None:
+            try:
+                cursor.execute("SELECT pg_advisory_unlock(%s)", (INIT_DB_LOCK_ID,))
+            except Exception:
+                pass
+            cursor.close()
         release_connection(conn)
     DB_LOGGER.info("Database initialized.")
 

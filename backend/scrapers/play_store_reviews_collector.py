@@ -19,6 +19,7 @@ from database.app_details_db import (
     is_app_blocked, get_blocked_app_ids, get_abandoned_apps_to_skip,
     generate_session_id
 )
+from database.db_errors import DatabaseUnavailableError
 from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
 from utils.network_binding import configure_network_binding
 from utils.error_tracker import ErrorTracker, ErrorStep
@@ -306,6 +307,8 @@ class PlayStoreReviewsCollector:
 
             try:
                 self.collect_reviews_for_app(app_id)
+            except DatabaseUnavailableError:
+                raise
             except Exception as e:
                 self.stats['errors'] += 1
                 # 상세 에러 추적

@@ -18,6 +18,7 @@ from database.app_details_db import (
     get_blocked_app_ids, get_abandoned_apps_to_skip, normalize_date_format,
     generate_session_id
 )
+from database.db_errors import DatabaseUnavailableError
 from database.sitemap_apps_db import (
     get_connection as get_sitemap_connection,
     release_connection as release_sitemap_connection,
@@ -329,6 +330,8 @@ class AppStoreDetailsCollector:
 
             try:
                 self.collect_app(app_id)
+            except DatabaseUnavailableError:
+                raise
             except Exception as e:
                 self.stats['errors'] += 1
                 # 상세 에러 추적

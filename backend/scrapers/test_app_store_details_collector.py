@@ -1,6 +1,6 @@
 import unittest
 
-from backend.scrapers.app_store_details_collector import AppStoreDetailsCollector
+from scrapers.app_store_details_collector import AppStoreDetailsCollector
 
 
 class TestAppStoreDetailsCollector(unittest.TestCase):

@@ -13,6 +13,7 @@ import psycopg
 from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from utils.logger import get_timestamped_logger
+from database.db_errors import DatabaseUnavailableError
 
 # psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
 DB_DSN = os.getenv("SITEMAP_DB_DSN")
@@ -26,6 +27,8 @@ DB_LOGGER = get_timestamped_logger("sitemap_apps_db", file_prefix=LOG_FILE_PREFI
 DB_CONNECT_MAX_RETRIES = int(os.getenv("SITEMAP_DB_CONNECT_MAX_RETRIES", "5"))
 DB_CONNECT_RETRY_DELAY_SEC = float(os.getenv("SITEMAP_DB_CONNECT_RETRY_DELAY_SEC", "2.0"))
 DB_REUSE_CONNECTION = os.getenv("SITEMAP_DB_REUSE_CONNECTION", "true").lower() in ("1", "true", "yes")
+DB_OUTAGE_MAX_RETRIES = int(os.getenv("SITEMAP_DB_OUTAGE_MAX_RETRIES", "3"))
+DB_OUTAGE_BACKOFFS_RAW = os.getenv("SITEMAP_DB_OUTAGE_BACKOFFS_SEC", "5,10,20")
 
 _DB_CONNECTION: Optional[psycopg.Connection] = None
 
@@ -38,9 +41,90 @@ def _build_dsn() -> str:
     )
 
 
+def _connect_once() -> psycopg.Connection:
+    """단일 DB 연결 시도입니다."""
+    dsn = _build_dsn()
+    return psycopg.connect(dsn, row_factory=dict_row)
+
+
+def _get_db_outage_backoffs() -> List[float]:
+    """DB 장애 재시도 백오프 목록을 반환합니다."""
+    backoffs: List[float] = []
+    for item in DB_OUTAGE_BACKOFFS_RAW.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            backoffs.append(float(item))
+        except ValueError:
+            continue
+    if not backoffs:
+        backoffs = [5.0, 10.0, 20.0]
+    if DB_OUTAGE_MAX_RETRIES <= 0:
+        return backoffs[:1]
+    if len(backoffs) < DB_OUTAGE_MAX_RETRIES:
+        backoffs.extend([backoffs[-1]] * (DB_OUTAGE_MAX_RETRIES - len(backoffs)))
+    return backoffs[:DB_OUTAGE_MAX_RETRIES]
+
+
+def _is_db_unavailable_error(exc: BaseException) -> bool:
+    """DB 연결 불가/종료 오류인지 판단합니다."""
+    if isinstance(exc, DatabaseUnavailableError):
+        return True
+    if isinstance(exc, psycopg.OperationalError):
+        return True
+    if isinstance(exc, psycopg.errors.AdminShutdown):
+        return True
+    message = str(exc).lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "connection refused",
+            "connection to server",
+            "server closed the connection unexpectedly",
+            "the connection is lost",
+            "terminating connection due to administrator command",
+            "the database system is shutting down",
+        )
+    )
+
+
+def _reset_connection() -> None:
+    """재시도를 위해 기존 연결을 정리합니다."""
+    global _DB_CONNECTION
+    if _DB_CONNECTION and not _DB_CONNECTION.closed:
+        _DB_CONNECTION.close()
+    _DB_CONNECTION = None
+
+
+def _raise_db_unavailable(context: str, exc: BaseException) -> None:
+    """DB 장애로 판단되면 재시도 후 예외를 발생시킵니다."""
+    backoffs = _get_db_outage_backoffs()
+    for attempt, backoff in enumerate(backoffs, 1):
+        DB_LOGGER.error(
+            "[DB UNAVAILABLE] context=%s attempt=%s/%s backoff=%.1fs error=%s",
+            context,
+            attempt,
+            len(backoffs),
+            backoff,
+            type(exc).__name__,
+        )
+        _reset_connection()
+        try:
+            conn = _connect_once()
+        except psycopg.OperationalError as retry_exc:
+            exc = retry_exc
+            if attempt < len(backoffs):
+                time.sleep(backoff)
+            continue
+        else:
+            conn.close()
+            return
+    raise DatabaseUnavailableError(f"Database unavailable during {context}") from exc
+
+
 def _connect_with_retry() -> psycopg.Connection:
     """DB 연결을 생성합니다."""
-    dsn = _build_dsn()
     last_exc = None
     for attempt in range(1, DB_CONNECT_MAX_RETRIES + 1):
         step_label = f"DB_CONNECT_ATTEMPT_{attempt}"
@@ -48,7 +132,7 @@ def _connect_with_retry() -> psycopg.Connection:
         start_monotonic = time.monotonic()
         DB_LOGGER.info("[STEP START] %s | %s", step_label, start_ts)
         try:
-            conn = psycopg.connect(dsn, row_factory=dict_row)
+            conn = _connect_once()
             elapsed = time.monotonic() - start_monotonic
             end_ts = datetime.now().isoformat()
             DB_LOGGER.info(
@@ -91,9 +175,18 @@ def get_connection() -> psycopg.Connection:
             return _DB_CONNECTION
         if _DB_CONNECTION and _DB_CONNECTION.closed:
             DB_LOGGER.info("닫힌 DB 연결 감지: 재연결을 시도합니다.")
-        _DB_CONNECTION = _connect_with_retry()
-        return _DB_CONNECTION
-    return _connect_with_retry()
+        try:
+            _DB_CONNECTION = _connect_with_retry()
+            return _DB_CONNECTION
+        except psycopg.OperationalError as exc:
+            _raise_db_unavailable("get_connection", exc)
+            _DB_CONNECTION = _connect_with_retry()
+            return _DB_CONNECTION
+    try:
+        return _connect_with_retry()
+    except psycopg.OperationalError as exc:
+        _raise_db_unavailable("get_connection", exc)
+        return _connect_with_retry()
 
 
 def release_connection(conn: Optional[psycopg.Connection]):
@@ -161,6 +254,11 @@ def init_database():
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_sitemap_files_platform ON sitemap_files(platform)")
 
         conn.commit()
+    except Exception as exc:
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("init_database", exc)
+            raise DatabaseUnavailableError("Database unavailable during init_database") from exc
+        raise
     finally:
         release_connection(conn)
     DB_LOGGER.info("Database initialized.")
@@ -174,6 +272,11 @@ def get_sitemap_file_hash(file_url: str) -> Optional[str]:
             cursor.execute("SELECT md5_hash FROM sitemap_files WHERE file_url = %s", (file_url,))
             row = cursor.fetchone()
             return row['md5_hash'] if row else None
+    except Exception as exc:
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("get_sitemap_file_hash", exc)
+            raise DatabaseUnavailableError("Database unavailable during get_sitemap_file_hash") from exc
+        raise
     finally:
         release_connection(conn)
 
@@ -194,6 +297,11 @@ def update_sitemap_file(platform: str, file_url: str, md5_hash: str, app_count: 
                     updated_at = EXCLUDED.updated_at
             """, (platform, file_url, md5_hash, now, app_count, now))
         conn.commit()
+    except Exception as exc:
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("update_sitemap_file", exc)
+            raise DatabaseUnavailableError("Database unavailable during update_sitemap_file") from exc
+        raise
     finally:
         release_connection(conn)
 
@@ -217,6 +325,11 @@ def upsert_app_localization(platform: str, app_id: str, language: str, country: 
 
         conn.commit()
         return is_new
+    except Exception as exc:
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("upsert_app_localization", exc)
+            raise DatabaseUnavailableError("Database unavailable during upsert_app_localization") from exc
+        raise
     finally:
         release_connection(conn)
 
@@ -267,6 +380,13 @@ def upsert_app_localizations_batch(localizations: List[Dict[str, Any]]) -> int:
             inserted_rows = cursor.fetchall()
             new_count = sum(1 for row in inserted_rows if row['inserted'])
         conn.commit()
+    except Exception as exc:
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("upsert_app_localizations_batch", exc)
+            raise DatabaseUnavailableError(
+                "Database unavailable during upsert_app_localizations_batch"
+            ) from exc
+        raise
     finally:
         release_connection(conn)
 
@@ -294,6 +414,11 @@ def get_stats() -> Dict[str, Any]:
             # sitemap 파일 수
             cursor.execute("SELECT platform, COUNT(*) as count FROM sitemap_files GROUP BY platform")
             sitemap_counts = {row['platform']: row['count'] for row in cursor.fetchall()}
+    except Exception as exc:
+        if _is_db_unavailable_error(exc):
+            _raise_db_unavailable("get_stats", exc)
+            raise DatabaseUnavailableError("Database unavailable during get_stats") from exc
+        raise
     finally:
         release_connection(conn)
 
