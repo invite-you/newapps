@@ -2,6 +2,46 @@
 
 앱 스토어 및 플레이 스토어에서 앱 정보와 리뷰를 수집하는 파이프라인입니다.
 
+---
+
+## 빠른 시작 (서버 셋업 완료 후)
+
+서버 셋업이 완료된 상태에서 새 터미널 세션을 시작할 때 사용합니다.
+
+```bash
+# 1. 프로젝트 디렉토리로 이동
+cd ~/newapps/backend
+
+# 2. 가상환경 활성화
+source .venv/bin/activate
+
+# 3. 환경변수 로드
+set -a && source .env && set +a
+
+# 4. 작업 시작 (아래 중 선택)
+python -m pytest -v                      # 테스트 실행
+python collect_full_pipeline.py          # 단일 실행
+python collect_full_pipeline.py --daemon # 데몬 모드
+```
+
+**한 줄로 실행:**
+```bash
+cd ~/newapps/backend && source .venv/bin/activate && set -a && source .env && set +a
+```
+
+**서비스 상태 확인:**
+```bash
+sudo systemctl status collect-pipeline   # 서비스 상태
+sudo journalctl -u collect-pipeline -f   # 실시간 로그
+```
+
+**Git 업데이트:**
+```bash
+cd ~/newapps/backend && git pull origin main && source .venv/bin/activate && pip install -r requirements.txt
+```
+
+---
+
 ## 서버 이전 가이드
 
 ### 1. 시스템 요구사항
@@ -174,22 +214,50 @@ python collect_full_pipeline.py --daemon --interval 3600
 
 이 프로젝트는 Claude Code와 OpenAI Codex 모두에서 동일한 skills을 사용합니다.
 
+### 현재 등록된 Skills
+
+| 타입 | 이름 | 설명 | 적용 시점 |
+|------|------|------|-----------|
+| **Rules** | `coding-style` | Python 코딩 스타일 가이드 | 항상 자동 적용 |
+| **Rules** | `testing` | pytest 테스트 작성 규칙 | 항상 자동 적용 |
+| **Rules** | `security` | 보안 관련 규칙 (secrets, SQL injection 등) | 항상 자동 적용 |
+| **Agents** | `code-reviewer` | 코드 리뷰 에이전트 | Task 도구로 호출 |
+| **Agents** | `planner` | 구현 계획 작성 에이전트 | Task 도구로 호출 |
+| **Agents** | `build-error-resolver` | 빌드 에러 해결 에이전트 | Task 도구로 호출 |
+| **Skills** | `tdd-workflow` | TDD 워크플로우 | `/tdd-workflow`로 호출 |
+| **Skills** | `postgres-best-practices` | PostgreSQL 최적화 패턴 | `/postgres-best-practices`로 호출 |
+| **Skills** | `logging-best-practices` | 구조화된 로깅 패턴 | `/logging-best-practices`로 호출 |
+| **Skills** | `python-scraper-patterns` | 웹 스크래핑 베스트 프랙티스 | `/python-scraper-patterns`로 호출 |
+| **Skills** | `systematic-debugging` | 체계적 디버깅 방법론 | `/systematic-debugging`로 호출 |
+| **Skills** | `fastapi-backend` | FastAPI 백엔드 패턴 | `/fastapi-backend`로 호출 |
+
+### 타입별 차이점
+
+| 타입 | 위치 | 적용 방식 | 용도 |
+|------|------|-----------|------|
+| **Rules** | `.claude/rules/*.md` | 모든 대화에 자동 적용 | 코딩 스타일, 보안 규칙 등 |
+| **Agents** | `.claude/agents/*.md` | Task 도구의 subagent로 호출 | 특정 작업 수행 (리뷰, 계획 등) |
+| **Skills** | `.claude/skills/*/SKILL.md` | `/skill-name`으로 수동 호출 | 워크플로우, 베스트 프랙티스 |
+
 ### 디렉토리 구조
 
 ```
 .claude/                          # Claude Code 설정
-├── agents/                       # 에이전트 정의
+├── agents/                       # 에이전트 정의 (Task 도구로 호출)
 │   ├── code-reviewer.md
 │   ├── planner.md
 │   └── build-error-resolver.md
-├── rules/                        # 프로젝트 규칙
+├── rules/                        # 프로젝트 규칙 (항상 자동 적용)
 │   ├── coding-style.md
 │   ├── testing.md
 │   └── security.md
-├── skills/                       # Skills
+├── skills/                       # Skills (/명령어로 호출)
 │   ├── tdd-workflow/SKILL.md
 │   ├── postgres-best-practices/SKILL.md
-│   └── ...
+│   ├── logging-best-practices/SKILL.md
+│   ├── python-scraper-patterns/SKILL.md
+│   ├── systematic-debugging/SKILL.md
+│   └── fastapi-backend/SKILL.md
 ├── settings.json                 # 공유 설정 (git tracked)
 └── settings.local.json           # 로컬 설정 (git ignored)
 
@@ -197,11 +265,12 @@ python collect_full_pipeline.py --daemon --interval 3600
 └── skills/                       # 모든 설정이 skills로 통합됨
     ├── tdd-workflow/SKILL.md
     ├── postgres-best-practices/SKILL.md
-    ├── coding-style/SKILL.md     # .claude/rules/에서 복사
-    ├── testing/SKILL.md          # .claude/rules/에서 복사
-    ├── security/SKILL.md         # .claude/rules/에서 복사
-    ├── code-reviewer/SKILL.md    # .claude/agents/에서 복사
-    ├── planner/SKILL.md          # .claude/agents/에서 복사
+    ├── ... (skills)
+    ├── coding-style/SKILL.md     # .claude/rules/에서 변환
+    ├── testing/SKILL.md
+    ├── security/SKILL.md
+    ├── code-reviewer/SKILL.md    # .claude/agents/에서 변환
+    ├── planner/SKILL.md
     └── build-error-resolver/SKILL.md
 ```
 
@@ -287,60 +356,128 @@ chmod +x scripts/sync-skills.sh
 
 ### 새 Skill 추가 방법
 
-1. **Claude Code에 skill 추가:**
+#### 1. Rule 추가 (항상 자동 적용되는 규칙)
+
 ```bash
-# skills의 경우
-mkdir -p .claude/skills/my-new-skill
-cat > .claude/skills/my-new-skill/SKILL.md << 'EOF'
----
-name: my-new-skill
-description: Description of what this skill does
----
-
-# My New Skill
-
-Instructions here...
-EOF
-
-# rules의 경우
+# Rule 파일 생성 (frontmatter 불필요)
 cat > .claude/rules/my-new-rule.md << 'EOF'
 # My New Rule
 
-Rule content here...
+## 원칙
+- 규칙 1
+- 규칙 2
+
+## 예시
+```python
+# 좋은 예시
+def good_example():
+    pass
+```
 EOF
 
-# agents의 경우
+# Codex에 동기화
+./scripts/sync-skills.sh
+
+# 커밋
+git add .claude/rules/my-new-rule.md .codex/skills/my-new-rule/
+git commit -m "feat: add my-new-rule to rules"
+git push
+```
+
+#### 2. Agent 추가 (Task 도구로 호출되는 에이전트)
+
+```bash
+# Agent 파일 생성 (frontmatter 필요)
 cat > .claude/agents/my-new-agent.md << 'EOF'
 ---
 name: my-new-agent
-description: Description of the agent
+description: 에이전트가 하는 일 설명
+tools:
+  - Read
+  - Grep
+  - Glob
 ---
 
 # My New Agent
 
-Agent instructions here...
+이 에이전트는 특정 작업을 수행합니다.
+
+## 작업 절차
+1. 첫 번째 단계
+2. 두 번째 단계
+
+## 주의사항
+- 주의할 점
 EOF
-```
 
-2. **Codex에 동기화:**
-```bash
+# Codex에 동기화
 ./scripts/sync-skills.sh
+
+# 커밋
+git add .claude/agents/my-new-agent.md .codex/skills/my-new-agent/
+git commit -m "feat: add my-new-agent"
+git push
 ```
 
-3. **변경사항 커밋:**
+#### 3. Skill 추가 (/명령어로 호출되는 워크플로우)
+
 ```bash
-git add .claude/ .codex/
+# Skill 디렉토리 및 파일 생성
+mkdir -p .claude/skills/my-new-skill
+cat > .claude/skills/my-new-skill/SKILL.md << 'EOF'
+---
+name: my-new-skill
+description: 이 skill이 하는 일 설명
+---
+
+# My New Skill
+
+이 skill은 `/my-new-skill` 명령어로 호출됩니다.
+
+## 사용 시점
+- 이럴 때 사용
+
+## 워크플로우
+1. 첫 번째 단계
+2. 두 번째 단계
+3. 세 번째 단계
+
+## 체크리스트
+- [ ] 확인 항목 1
+- [ ] 확인 항목 2
+EOF
+
+# Codex에 동기화
+./scripts/sync-skills.sh
+
+# 커밋
+git add .claude/skills/my-new-skill/ .codex/skills/my-new-skill/
 git commit -m "feat: add my-new-skill"
+git push
+```
+
+### 동기화 및 커밋 (전체)
+
+```bash
+# 모든 skills 동기화
+./scripts/sync-skills.sh
+
+# 변경사항 확인
+git status
+
+# 전체 커밋
+git add .claude/ .codex/
+git commit -m "feat: update skills"
 git push
 ```
 
 ### 수동 동기화 (단일 파일)
 
 ```bash
-# skill 하나만 동기화
+# Skill 하나만 동기화
 cp -r .claude/skills/tdd-workflow/* .codex/skills/tdd-workflow/
 
-# rule을 skill로 변환
+# Rule을 Codex skill로 변환
 mkdir -p .codex/skills/coding-style
 cat > .codex/skills/coding-style/SKILL.md << EOF
 ---
@@ -350,6 +487,10 @@ description: Python coding style guide
 
 $(cat .claude/rules/coding-style.md)
 EOF
+
+# Agent를 Codex skill로 변환
+mkdir -p .codex/skills/code-reviewer
+cp .claude/agents/code-reviewer.md .codex/skills/code-reviewer/SKILL.md
 ```
 
 ---
