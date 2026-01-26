@@ -1,6 +1,13 @@
 """
 Play Store Reviews Collector
 google-play-scraper 라이브러리를 사용하여 앱 리뷰를 수집합니다.
+
+상태 추적 기능:
+- review_collection_status 테이블에 수집 상태 기록
+- 변경 감지 기반 증분 수집 지원
+
+Note: Play Store 수집은 google-play-scraper 라이브러리를 사용하므로
+      IP 로테이션은 직접 적용되지 않습니다 (라이브러리 내부에서 처리).
 """
 import sys
 import os
@@ -39,6 +46,19 @@ from scrapers.collection_utils import (
     collect_app_ids_from_cursor,
 )
 
+# 새로운 상태 추적 시스템 (선택적 사용)
+try:
+    from database.review_collection_db import (
+        record_collection_success as db_record_success,
+        record_collection_failure as db_record_failure,
+        should_collect_reviews,
+        CollectionMode,
+        ErrorCode,
+    )
+    NEW_STATUS_TRACKING_AVAILABLE = True
+except ImportError:
+    NEW_STATUS_TRACKING_AVAILABLE = False
+
 PLATFORM = 'play_store'
 REQUEST_DELAY = 0.01  # 10ms
 MAX_REVIEWS_TOTAL = int(os.getenv("APP_REVIEWS_MAX_PER_RUN", "50000"))  # 실행당 최대 수집 리뷰 수
@@ -48,7 +68,24 @@ REVIEW_LOG_RETENTION_DAYS = int(os.getenv("APP_REVIEWS_LOG_RETENTION_DAYS", "365
 
 class PlayStoreReviewsCollector:
     def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None,
-                 session_id: Optional[str] = None):
+                 session_id: Optional[str] = None,
+                 use_new_status_tracking: bool = True):
+        """
+        Play Store 리뷰 수집기 초기화
+
+        Args:
+            verbose: 상세 로그 출력 여부
+            error_tracker: 에러 추적기
+            session_id: 세션 ID (실패 관리용)
+            use_new_status_tracking: 새 상태 추적 시스템 사용 여부
+                True (기본값): review_collection_status 테이블에 상태 기록
+                False: 기존 방식만 사용
+
+        Note:
+            Play Store는 google-play-scraper 라이브러리를 사용하므로
+            IP 로테이션은 직접 적용되지 않습니다.
+            네트워크 바인딩만 적용됩니다.
+        """
         self.verbose = verbose
         self.run_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         collector_name = 'PlayStoreReviews'
@@ -61,10 +98,15 @@ class PlayStoreReviewsCollector:
         )
         configure_network_binding(logger=self.logger)
         self.error_tracker = error_tracker or ErrorTracker('play_store_reviews')
-        # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
         self.session_id = session_id or generate_session_id()
         self.locale_policy = LocalePairPolicy.from_env()
         self.error_policy = CollectionErrorPolicy()
+
+        # 새 상태 추적 시스템 사용 여부
+        self.use_new_status_tracking = use_new_status_tracking and NEW_STATUS_TRACKING_AVAILABLE
+        if self.use_new_status_tracking:
+            self.logger.info("[INFO] 새 상태 추적 시스템 사용")
+
         self.stats = {
             'apps_processed': 0,
             'apps_skipped': 0,
@@ -297,7 +339,7 @@ class PlayStoreReviewsCollector:
                 if hit_existing:
                     break
 
-        # 수집 상태 업데이트
+        # 수집 상태 업데이트 (기존 테이블)
         new_total = current_count + collected_total
         update_collection_status(
             app_id, PLATFORM,
@@ -307,6 +349,27 @@ class PlayStoreReviewsCollector:
                 initial_done or has_existing_reviews or collected_total > 0 or hit_existing_any
             )
         )
+
+        # 새 상태 추적 시스템 사용 시 review_collection_status 테이블에도 기록
+        if self.use_new_status_tracking and NEW_STATUS_TRACKING_AVAILABLE:
+            try:
+                # 스토어 리뷰 수 추정
+                store_review_count = new_total
+
+                # API 한계 도달 여부 판단
+                collection_limited = collected_total > 0 and len(pairs_with_more) > 0
+                limited_reason = "PAGINATION_LIMIT" if collection_limited else None
+
+                db_record_success(
+                    app_id=app_id,
+                    platform=PLATFORM,
+                    store_review_count=store_review_count,
+                    collected_count=collected_total,
+                    collection_limited=collection_limited,
+                    limited_reason=limited_reason,
+                )
+            except Exception as e:
+                self.logger.debug(f"새 상태 추적 기록 실패 (무시): {e}")
 
         self.stats['apps_processed'] += 1
 

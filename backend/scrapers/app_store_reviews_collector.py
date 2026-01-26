@@ -1,6 +1,11 @@
 """
 App Store Reviews Collector
 RSS를 통해 앱 리뷰를 수집합니다.
+
+IP 로테이션 및 상태 추적 기능:
+- core.review_collection_integration 모듈을 통해 IP 로테이션 지원
+- review_collection_status 테이블에 수집 상태 기록
+- 변경 감지 기반 증분 수집 지원
 """
 import sys
 import os
@@ -38,6 +43,25 @@ from scrapers.collection_utils import (
     collect_app_ids_from_cursor,
 )
 
+# 새로운 통합 모듈 (선택적 사용)
+try:
+    from core.review_collection_integration import (
+        ReviewCollectionContext,
+        get_review_collection_context,
+        map_http_error_to_db_error,
+    )
+    from core.http_client import HttpErrorCode
+    from database.review_collection_db import (
+        record_collection_success as db_record_success,
+        record_collection_failure as db_record_failure,
+        should_collect_reviews,
+        CollectionMode,
+        ErrorCode,
+    )
+    NEW_INTEGRATION_AVAILABLE = True
+except ImportError:
+    NEW_INTEGRATION_AVAILABLE = False
+
 PLATFORM = 'app_store'
 RSS_BASE_URL = 'https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json'
 REQUEST_DELAY = 0.01  # 10ms
@@ -48,7 +72,21 @@ REVIEW_LOG_RETENTION_DAYS = int(os.getenv("APP_REVIEWS_LOG_RETENTION_DAYS", "365
 
 class AppStoreReviewsCollector:
     def __init__(self, verbose: bool = True, error_tracker: Optional[ErrorTracker] = None,
-                 session_id: Optional[str] = None):
+                 session_id: Optional[str] = None,
+                 use_new_integration: bool = True,
+                 collection_context: Optional['ReviewCollectionContext'] = None):
+        """
+        App Store 리뷰 수집기 초기화
+
+        Args:
+            verbose: 상세 로그 출력 여부
+            error_tracker: 에러 추적기
+            session_id: 세션 ID (실패 관리용)
+            use_new_integration: 새 통합 시스템 사용 여부
+                True (기본값): IP 로테이션 및 상태 추적 사용
+                False: 기존 방식 사용 (하위 호환)
+            collection_context: 외부에서 전달받은 수집 컨텍스트 (공유용)
+        """
         self.verbose = verbose
         self.run_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         collector_name = 'AppStoreReviews'
@@ -59,12 +97,28 @@ class AppStoreReviewsCollector:
             cleanup_prefixes=[log_prefix],
             cleanup_max_age_days=REVIEW_LOG_RETENTION_DAYS,
         )
-        configure_network_binding(logger=self.logger)
         self.error_tracker = error_tracker or ErrorTracker('app_store_reviews')
-        # 세션 ID: 프로그램 실행 단위로 실패 관리에 사용
         self.session_id = session_id or generate_session_id()
         self.locale_policy = LocalePairPolicy.from_env()
         self.error_policy = CollectionErrorPolicy()
+
+        # 새 통합 시스템 사용 여부 결정
+        self.use_new_integration = use_new_integration and NEW_INTEGRATION_AVAILABLE
+        self.collection_context = collection_context
+
+        if self.use_new_integration:
+            # 새 통합 시스템 사용: IP 로테이션 및 상태 추적
+            if self.collection_context is None:
+                self.collection_context = get_review_collection_context(
+                    use_ip_rotation=True,
+                    auto_initialize=True
+                )
+            self.logger.info("[INFO] 새 통합 시스템 사용 (IP 로테이션 활성화)")
+        else:
+            # 기존 방식: 단일 IP 바인딩
+            configure_network_binding(logger=self.logger)
+            self.logger.info("[INFO] 기존 방식 사용 (단일 IP)")
+
         self.stats = {
             'apps_processed': 0,
             'apps_skipped': 0,
@@ -92,15 +146,45 @@ class AppStoreReviewsCollector:
         )
 
     def fetch_reviews_page(self, app_id: str, country: str, page: int) -> tuple:
-        """RSS에서 리뷰 페이지를 가져옵니다."""
+        """
+        RSS에서 리뷰 페이지를 가져옵니다.
+
+        새 통합 시스템 사용 시 IP 로테이션이 자동 적용됩니다.
+
+        Returns:
+            (reviews, error_reason) 튜플
+            - reviews: 리뷰 목록
+            - error_reason: 에러 원인 또는 None
+        """
         url = RSS_BASE_URL.format(country=country, page=page, app_id=app_id)
 
         try:
-            response = get_requests_session().get(url, timeout=REQUEST_TIMEOUT)
-            if response.status_code != 200:
-                return [], None
+            # 새 통합 시스템 사용 시 IP 로테이션 적용
+            if self.use_new_integration and self.collection_context:
+                result = self.collection_context.request(url, PLATFORM, parse_json=True)
 
-            data = response.json()
+                if not result.success:
+                    # 에러 코드에 따른 처리
+                    error_reason = self._map_http_error_to_reason(result.error_code)
+                    self.logger.debug(
+                        f"[FETCH] {app_id}/{country}/p{page} | "
+                        f"error={result.error_code} | ip={result.used_ip}"
+                    )
+                    return [], error_reason
+
+                data = result.data
+                self.logger.debug(
+                    f"[FETCH] {app_id}/{country}/p{page} | OK | ip={result.used_ip}"
+                )
+            else:
+                # 기존 방식: 단일 IP 사용
+                response = get_requests_session().get(url, timeout=REQUEST_TIMEOUT)
+                if response.status_code != 200:
+                    return [], None
+
+                data = response.json()
+
+            # 응답 파싱
             entries = data.get('feed', {}).get('entry', [])
 
             if isinstance(entries, dict):
@@ -123,6 +207,30 @@ class AppStoreReviewsCollector:
         except (requests.exceptions.RequestException, ValueError) as e:
             self.logger.warning(format_warning_log("fetch_error", f"app_id={app_id} country={country} page={page}", str(e)))
             return [], "network_error"
+
+    def _map_http_error_to_reason(self, error_code: str) -> str:
+        """
+        HTTP 에러 코드를 수집기 에러 사유로 변환합니다.
+
+        Args:
+            error_code: HttpErrorCode 상수
+
+        Returns:
+            에러 사유 문자열 (error_policy에서 사용)
+        """
+        if not NEW_INTEGRATION_AVAILABLE:
+            return "network_error"
+
+        # HttpErrorCode -> 기존 에러 사유 매핑
+        mapping = {
+            HttpErrorCode.IP_BLOCKED: "ip_blocked",
+            HttpErrorCode.RATE_LIMITED: "rate_limited",
+            HttpErrorCode.NETWORK_ERROR: "network_error",
+            HttpErrorCode.SERVER_ERROR: "server_error",
+            HttpErrorCode.PARSE_ERROR: "parse_error",
+            HttpErrorCode.NO_AVAILABLE_IP: "no_ip",
+        }
+        return mapping.get(error_code, "network_error")
 
     def parse_review(self, entry: Dict, app_id: str, country: str) -> Optional[Dict]:
         """RSS 엔트리를 리뷰 데이터로 변환합니다."""
@@ -301,7 +409,7 @@ class AppStoreReviewsCollector:
                 if hit_existing:
                     break
 
-        # 수집 상태 업데이트
+        # 수집 상태 업데이트 (기존 테이블)
         new_total = current_count + collected_total
         update_collection_status(
             app_id, PLATFORM,
@@ -311,6 +419,29 @@ class AppStoreReviewsCollector:
                 initial_done or has_existing_reviews or collected_total > 0 or hit_existing_any
             )
         )
+
+        # 새 상태 추적 시스템 사용 시 review_collection_status 테이블에도 기록
+        if self.use_new_integration and NEW_INTEGRATION_AVAILABLE:
+            try:
+                # 스토어 리뷰 수 추정 (실제로는 apps_metrics에서 가져와야 함)
+                # 여기서는 수집한 총 수를 임시로 사용
+                store_review_count = new_total
+
+                # API 한계 도달 여부 판단
+                # countries_with_more가 있으면 더 수집할 리뷰가 있는 것
+                collection_limited = collected_total > 0 and len(countries_with_more) > 0
+                limited_reason = "RSS_PAGE_LIMIT" if collection_limited else None
+
+                db_record_success(
+                    app_id=app_id,
+                    platform=PLATFORM,
+                    store_review_count=store_review_count,
+                    collected_count=collected_total,
+                    collection_limited=collection_limited,
+                    limited_reason=limited_reason,
+                )
+            except Exception as e:
+                self.logger.debug(f"새 상태 추적 기록 실패 (무시): {e}")
 
         self.stats['apps_processed'] += 1
 
