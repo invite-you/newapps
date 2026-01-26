@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Logs
+logs/
+*.log
+nohup.out
+nohup.out_bak
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Secrets
+gitkey
+*.pem
+*.key
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local settings (Claude Code)
+.claude/settings.local.json
+.claude/todos/
+
+# Project specific
+collect_full_pipeline.py.bak
