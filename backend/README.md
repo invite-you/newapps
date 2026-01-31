@@ -120,6 +120,12 @@ APP_DETAILS_DB_PORT=5432
 APP_DETAILS_DB_NAME=app_details
 APP_DETAILS_DB_USER=app_details
 APP_DETAILS_DB_PASSWORD=your_secure_password_here
+# Sitemap DB (별도 DB 사용 권장)
+SITEMAP_DB_HOST=localhost
+SITEMAP_DB_PORT=5432
+SITEMAP_DB_NAME=sitemap_apps
+SITEMAP_DB_USER=sitemap_apps
+SITEMAP_DB_PASSWORD=your_secure_password_here
 
 # Collection Settings (선택사항)
 APP_REVIEWS_MAX_PER_RUN=50000
@@ -142,13 +148,28 @@ sudo apt install postgresql postgresql-contrib
 sudo systemctl start postgresql
 sudo systemctl enable postgresql
 
-# 데이터베이스 및 사용자 생성
+# 데이터베이스 및 사용자 생성 (존재 여부 확인 후 생성)
 sudo -u postgres psql << 'EOF'
-CREATE USER app_details WITH PASSWORD 'your_secure_password_here';
-CREATE DATABASE app_details OWNER app_details;
-GRANT ALL PRIVILEGES ON DATABASE app_details TO app_details;
-\c app_details
+-- roles
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', 'app_details', 'your_secure_password_here')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_details') \gexec
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', 'sitemap_apps', 'your_secure_password_here')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sitemap_apps') \gexec
+
+-- databases
+SELECT format('CREATE DATABASE %I OWNER %I', 'app_details', 'app_details')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'app_details') \gexec
+SELECT format('CREATE DATABASE %I OWNER %I', 'sitemap_apps', 'sitemap_apps')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'sitemap_apps') \gexec
+EOF
+
+# 스키마 권한 부여
+sudo -u postgres psql -d app_details << 'EOF'
 GRANT ALL ON SCHEMA public TO app_details;
+EOF
+
+sudo -u postgres psql -d sitemap_apps << 'EOF'
+GRANT ALL ON SCHEMA public TO sitemap_apps;
 EOF
 ```
 
@@ -562,6 +583,7 @@ sudo systemctl status postgresql
 
 # 연결 테스트
 psql -h localhost -U app_details -d app_details -c "SELECT 1;"
+psql -h localhost -U sitemap_apps -d sitemap_apps -c "SELECT 1;"
 
 # pg_hba.conf 확인 (로컬 연결 허용)
 sudo cat /etc/postgresql/*/main/pg_hba.conf | grep -v "^#"

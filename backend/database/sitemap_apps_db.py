@@ -15,13 +15,33 @@ from psycopg.rows import dict_row
 from utils.logger import get_timestamped_logger
 from database.db_errors import DatabaseUnavailableError
 
+def _get_env_with_fallback(primary: str, fallback: str, default: str) -> str:
+    """환경 변수를 읽되, primary가 비어 있으면 fallback을 사용합니다."""
+    value = os.getenv(primary)
+    if value is not None and value != "":
+        return value
+    value = os.getenv(fallback)
+    if value is not None and value != "":
+        return value
+    return default
+
+
+def _get_int_env_with_fallback(primary: str, fallback: str, default: int) -> int:
+    """정수형 환경 변수를 읽되, primary가 비어 있으면 fallback을 사용합니다."""
+    raw = _get_env_with_fallback(primary, fallback, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 # psycopg DSN 참고: https://www.psycopg.org/psycopg3/docs/basic/usage.html
-DB_DSN = os.getenv("SITEMAP_DB_DSN")
-DB_HOST = os.getenv("SITEMAP_DB_HOST", "localhost")
-DB_PORT = int(os.getenv("SITEMAP_DB_PORT", "5432"))
-DB_NAME = os.getenv("SITEMAP_DB_NAME", "sitemap_apps")
-DB_USER = os.getenv("SITEMAP_DB_USER", "sitemap_apps")
-DB_PASSWORD = os.getenv("SITEMAP_DB_PASSWORD", "")
+DB_DSN = _get_env_with_fallback("SITEMAP_DB_DSN", "APP_DETAILS_DB_DSN", "")
+DB_HOST = _get_env_with_fallback("SITEMAP_DB_HOST", "APP_DETAILS_DB_HOST", "localhost")
+DB_PORT = _get_int_env_with_fallback("SITEMAP_DB_PORT", "APP_DETAILS_DB_PORT", 5432)
+DB_NAME = _get_env_with_fallback("SITEMAP_DB_NAME", "APP_DETAILS_DB_NAME", "sitemap_apps")
+DB_USER = _get_env_with_fallback("SITEMAP_DB_USER", "APP_DETAILS_DB_USER", "sitemap_apps")
+DB_PASSWORD = _get_env_with_fallback("SITEMAP_DB_PASSWORD", "APP_DETAILS_DB_PASSWORD", "")
 LOG_FILE_PREFIX = "sitemap_apps_db"
 DB_LOGGER = get_timestamped_logger("sitemap_apps_db", file_prefix=LOG_FILE_PREFIX)
 DB_CONNECT_MAX_RETRIES = int(os.getenv("SITEMAP_DB_CONNECT_MAX_RETRIES", "5"))
