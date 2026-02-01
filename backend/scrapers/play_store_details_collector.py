@@ -31,8 +31,8 @@ from scrapers.collection_utils import (
     select_primary_pair,
     LocalePairPolicy,
     CollectionErrorPolicy,
-    collect_app_ids_from_cursor,
 )
+from scrapers.sitemap_utils import is_valid_play_store_app_id
 from utils.logger import get_collection_logger, get_timestamped_logger, ProgressLogger, format_warning_log, format_error_log
 from utils.network_binding import configure_network_binding
 from utils.error_tracker import ErrorTracker, ErrorStep
@@ -354,7 +354,16 @@ def get_apps_to_collect(limit: Optional[int] = None, session_id: Optional[str] =
                 ORDER BY MAX(first_seen_at) DESC NULLS LAST, app_id ASC
             """)
 
-            result = collect_app_ids_from_cursor(cursor, exclude_ids, limit)
+            result = []
+            for row in cursor:
+                app_id = row["app_id"]
+                if not is_valid_play_store_app_id(app_id):
+                    continue
+                if app_id in exclude_ids:
+                    continue
+                result.append(app_id)
+                if limit is not None and len(result) >= limit:
+                    break
     finally:
         release_sitemap_connection(sitemap_conn)
     return result

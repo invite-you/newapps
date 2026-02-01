@@ -19,6 +19,7 @@ from utils.network_binding import get_requests_session
 
 # User-Agent 설정
 USER_AGENT = "Mozilla/5.0 (compatible; SitemapBot/1.0)"
+PLAY_STORE_APP_ID_REGEX = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$")
 REQUEST_TIMEOUT = 60
 LOG_FILE_PREFIX = "sitemap_utils"
 DEFAULT_LOGGER = get_timestamped_logger("sitemap_utils", file_prefix=LOG_FILE_PREFIX, level=logging.INFO)
@@ -218,7 +219,18 @@ def parse_hreflang(hreflang: str) -> Tuple[str, str]:
 
 def is_play_store_app_url(url: str) -> bool:
     """Play Store URL이 앱 URL인지 확인합니다 (book, movie 등 제외)."""
-    return '/store/apps/' in url
+    parsed = urlparse(url)
+    if not parsed.path.startswith('/store/apps/details'):
+        return False
+    params = parse_qs(parsed.query)
+    return bool(params.get('id'))
+
+
+def is_valid_play_store_app_id(app_id: str) -> bool:
+    """Play Store 앱 ID 형식이 유효한지 확인합니다."""
+    if not app_id:
+        return False
+    return bool(PLAY_STORE_APP_ID_REGEX.fullmatch(app_id))
 
 
 def get_filename_from_url(url: str) -> str:

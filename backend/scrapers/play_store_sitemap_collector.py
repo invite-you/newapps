@@ -15,7 +15,8 @@ from typing import List, Dict, Any, Tuple
 from scrapers.sitemap_utils import (
     fetch_url, fetch_and_hash, parse_sitemap_index, parse_sitemap_urlset,
     extract_play_store_app_id, parse_hreflang, get_filename_from_url,
-    is_play_store_app_url, filter_best_country_per_language, log_sitemap_step_end
+    is_play_store_app_url, is_valid_play_store_app_id, filter_best_country_per_language,
+    log_sitemap_step_end
 )
 from database.sitemap_apps_db import (
     get_sitemap_file_hash, update_sitemap_file, upsert_app_localizations_batch
@@ -47,6 +48,7 @@ class PlayStoreSitemapCollector:
             'raw_localizations': 0,  # 필터링 전 원본 수
             'filtered_out': 0,       # 필터링으로 제외된 수
             'skipped_non_apps': 0,
+            'skipped_invalid_app_ids': 0,
             'errors': 0
         }
 
@@ -119,6 +121,7 @@ class PlayStoreSitemapCollector:
         # 1단계: 모든 로컬라이제이션 정보 추출 (필터링 전)
         raw_localizations = []
         skipped = 0
+        invalid_app_ids = 0
 
         for entry in url_entries:
             for hreflang_info in entry.get('hreflangs', []):
@@ -137,6 +140,9 @@ class PlayStoreSitemapCollector:
                 app_id = extract_play_store_app_id(href)
                 if not app_id:
                     continue
+                if not is_valid_play_store_app_id(app_id):
+                    invalid_app_ids += 1
+                    continue
 
                 # hreflang 파싱
                 language, country = parse_hreflang(hreflang)
@@ -152,6 +158,7 @@ class PlayStoreSitemapCollector:
                 })
 
         self.stats['skipped_non_apps'] += skipped
+        self.stats['skipped_invalid_app_ids'] += invalid_app_ids
 
         # 2단계: 언어당 최적 국가 1개만 필터링
         localizations = filter_best_country_per_language(raw_localizations)
